@@ -90,7 +90,7 @@
     "mutationobserver-shim": "^0.3.7",
     "prettier": "^2.5.1",
     "react-scripts": "5.0.0",
-    "sinon": "^12.0.1",
+    "sinon": "^13.0.1",
     "typescript": "^4.6.2"
   },
   "proxy": "http://localhost:9090",
