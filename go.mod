@@ -57,12 +57,12 @@ require (
 	github.com/shurcooL/httpfs v0.0.0-20190707220628-8d4bc4ba7749
 	github.com/stretchr/testify v1.7.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.31.0
-	go.opentelemetry.io/otel v1.7.0
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.6.1
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.6.1
+	go.opentelemetry.io/otel v1.10.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.10.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.10.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.6.1
-	go.opentelemetry.io/otel/sdk v1.6.1
-	go.opentelemetry.io/otel/trace v1.7.0
+	go.opentelemetry.io/otel/sdk v1.10.0
+	go.opentelemetry.io/otel/trace v1.10.0
 	go.uber.org/atomic v1.9.0
 	go.uber.org/automaxprocs v1.5.1
 	go.uber.org/goleak v1.1.12
@@ -74,7 +74,7 @@ require (
 	golang.org/x/tools v0.1.10
 	google.golang.org/api v0.77.0
 	google.golang.org/genproto v0.0.0-20220414192740-2d67ff6cf2b4
-	google.golang.org/grpc v1.46.0
+	google.golang.org/grpc v1.46.2
 	google.golang.org/protobuf v1.28.0
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
 	gopkg.in/yaml.v2 v2.4.0
