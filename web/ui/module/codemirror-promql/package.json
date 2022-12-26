@@ -38,7 +38,7 @@
     "@codemirror/lint": "^6.0.0",
     "@codemirror/state": "^6.1.1",
     "@codemirror/view": "^6.4.0",
-    "@lezer/common": "^1.0.1",
+    "@lezer/common": "^1.0.2",
     "@lezer/lr": "^1.2.3",
     "@lezer/highlight": "^1.1.2",
     "@types/lru-cache": "^5.1.1",
@@ -51,7 +51,7 @@
     "@codemirror/lint": "^6.0.0",
     "@codemirror/state": "^6.1.1",
     "@codemirror/view": "^6.4.0",
-    "@lezer/common": "^1.0.1"
+    "@lezer/common": "^1.0.2"
   },
   "prettier": {
     "singleQuote": true,
