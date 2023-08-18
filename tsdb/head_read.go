@@ -83,7 +83,8 @@ func (h *headIndexReader) LabelValues(name string, matchers ...*labels.Matcher) 
 		return h.head.postings.LabelValues(name), nil
 	}
 
-	return labelValuesWithMatchers(h, name, matchers...)
+	values := h.head.postings.LabelValues(name, matchers...)
+	return labelValuesWithMatchers(values, h, name, matchers...)
 }
 
 // LabelNames returns all the unique label names present in the head

@@ -166,7 +166,8 @@ func (oh *OOOHeadIndexReader) LabelValues(name string, matchers ...*labels.Match
 		return oh.head.postings.LabelValues(name), nil
 	}
 
-	return labelValuesWithMatchers(oh, name, matchers...)
+	values := oh.head.postings.LabelValues(name, matchers...)
+	return labelValuesWithMatchers(values, oh, name, matchers...)
 }
 
 type chunkMetaAndChunkDiskMapperRef struct {

@@ -1465,11 +1465,14 @@ func (r *Reader) SortedLabelValues(name string, matchers ...*labels.Matcher) ([]
 // LabelValues returns value tuples that exist for the given label name.
 // It is not safe to use the return value beyond the lifetime of the byte slice
 // passed into the Reader.
-// TODO(replay): Support filtering by matchers
 func (r *Reader) LabelValues(name string, matchers ...*labels.Matcher) ([]string, error) {
-	if len(matchers) > 0 {
-		return nil, errors.Errorf("matchers parameter is not implemented: %+v", matchers)
+	filteredMatchers := make([]*labels.Matcher, 0, len(matchers))
+	for _, m := range matchers {
+		if m.Name == name {
+			filteredMatchers = append(filteredMatchers, m)
+		}
 	}
+	matchers = filteredMatchers
 
 	if r.version == FormatV1 {
 		e, ok := r.postingsV1[name]
@@ -1478,11 +1481,22 @@ func (r *Reader) LabelValues(name string, matchers ...*labels.Matcher) ([]string
 		}
 		values := make([]string, 0, len(e))
 		for k := range e {
-			values = append(values, k)
+			isMatch := true
+			for _, m := range matchers {
+				if !m.Matches(k) {
+					isMatch = false
+					break
+				}
+			}
+
+			if isMatch {
+				values = append(values, k)
+			}
 		}
 		return values, nil
 
 	}
+
 	e, ok := r.postings[name]
 	if !ok {
 		return nil, nil
@@ -1490,7 +1504,8 @@ func (r *Reader) LabelValues(name string, matchers ...*labels.Matcher) ([]string
 	if len(e) == 0 {
 		return nil, nil
 	}
-	values := make([]string, 0, len(e)*symbolFactor)
+
+	var values []string
 
 	d := encoding.NewDecbufAt(r.b, int(r.toc.PostingsTable), nil)
 	d.Skip(e[0].off)
@@ -1509,7 +1524,19 @@ func (r *Reader) LabelValues(name string, matchers ...*labels.Matcher) ([]string
 			d.Skip(skip)
 		}
 		s := yoloString(d.UvarintBytes()) // Label value.
-		values = append(values, s)
+
+		isMatch := true
+		// Try to exclude via matchers for the label name
+		for _, m := range matchers {
+			if m.Name == name && !m.Matches(s) {
+				isMatch = false
+				break
+			}
+		}
+
+		if isMatch {
+			values = append(values, s)
+		}
 		if s == lastVal {
 			break
 		}

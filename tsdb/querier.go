@@ -248,6 +248,8 @@ func PostingsForMatchers(ix IndexReader, ms ...*labels.Matcher) (index.Postings,
 	for _, m := range ms {
 		switch {
 		case m.Name == "" && m.Value == "": // Special-case for AllPostings, used in tests at least.
+			// Should be irrelevant for LabelValues, since it doesn't reduce the set and will act as an
+			// all-pass for the set from LabelValues
 			k, v := index.AllPostingsKey()
 			allPostings, err := ix.Postings(k, v)
 			if err != nil {
@@ -260,8 +262,8 @@ func PostingsForMatchers(ix IndexReader, ms ...*labels.Matcher) (index.Postings,
 			isNot := m.Type == labels.MatchNotEqual || m.Type == labels.MatchNotRegexp
 			switch {
 			case isNot && matchesEmpty: // l!="foo"
-				// If the label can't be empty and is a Not and the inner matcher
-				// doesn't match empty, then subtract it out at the end.
+				// Optimize by only finding postings matching l="foo", and subtracting them at the end.
+				// Can do this since we know that l must be non-empty.
 				inverse, err := m.Inverse()
 				if err != nil {
 					return nil, err
@@ -273,7 +275,11 @@ func PostingsForMatchers(ix IndexReader, ms ...*labels.Matcher) (index.Postings,
 				}
 				notIts = append(notIts, it)
 			case isNot && !matchesEmpty: // l!=""
-				// If the label can't be empty and is a Not, but the inner matcher can
+				// The label can't be empty, this matcher is negated and doesn't match empty.
+				// The matcher gets inversed (l==""), inverse postings for the matcher are found,
+				// and added to the intersection.
+
+				// If the label can't be empty and this matcher is a Not, but the inner matcher can
 				// be empty we need to use inversePostingsForMatcher.
 				inverse, err := m.Inverse()
 				if err != nil {
@@ -300,7 +306,7 @@ func PostingsForMatchers(ix IndexReader, ms ...*labels.Matcher) (index.Postings,
 				its = append(its, it)
 			}
 		default: // l=""
-			// If the matchers for a labelname selects an empty value, it selects all
+			// If a matcher for a labelname selects an empty value, it selects all
 			// the series which don't have the label name set too. See:
 			// https://github.com/prometheus/prometheus/issues/3575 and
 			// https://github.com/prometheus/prometheus/pull/3578#issuecomment-351653555
@@ -404,38 +410,14 @@ func inversePostingsForMatcher(ix IndexReader, m *labels.Matcher) (index.Posting
 	return ix.Postings(m.Name, res...)
 }
 
-func labelValuesWithMatchers(r IndexReader, name string, matchers ...*labels.Matcher) ([]string, error) {
+func labelValuesWithMatchers(values []string, r IndexReader, name string, matchers ...*labels.Matcher) ([]string, error) {
 	p, err := PostingsForMatchers(r, matchers...)
 	if err != nil {
 		return nil, errors.Wrap(err, "fetching postings for matchers")
 	}
 
-	allValues, err := r.LabelValues(name)
-	if err != nil {
-		return nil, errors.Wrapf(err, "fetching values of label %s", name)
-	}
-
-	// If we have a matcher for the label name, we can filter out values that don't match
-	// before we fetch postings. This is especially useful for labels with many values.
-	// e.g. __name__ with a selector like {__name__="xyz"}
-	for _, m := range matchers {
-		if m.Name != name {
-			continue
-		}
-
-		// re-use the allValues slice to avoid allocations
-		// this is safe because the iteration is always ahead of the append
-		filteredValues := allValues[:0]
-		for _, v := range allValues {
-			if m.Matches(v) {
-				filteredValues = append(filteredValues, v)
-			}
-		}
-		allValues = filteredValues
-	}
-
-	valuesPostings := make([]index.Postings, len(allValues))
-	for i, value := range allValues {
+	valuesPostings := make([]index.Postings, len(values))
+	for i, value := range values {
 		valuesPostings[i], err = r.Postings(name, value)
 		if err != nil {
 			return nil, errors.Wrapf(err, "fetching postings for %s=%q", name, value)
@@ -446,12 +428,12 @@ func labelValuesWithMatchers(r IndexReader, name string, matchers ...*labels.Mat
 		return nil, errors.Wrap(err, "intersecting postings")
 	}
 
-	values := make([]string, 0, len(indexes))
+	res := make([]string, 0, len(indexes))
 	for _, idx := range indexes {
-		values = append(values, allValues[idx])
+		res = append(res, values[idx])
 	}
 
-	return values, nil
+	return res, nil
 }
 
 func labelNamesWithMatchers(r IndexReader, matchers ...*labels.Matcher) ([]string, error) {

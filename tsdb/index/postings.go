@@ -135,13 +135,24 @@ func (p *MemPostings) LabelNames() []string {
 }
 
 // LabelValues returns label values for the given name.
-func (p *MemPostings) LabelValues(name string) []string {
+func (p *MemPostings) LabelValues(name string, matchers ...*labels.Matcher) []string {
 	p.mtx.RLock()
 	defer p.mtx.RUnlock()
 
 	values := make([]string, 0, len(p.m[name]))
 	for v := range p.m[name] {
-		values = append(values, v)
+		isMatch := true
+		// Try to exclude this value through corresponding matchers
+		for _, m := range matchers {
+			if m.Name == name && !m.Matches(v) {
+				isMatch = false
+				break
+			}
+		}
+
+		if isMatch {
+			values = append(values, v)
+		}
 	}
 	return values
 }
@@ -479,6 +490,11 @@ func (it *intersectPostings) At() storage.SeriesRef {
 func (it *intersectPostings) doNext() bool {
 Loop:
 	for {
+		// Iterate over postings iterators.
+		// For each iteration, move the current iterator till its value is >= it.cur, or return false if unable to.
+		// If the current iterator's value is greater than it.cur, assign it to it.cur and continue the outer loop.
+		// After this loop successfully finishes, all iterators have the same value (i.e. there's an intersection)
+		// and true is returned.
 		for _, p := range it.arr {
 			if !p.Seek(it.cur) {
 				return false
@@ -493,6 +509,9 @@ Loop:
 }
 
 func (it *intersectPostings) Next() bool {
+	// Iterate over postings iterators and call Next on them
+	// If one of them returns false, return false
+	// Pick the maximum among them
 	for _, p := range it.arr {
 		if !p.Next() {
 			return false
@@ -857,12 +876,19 @@ func FindIntersectingPostings(p Postings, candidates []Postings) (indexes []int,
 	}
 	heap.Init(&h)
 
+	// Keep picking the minimum posting from the heap
+	// until either the heap is empty or no more of the
+	// heap can be found in p
+	// The indices for accepted postings are appended to the indexes slice, which gets returned
 	for !h.empty() {
 		if !p.Seek(h.at()) {
+			// No more of the heap can be found in p
 			return indexes, p.Err()
 		}
 		if p.At() == h.at() {
+			// h.at() is among the matched postings
 			indexes = append(indexes, h.popIndex())
+			// If h.at() is not among the matched postings, pop the heap
 		} else if err := h.next(); err != nil {
 			return nil, err
 		}

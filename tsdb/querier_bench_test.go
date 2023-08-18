@@ -205,7 +205,9 @@ func benchmarkLabelValuesWithMatchers(b *testing.B, ir IndexReader) {
 	for _, c := range cases {
 		b.Run(c.name, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				_, err := labelValuesWithMatchers(ir, c.labelName, c.matchers...)
+				values, err := ir.LabelValues(c.labelName, c.matchers...)
+				require.NoError(b, err)
+				_, err = labelValuesWithMatchers(values, ir, c.labelName, c.matchers...)
 				require.NoError(b, err)
 			}
 		})
