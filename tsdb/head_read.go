@@ -83,8 +83,7 @@ func (h *headIndexReader) LabelValues(name string, matchers ...*labels.Matcher) 
 		return h.head.postings.LabelValues(name), nil
 	}
 
-	values := h.head.postings.LabelValues(name, matchers...)
-	return labelValuesWithMatchers(values, h, name, matchers...)
+	return labelValuesWithMatchers(h, name, matchers...)
 }
 
 // LabelNames returns all the unique label names present in the head
@@ -119,6 +118,10 @@ func (h *headIndexReader) Postings(name string, values ...string) (index.Posting
 		}
 		return index.Merge(res...), nil
 	}
+}
+
+func (h *headIndexReader) PostingsWithLabel(name string) (index.Postings, error) {
+	return h.head.postings.GetWithLabel(name), nil
 }
 
 func (h *headIndexReader) SortedPostings(p index.Postings) index.Postings {

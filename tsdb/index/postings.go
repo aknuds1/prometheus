@@ -227,6 +227,18 @@ func (p *MemPostings) Get(name, value string) Postings {
 	return newListPostings(lp...)
 }
 
+// GetWithLabel returns a postings list for the given label name.
+func (p *MemPostings) GetWithLabel(name string) Postings {
+	p.mtx.RLock()
+	var ps []Postings
+	for _, srs := range p.m[name] {
+		ps = append(ps, newListPostings(srs...))
+	}
+	p.mtx.RUnlock()
+
+	return Merge(ps...)
+}
+
 // All returns a postings list over all documents ever added.
 func (p *MemPostings) All() Postings {
 	return p.Get(AllPostingsKey())

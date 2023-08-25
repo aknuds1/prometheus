@@ -166,8 +166,7 @@ func (oh *OOOHeadIndexReader) LabelValues(name string, matchers ...*labels.Match
 		return oh.head.postings.LabelValues(name), nil
 	}
 
-	values := oh.head.postings.LabelValues(name, matchers...)
-	return labelValuesWithMatchers(values, oh, name, matchers...)
+	return labelValuesWithMatchers(oh, name, matchers...)
 }
 
 type chunkMetaAndChunkDiskMapperRef struct {
@@ -205,6 +204,10 @@ func (oh *OOOHeadIndexReader) Postings(name string, values ...string) (index.Pos
 		}
 		return index.Merge(res...), nil
 	}
+}
+
+func (oh *OOOHeadIndexReader) PostingsWithLabel(name string) (index.Postings, error) {
+	return oh.head.postings.GetWithLabel(name), nil
 }
 
 type OOOHeadChunkReader struct {
@@ -403,6 +406,10 @@ func (ir *OOOCompactionHeadIndexReader) Postings(name string, values ...string) 
 		return nil, errors.New("only AllPostingsKey is supported")
 	}
 	return index.NewListPostings(ir.ch.postings), nil
+}
+
+func (ir *OOOCompactionHeadIndexReader) PostingsWithLabel(name string) (index.Postings, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (ir *OOOCompactionHeadIndexReader) SortedPostings(p index.Postings) index.Postings {

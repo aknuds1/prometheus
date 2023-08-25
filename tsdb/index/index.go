@@ -1505,7 +1505,7 @@ func (r *Reader) LabelValues(name string, matchers ...*labels.Matcher) ([]string
 		return nil, nil
 	}
 
-	var values []string
+	values := make([]string, 0, len(e)*symbolFactor)
 
 	d := encoding.NewDecbufAt(r.b, int(r.toc.PostingsTable), nil)
 	d.Skip(e[0].off)
@@ -1655,8 +1655,8 @@ func (r *Reader) Postings(name string, values ...string) (Postings, error) {
 		return Merge(res...), nil
 	}
 
-	e, ok := r.postings[name]
-	if !ok {
+	e := r.postings[name]
+	if len(e) == 0 {
 		return EmptyPostings(), nil
 	}
 
@@ -1728,6 +1728,56 @@ func (r *Reader) Postings(name string, values ...string) (Postings, error) {
 		if d.Err() != nil {
 			return nil, errors.Wrap(d.Err(), "get postings offset entry")
 		}
+	}
+
+	return Merge(res...), nil
+}
+
+func (r *Reader) PostingsWithLabel(name string) (Postings, error) {
+	if r.version == FormatV1 {
+		panic("not implemented")
+	}
+
+	e := r.postings[name]
+	if len(e) == 0 {
+		return EmptyPostings(), nil
+	}
+
+	d := encoding.NewDecbufAt(r.b, int(r.toc.PostingsTable), nil)
+	// Skip to start
+	d.Skip(e[0].off)
+	lastVal := e[len(e)-1].value
+
+	skip := 0
+	var res []Postings
+	for d.Err() == nil {
+		if skip == 0 {
+			// These are always the same number of bytes,
+			// and it's faster to skip than parse.
+			skip = d.Len()
+			d.Uvarint()      // Keycount.
+			d.UvarintBytes() // Label name.
+			skip -= d.Len()
+		} else {
+			d.Skip(skip)
+		}
+		v := yoloString(d.UvarintBytes()) // Label value.
+
+		postingsOff := d.Uvarint64()
+		// Read from the postings table
+		d2 := encoding.NewDecbufAt(r.b, int(postingsOff), castagnoliTable)
+		_, p, err := r.dec.Postings(d2.Get())
+		if err != nil {
+			return nil, errors.Wrap(err, "decode postings")
+		}
+		res = append(res, p)
+
+		if v == lastVal {
+			break
+		}
+	}
+	if d.Err() != nil {
+		return nil, errors.Wrap(d.Err(), "get postings offset entry")
 	}
 
 	return Merge(res...), nil

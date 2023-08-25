@@ -21,6 +21,7 @@ import (
 
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
+	"golang.org/x/exp/maps"
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
@@ -256,6 +257,16 @@ func PostingsForMatchers(ix IndexReader, ms ...*labels.Matcher) (index.Postings,
 				return nil, err
 			}
 			its = append(its, allPostings)
+		case m.Type == labels.MatchSet:
+			// This is the special case of a label that must be set for the posting
+			it, err := ix.PostingsWithLabel(m.Name)
+			if err != nil {
+				return nil, err
+			}
+			if index.IsEmptyPostingsType(it) {
+				return index.EmptyPostings(), nil
+			}
+			its = append(its, it)
 		case labelMustBeSet[m.Name]:
 			// If this matcher must be non-empty, we can be smarter.
 			matchesEmpty := m.Matches("")
@@ -410,30 +421,23 @@ func inversePostingsForMatcher(ix IndexReader, m *labels.Matcher) (index.Posting
 	return ix.Postings(m.Name, res...)
 }
 
-func labelValuesWithMatchers(values []string, r IndexReader, name string, matchers ...*labels.Matcher) ([]string, error) {
+func labelValuesWithMatchers(r IndexReader, name string, matchers ...*labels.Matcher) ([]string, error) {
+	matchers = append(matchers, labels.MustNewMatcher(labels.MatchSet, name, ""))
 	p, err := PostingsForMatchers(r, matchers...)
 	if err != nil {
 		return nil, errors.Wrap(err, "fetching postings for matchers")
 	}
 
-	valuesPostings := make([]index.Postings, len(values))
-	for i, value := range values {
-		valuesPostings[i], err = r.Postings(name, value)
+	values := map[string]struct{}{}
+	for p.Next() {
+		v, err := r.LabelValueFor(p.At(), name)
 		if err != nil {
-			return nil, errors.Wrapf(err, "fetching postings for %s=%q", name, value)
+			return nil, errors.Wrapf(err, "getting value for label %s from series %d", name, p.At())
 		}
-	}
-	indexes, err := index.FindIntersectingPostings(p, valuesPostings)
-	if err != nil {
-		return nil, errors.Wrap(err, "intersecting postings")
+		values[v] = struct{}{}
 	}
 
-	res := make([]string, 0, len(indexes))
-	for _, idx := range indexes {
-		res = append(res, values[idx])
-	}
-
-	return res, nil
+	return maps.Keys(values), nil
 }
 
 func labelNamesWithMatchers(r IndexReader, matchers ...*labels.Matcher) ([]string, error) {

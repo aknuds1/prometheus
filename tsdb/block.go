@@ -75,6 +75,8 @@ type IndexReader interface {
 	// during background garbage collections.
 	Postings(name string, values ...string) (index.Postings, error)
 
+	PostingsWithLabel(name string) (index.Postings, error)
+
 	// SortedPostings returns a postings list that is reordered to be sorted
 	// by the label set of the underlying series.
 	SortedPostings(index.Postings) index.Postings
@@ -476,11 +478,11 @@ func (r blockIndexReader) LabelValues(name string, matchers ...*labels.Matcher) 
 		return st, errors.Wrapf(err, "block: %s", r.b.Meta().ULID)
 	}
 
-	values, err := r.ir.LabelValues(name, matchers...)
-	if err != nil {
-		return nil, errors.Wrapf(err, "block: %s", r.b.Meta().ULID)
-	}
-	return labelValuesWithMatchers(values, r.ir, name, matchers...)
+	return labelValuesWithMatchers(r.ir, name, matchers...)
+}
+
+func (r blockIndexReader) PostingsWithLabel(name string) (index.Postings, error) {
+	return r.ir.PostingsWithLabel(name)
 }
 
 func (r blockIndexReader) LabelNames(matchers ...*labels.Matcher) ([]string, error) {
