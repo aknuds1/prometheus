@@ -13,7 +13,7 @@ require (
 	github.com/aws/aws-sdk-go v1.44.317
 	github.com/cespare/xxhash/v2 v2.2.0
 	github.com/dennwc/varint v1.0.0
-	github.com/digitalocean/godo v1.99.0
+	github.com/digitalocean/godo v1.102.1
 	github.com/docker/docker v24.0.4+incompatible
 	github.com/edsrzf/mmap-go v1.1.0
 	github.com/envoyproxy/go-control-plane v0.11.1
