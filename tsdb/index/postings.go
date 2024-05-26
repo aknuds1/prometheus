@@ -56,14 +56,14 @@ var ensureOrderBatchPool = sync.Pool{
 // unordered batch fills on startup.
 type MemPostings struct {
 	mtx     sync.RWMutex
-	m       map[string]*swiss.Map[string, []storage.SeriesRef]
+	m       *swiss.Map[string, *swiss.Map[string, []storage.SeriesRef]]
 	ordered bool
 }
 
 // NewMemPostings returns a memPostings that's ready for reads and writes.
 func NewMemPostings() *MemPostings {
 	return &MemPostings{
-		m:       make(map[string]*swiss.Map[string, []storage.SeriesRef], 512),
+		m:       swiss.NewMap[string, *swiss.Map[string, []storage.SeriesRef]](512),
 		ordered: true,
 	}
 }
@@ -72,7 +72,7 @@ func NewMemPostings() *MemPostings {
 // until EnsureOrder() was called once.
 func NewUnorderedMemPostings() *MemPostings {
 	return &MemPostings{
-		m:       make(map[string]*swiss.Map[string, []storage.SeriesRef], 512),
+		m:       swiss.NewMap[string, *swiss.Map[string, []storage.SeriesRef]](512),
 		ordered: false,
 	}
 }
@@ -83,13 +83,15 @@ func (p *MemPostings) Symbols() StringIter {
 
 	// Add all the strings to a map to de-duplicate.
 	symbols := make(map[string]struct{}, 512)
-	for n, e := range p.m {
+	p.m.Iter(func(n string, e *swiss.Map[string, []storage.SeriesRef]) bool {
 		symbols[n] = struct{}{}
 		e.Iter(func(v string, _ []storage.SeriesRef) bool {
 			symbols[v] = struct{}{}
 			return false
 		})
-	}
+
+		return false
+	})
 	p.mtx.RUnlock()
 
 	res := make([]string, 0, len(symbols))
@@ -104,14 +106,15 @@ func (p *MemPostings) Symbols() StringIter {
 // SortedKeys returns a list of sorted label keys of the postings.
 func (p *MemPostings) SortedKeys() []labels.Label {
 	p.mtx.RLock()
-	keys := make([]labels.Label, 0, len(p.m))
+	keys := make([]labels.Label, 0, p.m.Count())
 
-	for n, e := range p.m {
+	p.m.Iter(func(n string, e *swiss.Map[string, []storage.SeriesRef]) bool {
 		e.Iter(func(v string, _ []storage.SeriesRef) bool {
 			keys = append(keys, labels.Label{Name: n, Value: v})
 			return false
 		})
-	}
+		return false
+	})
 	p.mtx.RUnlock()
 
 	slices.SortFunc(keys, func(a, b labels.Label) int {
@@ -130,17 +133,18 @@ func (p *MemPostings) SortedKeys() []labels.Label {
 func (p *MemPostings) LabelNames() []string {
 	p.mtx.RLock()
 	defer p.mtx.RUnlock()
-	n := len(p.m)
+	n := p.m.Count()
 	if n == 0 {
 		return nil
 	}
 
 	names := make([]string, 0, n-1)
-	for name := range p.m {
+	p.m.Iter(func(name string, _ *swiss.Map[string, []storage.SeriesRef]) bool {
 		if name != allPostingsKey.Name {
 			names = append(names, name)
 		}
-	}
+		return false
+	})
 	return names
 }
 
@@ -149,7 +153,7 @@ func (p *MemPostings) LabelValues(_ context.Context, name string) []string {
 	p.mtx.RLock()
 	defer p.mtx.RUnlock()
 
-	e := p.m[name]
+	e, _ := p.m.Get(name)
 	if e == nil || e.Count() == 0 {
 		return nil
 	}
@@ -187,9 +191,9 @@ func (p *MemPostings) Stats(label string, limit int) *PostingsStats {
 	labelValueLength.init(limit)
 	labelValuePairs.init(limit)
 
-	for n, e := range p.m {
+	p.m.Iter(func(n string, e *swiss.Map[string, []storage.SeriesRef]) bool {
 		if n == "" {
-			continue
+			return false
 		}
 		labels.push(Stat{Name: n, Count: uint64(e.Count())})
 		numLabelPairs += e.Count()
@@ -204,7 +208,9 @@ func (p *MemPostings) Stats(label string, limit int) *PostingsStats {
 			return false
 		})
 		labelValueLength.push(Stat{Name: n, Count: size})
-	}
+
+		return false
+	})
 
 	p.mtx.RUnlock()
 
@@ -221,7 +227,7 @@ func (p *MemPostings) Stats(label string, limit int) *PostingsStats {
 func (p *MemPostings) Get(name, value string) Postings {
 	var lp []storage.SeriesRef
 	p.mtx.RLock()
-	l := p.m[name]
+	l, _ := p.m.Get(name)
 	if l != nil {
 		lp, _ = l.Get(value)
 	}
@@ -275,7 +281,7 @@ func (p *MemPostings) EnsureOrder(numberOfConcurrentProcesses int) {
 	}
 
 	nextJob := ensureOrderBatchPool.Get().(*[][]storage.SeriesRef)
-	for _, e := range p.m {
+	p.m.Iter(func(_ string, e *swiss.Map[string, []storage.SeriesRef]) bool {
 		e.Iter(func(_ string, l []storage.SeriesRef) bool {
 			*nextJob = append(*nextJob, l)
 
@@ -286,7 +292,8 @@ func (p *MemPostings) EnsureOrder(numberOfConcurrentProcesses int) {
 
 			return false
 		})
-	}
+		return false
+	})
 
 	// If the last job was partially filled, we need to push it to workers too.
 	if len(*nextJob) > 0 {
@@ -306,15 +313,17 @@ func (p *MemPostings) Delete(deleted map[storage.SeriesRef]struct{}) {
 	// Collect all keys relevant for deletion once. New keys added afterwards
 	// can by definition not be affected by any of the given deletes.
 	p.mtx.RLock()
-	for n := range p.m {
+	p.m.Iter(func(n string, _ *swiss.Map[string, []storage.SeriesRef]) bool {
 		keys = append(keys, n)
-	}
+		return false
+	})
 	p.mtx.RUnlock()
 
 	for _, n := range keys {
 		p.mtx.RLock()
 		vals = vals[:0]
-		p.m[n].Iter(func(v string, _ []storage.SeriesRef) bool {
+		e, _ := p.m.Get(n)
+		e.Iter(func(v string, _ []storage.SeriesRef) bool {
 			vals = append(vals, v)
 			return false
 		})
@@ -327,7 +336,7 @@ func (p *MemPostings) Delete(deleted map[storage.SeriesRef]struct{}) {
 			p.mtx.Lock()
 
 			found := false
-			srs, _ := p.m[n].Get(l)
+			srs, _ := e.Get(l)
 			for _, id := range srs {
 				if _, ok := deleted[id]; ok {
 					found = true
@@ -346,15 +355,15 @@ func (p *MemPostings) Delete(deleted map[storage.SeriesRef]struct{}) {
 				}
 			}
 			if len(repl) > 0 {
-				p.m[n].Put(l, repl)
+				e.Put(l, repl)
 			} else {
-				p.m[n].Delete(l)
+				e.Delete(l)
 			}
 			p.mtx.Unlock()
 		}
 		p.mtx.Lock()
-		if p.m[n].Count() == 0 {
-			delete(p.m, n)
+		if e.Count() == 0 {
+			p.m.Delete(n)
 		}
 		p.mtx.Unlock()
 	}
@@ -365,17 +374,15 @@ func (p *MemPostings) Iter(f func(labels.Label, Postings) error) error {
 	p.mtx.RLock()
 	defer p.mtx.RUnlock()
 
-	for n, e := range p.m {
-		var err error
+	var err error
+	p.m.Iter(func(n string, e *swiss.Map[string, []storage.SeriesRef]) bool {
 		e.Iter(func(v string, p []storage.SeriesRef) bool {
 			err = f(labels.Label{Name: n, Value: v}, newListPostings(p...))
 			return err != nil
 		})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+		return err != nil
+	})
+	return err
 }
 
 // Add a label set to the postings index.
@@ -391,10 +398,10 @@ func (p *MemPostings) Add(id storage.SeriesRef, lset labels.Labels) {
 }
 
 func (p *MemPostings) addFor(id storage.SeriesRef, l labels.Label) {
-	nm, ok := p.m[l.Name]
+	nm, ok := p.m.Get(l.Name)
 	if !ok {
 		nm = swiss.NewMap[string, []storage.SeriesRef](0)
-		p.m[l.Name] = nm
+		p.m.Put(l.Name, nm)
 	}
 	list, _ := nm.Get(l.Value)
 	list = append(list, id)
@@ -418,7 +425,7 @@ func (p *MemPostings) addFor(id storage.SeriesRef, l labels.Label) {
 func (p *MemPostings) PostingsForLabelMatching(ctx context.Context, name string, match func(string) bool) Postings {
 	p.mtx.RLock()
 
-	e := p.m[name]
+	e, _ := p.m.Get(name)
 	if e == nil || e.Count() == 0 {
 		p.mtx.RUnlock()
 		return EmptyPostings()
