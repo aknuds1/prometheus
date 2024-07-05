@@ -489,6 +489,10 @@ func (ir *OOOCompactionHeadIndexReader) LabelNames(context.Context, ...*labels.M
 	return nil, errors.New("not implemented")
 }
 
+func (ir *OOOCompactionHeadIndexReader) InfoMetricDataLabels(context.Context, labels.Labels, int64, index.InfoMetricSampleQuerier, ...*labels.Matcher) (labels.Labels, annotations.Annotations, error) {
+	return labels.Labels{}, nil, errors.New("not implemented")
+}
+
 func (ir *OOOCompactionHeadIndexReader) LabelValueFor(context.Context, storage.SeriesRef, string) (string, error) {
 	return "", errors.New("not implemented")
 }
