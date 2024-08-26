@@ -24,6 +24,7 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
@@ -775,6 +776,10 @@ func (p *populateWithDelSeriesIterator) AtT() int64 {
 	return p.curr.AtT()
 }
 
+func (p *populateWithDelSeriesIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	return p.curr.AtSeriesMetadata()
+}
+
 func (p *populateWithDelSeriesIterator) Err() error {
 	if err := p.populateWithDelGenericSeriesIterator.Err(); err != nil {
 		return err
@@ -880,7 +885,8 @@ func (p *populateWithDelChunkSeriesIterator) populateCurrForSingleChunk() bool {
 			}
 			var h *histogram.Histogram
 			t, h = p.currDelIter.AtHistogram(nil)
-			_, _, app, err = app.AppendHistogram(nil, t, h, true)
+			seriesMeta := p.currDelIter.AtSeriesMetadata()
+			_, _, app, err = app.AppendHistogram(nil, t, h, seriesMeta, true)
 			if err != nil {
 				break
 			}
@@ -897,7 +903,8 @@ func (p *populateWithDelChunkSeriesIterator) populateCurrForSingleChunk() bool {
 			}
 			var v float64
 			t, v = p.currDelIter.At()
-			app.Append(t, v)
+			seriesMeta := p.currDelIter.AtSeriesMetadata()
+			app.Append(t, v, seriesMeta)
 		}
 	case chunkenc.ValFloatHistogram:
 		newChunk = chunkenc.NewFloatHistogramChunk()
@@ -911,7 +918,8 @@ func (p *populateWithDelChunkSeriesIterator) populateCurrForSingleChunk() bool {
 			}
 			var h *histogram.FloatHistogram
 			t, h = p.currDelIter.AtFloatHistogram(nil)
-			_, _, app, err = app.AppendFloatHistogram(nil, t, h, true)
+			seriesMeta := p.currDelIter.AtSeriesMetadata()
+			_, _, app, err = app.AppendFloatHistogram(nil, t, h, seriesMeta, true)
 			if err != nil {
 				break
 			}
@@ -991,23 +999,26 @@ func (p *populateWithDelChunkSeriesIterator) populateChunksFromIterable() bool {
 			{
 				var v float64
 				t, v = p.currDelIter.At()
-				app.Append(t, v)
+				seriesMeta := p.currDelIter.AtSeriesMetadata()
+				app.Append(t, v, seriesMeta)
 			}
 		case chunkenc.ValHistogram:
 			{
 				var v *histogram.Histogram
 				t, v = p.currDelIter.AtHistogram(nil)
+				seriesMeta := p.currDelIter.AtSeriesMetadata()
 				// No need to set prevApp as AppendHistogram will set the
 				// counter reset header for the appender that's returned.
-				newChunk, recoded, app, err = app.AppendHistogram(nil, t, v, false)
+				newChunk, recoded, app, err = app.AppendHistogram(nil, t, v, seriesMeta, false)
 			}
 		case chunkenc.ValFloatHistogram:
 			{
 				var v *histogram.FloatHistogram
 				t, v = p.currDelIter.AtFloatHistogram(nil)
+				seriesMeta := p.currDelIter.AtSeriesMetadata()
 				// No need to set prevApp as AppendHistogram will set the
 				// counter reset header for the appender that's returned.
-				newChunk, recoded, app, err = app.AppendFloatHistogram(nil, t, v, false)
+				newChunk, recoded, app, err = app.AppendFloatHistogram(nil, t, v, seriesMeta, false)
 			}
 		}
 
@@ -1187,6 +1198,10 @@ func (it *DeletedIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int64
 
 func (it *DeletedIterator) AtT() int64 {
 	return it.Iter.AtT()
+}
+
+func (it *DeletedIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	return it.Iter.AtSeriesMetadata()
 }
 
 func (it *DeletedIterator) Seek(t int64) chunkenc.ValueType {

@@ -31,6 +31,7 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/prompb"
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	"github.com/prometheus/prometheus/storage"
@@ -498,6 +499,11 @@ func (c *concreteSeriesIterator) AtT() int64 {
 		return c.series.histograms[c.histogramsCur].Timestamp
 	}
 	return c.series.floats[c.floatsCur].Timestamp
+}
+
+func (c *concreteSeriesIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	// TODO.
+	return nil
 }
 
 const noTS = int64(math.MaxInt64)

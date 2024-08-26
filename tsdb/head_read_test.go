@@ -33,7 +33,7 @@ func TestMemSeries_chunk(t *testing.T) {
 
 	appendSamples := func(t *testing.T, s *memSeries, start, end int64, cdm *chunks.ChunkDiskMapper) {
 		for i := start; i < end; i += chunkStep {
-			ok, _ := s.append(i, float64(i), 0, chunkOpts{
+			ok, _ := s.append(i, float64(i), nil, 0, chunkOpts{
 				chunkDiskMapper: cdm,
 				chunkRange:      chunkRange,
 				samplesPerChunk: DefaultSamplesPerChunk,
@@ -421,7 +421,7 @@ func TestHeadIndexReader_PostingsForLabelMatching(t *testing.T) {
 		})
 		app := h.Appender(context.Background())
 		for _, s := range series {
-			app.Append(0, s, 0, 0)
+			app.Append(0, s, 0, 0, nil)
 		}
 		require.NoError(t, app.Commit())
 

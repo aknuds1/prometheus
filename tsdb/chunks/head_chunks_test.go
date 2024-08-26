@@ -559,7 +559,7 @@ func randomChunk(t *testing.T) chunkenc.Chunk {
 	app, err := chunk.Appender()
 	require.NoError(t, err)
 	for i := 0; i < length; i++ {
-		app.Append(rand.Int63(), rand.Float64())
+		app.Append(rand.Int63(), rand.Float64(), nil)
 	}
 	return chunk
 }

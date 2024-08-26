@@ -19,6 +19,7 @@ import (
 	"math"
 
 	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/model/value"
 )
 
@@ -214,7 +215,7 @@ func (a *FloatHistogramAppender) NumSamples() int {
 
 // Append implements Appender. This implementation panics because normal float
 // samples must never be appended to a histogram chunk.
-func (a *FloatHistogramAppender) Append(int64, float64) {
+func (a *FloatHistogramAppender) Append(int64, float64, []metadata.SeriesMetadata) {
 	panic("appended a float sample to a histogram chunk")
 }
 
@@ -727,11 +728,11 @@ func (a *FloatHistogramAppender) recodeHistogram(
 	}
 }
 
-func (a *FloatHistogramAppender) AppendHistogram(*HistogramAppender, int64, *histogram.Histogram, bool) (Chunk, bool, Appender, error) {
+func (a *FloatHistogramAppender) AppendHistogram(*HistogramAppender, int64, *histogram.Histogram, []metadata.SeriesMetadata, bool) (Chunk, bool, Appender, error) {
 	panic("appended a histogram sample to a float histogram chunk")
 }
 
-func (a *FloatHistogramAppender) AppendFloatHistogram(prev *FloatHistogramAppender, t int64, h *histogram.FloatHistogram, appendOnly bool) (Chunk, bool, Appender, error) {
+func (a *FloatHistogramAppender) AppendFloatHistogram(prev *FloatHistogramAppender, t int64, h *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata, appendOnly bool) (Chunk, bool, Appender, error) {
 	if a.NumSamples() == 0 {
 		a.appendFloatHistogram(t, h)
 		if h.CounterResetHint == histogram.GaugeType {
@@ -953,6 +954,11 @@ func (it *floatHistogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram)
 
 func (it *floatHistogramIterator) AtT() int64 {
 	return it.t
+}
+
+func (it *floatHistogramIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	// TODO.
+	return nil
 }
 
 func (it *floatHistogramIterator) Err() error {

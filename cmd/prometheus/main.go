@@ -1587,7 +1587,7 @@ func (s *readyStorage) Appender(ctx context.Context) storage.Appender {
 
 type notReadyAppender struct{}
 
-func (n notReadyAppender) Append(ref storage.SeriesRef, l labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
+func (n notReadyAppender) Append(ref storage.SeriesRef, l labels.Labels, t int64, v float64, seriesMeta []metadata.SeriesMetadata) (storage.SeriesRef, error) {
 	return 0, tsdb.ErrNotReady
 }
 
@@ -1595,7 +1595,7 @@ func (n notReadyAppender) AppendExemplar(ref storage.SeriesRef, l labels.Labels,
 	return 0, tsdb.ErrNotReady
 }
 
-func (n notReadyAppender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
+func (n notReadyAppender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata) (storage.SeriesRef, error) {
 	return 0, tsdb.ErrNotReady
 }
 

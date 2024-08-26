@@ -49,6 +49,7 @@ import (
 	"math/bits"
 
 	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/model/metadata"
 )
 
 const (
@@ -156,7 +157,7 @@ type xorAppender struct {
 	trailing uint8
 }
 
-func (a *xorAppender) Append(t int64, v float64) {
+func (a *xorAppender) Append(t int64, v float64, seriesMeta []metadata.SeriesMetadata) {
 	var tDelta uint64
 	num := binary.BigEndian.Uint16(a.b.bytes())
 	switch num {
@@ -223,11 +224,11 @@ func (a *xorAppender) writeVDelta(v float64) {
 	xorWrite(a.b, v, a.v, &a.leading, &a.trailing)
 }
 
-func (a *xorAppender) AppendHistogram(*HistogramAppender, int64, *histogram.Histogram, bool) (Chunk, bool, Appender, error) {
+func (a *xorAppender) AppendHistogram(*HistogramAppender, int64, *histogram.Histogram, []metadata.SeriesMetadata, bool) (Chunk, bool, Appender, error) {
 	panic("appended a histogram sample to a float chunk")
 }
 
-func (a *xorAppender) AppendFloatHistogram(*FloatHistogramAppender, int64, *histogram.FloatHistogram, bool) (Chunk, bool, Appender, error) {
+func (a *xorAppender) AppendFloatHistogram(*FloatHistogramAppender, int64, *histogram.FloatHistogram, []metadata.SeriesMetadata, bool) (Chunk, bool, Appender, error) {
 	panic("appended a float histogram sample to a float chunk")
 }
 
@@ -273,6 +274,11 @@ func (it *xorIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64, *hist
 
 func (it *xorIterator) AtT() int64 {
 	return it.t
+}
+
+func (it *xorIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	// TODO.
+	return nil
 }
 
 func (it *xorIterator) Err() error {

@@ -139,7 +139,7 @@ func createIdxChkReaders(t *testing.T, tc []seriesSamples) (IndexReader, ChunkRe
 				app, _ := chunk.Appender()
 				for _, smpl := range chk {
 					require.NotNil(t, smpl.fh, "chunk can only contain one type of sample")
-					_, _, _, err := app.AppendFloatHistogram(nil, smpl.t, smpl.fh, true)
+					_, _, _, err := app.AppendFloatHistogram(nil, smpl.t, smpl.fh, nil, true)
 					require.NoError(t, err, "chunk should be appendable")
 				}
 				chkReader[chunkRef] = chunk
@@ -148,7 +148,7 @@ func createIdxChkReaders(t *testing.T, tc []seriesSamples) (IndexReader, ChunkRe
 				app, _ := chunk.Appender()
 				for _, smpl := range chk {
 					require.NotNil(t, smpl.h, "chunk can only contain one type of sample")
-					_, _, _, err := app.AppendHistogram(nil, smpl.t, smpl.h, true)
+					_, _, _, err := app.AppendHistogram(nil, smpl.t, smpl.h, nil, true)
 					require.NoError(t, err, "chunk should be appendable")
 				}
 				chkReader[chunkRef] = chunk
@@ -158,7 +158,7 @@ func createIdxChkReaders(t *testing.T, tc []seriesSamples) (IndexReader, ChunkRe
 				for _, smpl := range chk {
 					require.Nil(t, smpl.h, "chunk can only contain one type of sample")
 					require.Nil(t, smpl.fh, "chunk can only contain one type of sample")
-					app.Append(smpl.t, smpl.f)
+					app.Append(smpl.t, smpl.f, nil)
 				}
 				chkReader[chunkRef] = chunk
 			}
@@ -316,7 +316,7 @@ func TestBlockQuerier(t *testing.T) {
 			ms:   []*labels.Matcher{labels.MustNewMatcher(labels.MatchRegexp, "a", ".*")},
 			exp: newMockSeriesSet([]storage.Series{
 				storage.NewListSeries(labels.FromStrings("a", "a"),
-					[]chunks.Sample{sample{1, 2, nil, nil}, sample{2, 3, nil, nil}, sample{3, 4, nil, nil}, sample{5, 2, nil, nil}, sample{6, 3, nil, nil}, sample{7, 4, nil, nil}},
+					[]chunks.Sample{sample{1, 2, nil, nil, nil}, sample{2, 3, nil, nil}, sample{3, 4, nil, nil}, sample{5, 2, nil, nil}, sample{6, 3, nil, nil}, sample{7, 4, nil, nil}},
 				),
 				storage.NewListSeries(labels.FromStrings("a", "a", "b", "b"),
 					[]chunks.Sample{sample{1, 1, nil, nil}, sample{2, 2, nil, nil}, sample{3, 3, nil, nil}, sample{5, 3, nil, nil}, sample{6, 6, nil, nil}},
@@ -572,22 +572,22 @@ var testData = []seriesSamples{
 	{
 		lset: map[string]string{"a": "a"},
 		chunks: [][]sample{
-			{{1, 2, nil, nil}, {2, 3, nil, nil}, {3, 4, nil, nil}},
-			{{5, 2, nil, nil}, {6, 3, nil, nil}, {7, 4, nil, nil}},
+			{{1, 2, nil, nil, nil}, {2, 3, nil, nil, nil}, {3, 4, nil, nil, nil}},
+			{{5, 2, nil, nil, nil}, {6, 3, nil, nil, nil}, {7, 4, nil, nil, nil}},
 		},
 	},
 	{
 		lset: map[string]string{"a": "a", "b": "b"},
 		chunks: [][]sample{
-			{{1, 1, nil, nil}, {2, 2, nil, nil}, {3, 3, nil, nil}},
-			{{5, 3, nil, nil}, {6, 6, nil, nil}},
+			{{1, 1, nil, nil, nil}, {2, 2, nil, nil, nil}, {3, 3, nil, nil, nil}},
+			{{5, 3, nil, nil, nil}, {6, 6, nil, nil, nil}},
 		},
 	},
 	{
 		lset: map[string]string{"b": "b"},
 		chunks: [][]sample{
-			{{1, 3, nil, nil}, {2, 2, nil, nil}, {3, 6, nil, nil}},
-			{{5, 1, nil, nil}, {6, 7, nil, nil}, {7, 2, nil, nil}},
+			{{1, 3, nil, nil, nil}, {2, 2, nil, nil, nil}, {3, 6, nil, nil, nil}},
+			{{5, 1, nil, nil, nil}, {6, 7, nil, nil, nil}, {7, 2, nil, nil, nil}},
 		},
 	},
 }

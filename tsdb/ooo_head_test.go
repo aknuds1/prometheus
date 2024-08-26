@@ -31,7 +31,7 @@ const testMaxSize int = 32
 func valEven(pos int) int { return pos*2 + 2 } // s[0]=2, s[1]=4, s[2]=6, ..., s[31]=64 - Predictable pre-existing values
 func valOdd(pos int) int  { return pos*2 + 1 } // s[0]=1, s[1]=3, s[2]=5, ..., s[31]=63 - New values will interject at chosen position because they sort before the pre-existing vals.
 
-func samplify(v int) sample { return sample{int64(v), float64(v), nil, nil} }
+func samplify(v int) sample { return sample{int64(v), float64(v), nil, nil, nil} }
 
 func makeEvenSampleSlice(n int) []sample {
 	s := make([]sample, n)
@@ -58,7 +58,7 @@ func TestOOOInsert(t *testing.T) {
 			chunk := NewOOOChunk()
 			chunk.samples = makeEvenSampleSlice(numPreExisting)
 			newSample := samplify(valOdd(insertPos))
-			chunk.Insert(newSample.t, newSample.f, nil, nil)
+			chunk.Insert(newSample.t, newSample.f, nil, nil, nil)
 
 			var expSamples []sample
 			// Our expected new samples slice, will be first the original samples.
@@ -89,7 +89,7 @@ func TestOOOInsertDuplicate(t *testing.T) {
 			dupSample := chunk.samples[dupPos]
 			dupSample.f = 0.123
 
-			ok := chunk.Insert(dupSample.t, dupSample.f, nil, nil)
+			ok := chunk.Insert(dupSample.t, dupSample.f, nil, nil, nil)
 
 			expSamples := makeEvenSampleSlice(num) // We expect no change.
 			require.False(t, ok)
@@ -174,11 +174,11 @@ func TestOOOChunks_ToEncodedChunks(t *testing.T) {
 			for _, s := range tc.samples {
 				switch s.Type() {
 				case chunkenc.ValFloat:
-					oooChunk.Insert(s.t, s.f, nil, nil)
+					oooChunk.Insert(s.t, s.f, nil, nil, nil)
 				case chunkenc.ValHistogram:
-					oooChunk.Insert(s.t, 0, s.h.Copy(), nil)
+					oooChunk.Insert(s.t, 0, s.h.Copy(), nil, nil)
 				case chunkenc.ValFloatHistogram:
-					oooChunk.Insert(s.t, 0, nil, s.fh.Copy())
+					oooChunk.Insert(s.t, 0, nil, s.fh.Copy(), nil)
 				default:
 					t.Fatalf("unexpected sample type %d", s.Type())
 				}

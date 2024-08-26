@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/prompb"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/tsdbutil"
 )
@@ -352,6 +353,10 @@ func (m *mockSeriesIterator) AtT() int64 {
 	return 0 // Not really mocked.
 }
 
+func (m *mockSeriesIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	return nil // Not really mocked.
+}
+
 type fakeSeriesIterator struct {
 	nsamples int64
 	step     int64
@@ -376,6 +381,10 @@ func (it *fakeSeriesIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64
 
 func (it *fakeSeriesIterator) AtT() int64 {
 	return it.idx * it.step
+}
+
+func (m *fakeSeriesIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	return nil // Not really mocked.
 }
 
 func (it *fakeSeriesIterator) Next() chunkenc.ValueType {

@@ -127,6 +127,16 @@ message TimeSeries {
   repeated Sample samples       = 2 [(gogoproto.nullable) = false];
   repeated Exemplar exemplars   = 3 [(gogoproto.nullable) = false];
   repeated Histogram histograms = 4 [(gogoproto.nullable) = false];
+    // A list of metadata for the associated series.
+  // When receiving an OTLP write request, every series will have a set of metadata key/value pairs representing resource attributes.
+  // Therefore these must be represented as a set of SeriesMetadata key/value pairs, with namespace otel/resource attributes.
+  repeated SeriesMetadata seriesMetadata = 5;
+}
+
+message SeriesMetadata {
+  string namespace = 1;
+  string key = 2;
+  string value = 3;
 }
 
 message Label {

@@ -21,3 +21,9 @@ type Metadata struct {
 	Unit string           `json:"unit"`
 	Help string           `json:"help"`
 }
+
+type SeriesMetadata struct {
+	Namespace string
+	Key       string
+	Value     string
+}

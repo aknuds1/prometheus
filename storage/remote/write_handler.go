@@ -34,6 +34,7 @@ import (
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/prompb"
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
@@ -250,7 +251,16 @@ func (h *writeHandler) write(ctx context.Context, req *prompb.WriteRequest) (err
 			continue
 		}
 
-		if err := h.appendV1Samples(app, ts.Samples, ls); err != nil {
+		sms := make([]metadata.SeriesMetadata, 0, len(ts.SeriesMetadata))
+		for _, sm := range ts.SeriesMetadata {
+			sms = append(sms, metadata.SeriesMetadata{
+				Namespace: sm.Namespace,
+				Key:       sm.Key,
+				Value:     sm.Value,
+			})
+		}
+
+		if err := h.appendV1Samples(app, ts.Samples, sms, ls); err != nil {
 			return err
 		}
 		samplesAppended += len(ts.Samples)
@@ -269,7 +279,7 @@ func (h *writeHandler) write(ctx context.Context, req *prompb.WriteRequest) (err
 			}
 		}
 
-		if err = h.appendV1Histograms(app, ts.Histograms, ls); err != nil {
+		if err = h.appendV1Histograms(app, ts.Histograms, sms, ls); err != nil {
 			return err
 		}
 		samplesAppended += len(ts.Histograms)
@@ -284,11 +294,11 @@ func (h *writeHandler) write(ctx context.Context, req *prompb.WriteRequest) (err
 	return nil
 }
 
-func (h *writeHandler) appendV1Samples(app storage.Appender, ss []prompb.Sample, labels labels.Labels) error {
+func (h *writeHandler) appendV1Samples(app storage.Appender, ss []prompb.Sample, seriesMeta []metadata.SeriesMetadata, labels labels.Labels) error {
 	var ref storage.SeriesRef
 	var err error
 	for _, s := range ss {
-		ref, err = app.Append(ref, labels, s.GetTimestamp(), s.GetValue())
+		ref, err = app.Append(ref, labels, s.GetTimestamp(), s.GetValue(), seriesMeta)
 		if err != nil {
 			if errors.Is(err, storage.ErrOutOfOrderSample) ||
 				errors.Is(err, storage.ErrOutOfBounds) ||
@@ -301,13 +311,13 @@ func (h *writeHandler) appendV1Samples(app storage.Appender, ss []prompb.Sample,
 	return nil
 }
 
-func (h *writeHandler) appendV1Histograms(app storage.Appender, hh []prompb.Histogram, labels labels.Labels) error {
+func (h *writeHandler) appendV1Histograms(app storage.Appender, hh []prompb.Histogram, seriesMeta []metadata.SeriesMetadata, labels labels.Labels) error {
 	var err error
 	for _, hp := range hh {
 		if hp.IsFloatHistogram() {
-			_, err = app.AppendHistogram(0, labels, hp.Timestamp, nil, hp.ToFloatHistogram())
+			_, err = app.AppendHistogram(0, labels, hp.Timestamp, nil, hp.ToFloatHistogram(), seriesMeta)
 		} else {
-			_, err = app.AppendHistogram(0, labels, hp.Timestamp, hp.ToIntHistogram(), nil)
+			_, err = app.AppendHistogram(0, labels, hp.Timestamp, hp.ToIntHistogram(), nil, seriesMeta)
 		}
 		if err != nil {
 			// Although AppendHistogram does not currently return ErrDuplicateSampleForTimestamp there is
@@ -396,7 +406,7 @@ func (h *writeHandler) appendV2(app storage.Appender, req *writev2.Request, rs *
 
 		// Samples.
 		for _, s := range ts.Samples {
-			ref, err = app.Append(ref, ls, s.GetTimestamp(), s.GetValue())
+			ref, err = app.Append(ref, ls, s.GetTimestamp(), s.GetValue(), nil)
 			if err == nil {
 				rs.Samples++
 				continue
@@ -417,9 +427,9 @@ func (h *writeHandler) appendV2(app storage.Appender, req *writev2.Request, rs *
 		// Native Histograms.
 		for _, hp := range ts.Histograms {
 			if hp.IsFloatHistogram() {
-				ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, nil, hp.ToFloatHistogram())
+				ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, nil, hp.ToFloatHistogram(), nil)
 			} else {
-				ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, hp.ToIntHistogram(), nil)
+				ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, hp.ToIntHistogram(), nil, nil)
 			}
 			if err == nil {
 				rs.Histograms++
@@ -549,24 +559,24 @@ type timeLimitAppender struct {
 	maxTime int64
 }
 
-func (app *timeLimitAppender) Append(ref storage.SeriesRef, lset labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
+func (app *timeLimitAppender) Append(ref storage.SeriesRef, lset labels.Labels, t int64, v float64, seriesMeta []metadata.SeriesMetadata) (storage.SeriesRef, error) {
 	if t > app.maxTime {
 		return 0, fmt.Errorf("%w: timestamp is too far in the future", storage.ErrOutOfBounds)
 	}
 
-	ref, err := app.Appender.Append(ref, lset, t, v)
+	ref, err := app.Appender.Append(ref, lset, t, v, seriesMeta)
 	if err != nil {
 		return 0, err
 	}
 	return ref, nil
 }
 
-func (app *timeLimitAppender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
+func (app *timeLimitAppender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata) (storage.SeriesRef, error) {
 	if t > app.maxTime {
 		return 0, fmt.Errorf("%w: timestamp is too far in the future", storage.ErrOutOfBounds)
 	}
 
-	ref, err := app.Appender.AppendHistogram(ref, l, t, h, fh)
+	ref, err := app.Appender.AppendHistogram(ref, l, t, h, fh, seriesMeta)
 	if err != nil {
 		return 0, err
 	}

@@ -24,6 +24,7 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/encoding"
@@ -150,9 +151,10 @@ type RefSeries struct {
 // RefSample is a timestamp/value pair associated with a reference to a series.
 // TODO(beorn7): Perhaps make this "polymorphic", including histogram and float-histogram pointers? Then get rid of RefHistogramSample.
 type RefSample struct {
-	Ref chunks.HeadSeriesRef
-	T   int64
-	V   float64
+	Ref            chunks.HeadSeriesRef
+	T              int64
+	V              float64
+	SeriesMetadata []metadata.SeriesMetadata
 }
 
 // RefMetadata is the metadata associated with a series ID.
@@ -173,16 +175,18 @@ type RefExemplar struct {
 
 // RefHistogramSample is a histogram.
 type RefHistogramSample struct {
-	Ref chunks.HeadSeriesRef
-	T   int64
-	H   *histogram.Histogram
+	Ref        chunks.HeadSeriesRef
+	T          int64
+	H          *histogram.Histogram
+	SeriesMeta []metadata.SeriesMetadata
 }
 
 // RefFloatHistogramSample is a float histogram.
 type RefFloatHistogramSample struct {
-	Ref chunks.HeadSeriesRef
-	T   int64
-	FH  *histogram.FloatHistogram
+	Ref        chunks.HeadSeriesRef
+	T          int64
+	FH         *histogram.FloatHistogram
+	SeriesMeta []metadata.SeriesMetadata
 }
 
 // RefMmapMarker marks that the all the samples of the given series until now have been m-mapped to disk.

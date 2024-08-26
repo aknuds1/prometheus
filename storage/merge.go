@@ -24,6 +24,7 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
@@ -589,6 +590,13 @@ func (c *chainSampleIterator) AtT() int64 {
 		panic("chainSampleIterator.AtT called before first .Next or after .Next returned false.")
 	}
 	return c.curr.AtT()
+}
+
+func (c *chainSampleIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	if c.curr == nil {
+		panic("chainSampleIterator.AtSeriesMetadata called before first .Next or after .Next returned false.")
+	}
+	return c.curr.AtSeriesMetadata()
 }
 
 func (c *chainSampleIterator) Next() chunkenc.ValueType {

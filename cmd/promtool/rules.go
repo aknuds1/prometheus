@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/storage"
@@ -166,7 +167,8 @@ func (importer *ruleImporter) importRule(ctx context.Context, ruleExpr, ruleName
 				lbls := lb.Labels()
 
 				for _, value := range sample.Values {
-					if err := app.add(ctx, lbls, timestamp.FromTime(value.Timestamp.Time()), float64(value.Value)); err != nil {
+					// TODO: Series metadata?
+					if err := app.add(ctx, lbls, timestamp.FromTime(value.Timestamp.Time()), float64(value.Value), nil); err != nil {
 						return fmt.Errorf("add: %w", err)
 					}
 				}
@@ -202,8 +204,8 @@ type multipleAppender struct {
 	appender           storage.Appender
 }
 
-func (m *multipleAppender) add(ctx context.Context, l labels.Labels, t int64, v float64) error {
-	if _, err := m.appender.Append(0, l, t, v); err != nil {
+func (m *multipleAppender) add(ctx context.Context, l labels.Labels, t int64, v float64, seriesMeta []metadata.SeriesMetadata) error {
+	if _, err := m.appender.Append(0, l, t, v, seriesMeta); err != nil {
 		return fmt.Errorf("multiappender append: %w", err)
 	}
 	m.currentSampleCount++

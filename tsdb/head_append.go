@@ -42,14 +42,14 @@ type initAppender struct {
 
 var _ storage.GetRef = &initAppender{}
 
-func (a *initAppender) Append(ref storage.SeriesRef, lset labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
+func (a *initAppender) Append(ref storage.SeriesRef, lset labels.Labels, t int64, v float64, seriesMeta []metadata.SeriesMetadata) (storage.SeriesRef, error) {
 	if a.app != nil {
-		return a.app.Append(ref, lset, t, v)
+		return a.app.Append(ref, lset, t, v, seriesMeta)
 	}
 
 	a.head.initTime(t)
 	a.app = a.head.appender()
-	return a.app.Append(ref, lset, t, v)
+	return a.app.Append(ref, lset, t, v, seriesMeta)
 }
 
 func (a *initAppender) AppendExemplar(ref storage.SeriesRef, l labels.Labels, e exemplar.Exemplar) (storage.SeriesRef, error) {
@@ -69,14 +69,14 @@ func (a *initAppender) AppendExemplar(ref storage.SeriesRef, l labels.Labels, e 
 	return a.app.AppendExemplar(ref, l, e)
 }
 
-func (a *initAppender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
+func (a *initAppender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata) (storage.SeriesRef, error) {
 	if a.app != nil {
-		return a.app.AppendHistogram(ref, l, t, h, fh)
+		return a.app.AppendHistogram(ref, l, t, h, fh, seriesMeta)
 	}
 	a.head.initTime(t)
 	a.app = a.head.appender()
 
-	return a.app.AppendHistogram(ref, l, t, h, fh)
+	return a.app.AppendHistogram(ref, l, t, h, fh, seriesMeta)
 }
 
 func (a *initAppender) UpdateMetadata(ref storage.SeriesRef, l labels.Labels, m metadata.Metadata) (storage.SeriesRef, error) {
@@ -320,7 +320,7 @@ type headAppender struct {
 	closed                          bool
 }
 
-func (a *headAppender) Append(ref storage.SeriesRef, lset labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
+func (a *headAppender) Append(ref storage.SeriesRef, lset labels.Labels, t int64, v float64, seriesMeta []metadata.SeriesMetadata) (storage.SeriesRef, error) {
 	// For OOO inserts, this restriction is irrelevant and will be checked later once we confirm the sample is an in-order append.
 	// If OOO inserts are disabled, we may as well as check this as early as we can and avoid more work.
 	if a.oooTimeWindow == 0 && t < a.minValidTime {
@@ -340,9 +340,9 @@ func (a *headAppender) Append(ref storage.SeriesRef, lset labels.Labels, t int64
 	if value.IsStaleNaN(v) {
 		switch {
 		case s.lastHistogramValue != nil:
-			return a.AppendHistogram(ref, lset, t, &histogram.Histogram{Sum: v}, nil)
+			return a.AppendHistogram(ref, lset, t, &histogram.Histogram{Sum: v}, nil, seriesMeta)
 		case s.lastFloatHistogramValue != nil:
-			return a.AppendHistogram(ref, lset, t, nil, &histogram.FloatHistogram{Sum: v})
+			return a.AppendHistogram(ref, lset, t, nil, &histogram.FloatHistogram{Sum: v}, seriesMeta)
 		}
 	}
 
@@ -374,10 +374,14 @@ func (a *headAppender) Append(ref storage.SeriesRef, lset labels.Labels, t int64
 		a.maxt = t
 	}
 
+	if len(seriesMeta) > 0 {
+		fmt.Printf("Appending sample with series metadata: %#v\n", seriesMeta)
+	}
 	a.samples = append(a.samples, record.RefSample{
-		Ref: s.ref,
-		T:   t,
-		V:   v,
+		Ref:            s.ref,
+		T:              t,
+		V:              v,
+		SeriesMetadata: seriesMeta,
 	})
 	a.sampleSeries = append(a.sampleSeries, s)
 	return storage.SeriesRef(s.ref), nil
@@ -572,7 +576,7 @@ func (a *headAppender) AppendExemplar(ref storage.SeriesRef, lset labels.Labels,
 	return storage.SeriesRef(s.ref), nil
 }
 
-func (a *headAppender) AppendHistogram(ref storage.SeriesRef, lset labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
+func (a *headAppender) AppendHistogram(ref storage.SeriesRef, lset labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata) (storage.SeriesRef, error) {
 	if !a.head.opts.EnableNativeHistograms.Load() {
 		return 0, storage.ErrNativeHistogramsDisabled
 	}
@@ -937,7 +941,7 @@ func (a *headAppender) Commit() (err error) {
 			// Sample is OOO and OOO handling is enabled
 			// and the delta is within the OOO tolerance.
 			var mmapRefs []chunks.ChunkDiskMapperRef
-			ok, chunkCreated, mmapRefs = series.insert(s.T, s.V, nil, nil, a.head.chunkDiskMapper, oooCapMax, a.head.logger)
+			ok, chunkCreated, mmapRefs = series.insert(s.T, s.V, nil, nil, s.SeriesMetadata, a.head.chunkDiskMapper, oooCapMax, a.head.logger)
 			if chunkCreated {
 				r, ok := oooMmapMarkers[series.ref]
 				if !ok || r != nil {
@@ -979,7 +983,7 @@ func (a *headAppender) Commit() (err error) {
 				floatsAppended--
 			}
 		default:
-			ok, chunkCreated = series.append(s.T, s.V, a.appendID, appendChunkOpts)
+			ok, chunkCreated = series.append(s.T, s.V, s.SeriesMetadata, a.appendID, appendChunkOpts)
 			if ok {
 				if s.T < inOrderMint {
 					inOrderMint = s.T
@@ -1006,7 +1010,8 @@ func (a *headAppender) Commit() (err error) {
 	for i, s := range a.histograms {
 		series = a.histogramSeries[i]
 		series.Lock()
-		ok, chunkCreated := series.appendHistogram(s.T, s.H, a.appendID, appendChunkOpts)
+		// TODO: series metadata.
+		ok, chunkCreated := series.appendHistogram(s.T, s.H, s.SeriesMeta, a.appendID, appendChunkOpts)
 		series.cleanupAppendIDsBelow(a.cleanupAppendIDsBelow)
 		series.pendingCommit = false
 		series.Unlock()
@@ -1031,7 +1036,7 @@ func (a *headAppender) Commit() (err error) {
 	for i, s := range a.floatHistograms {
 		series = a.floatHistogramSeries[i]
 		series.Lock()
-		ok, chunkCreated := series.appendFloatHistogram(s.T, s.FH, a.appendID, appendChunkOpts)
+		ok, chunkCreated := series.appendFloatHistogram(s.T, s.FH, s.SeriesMeta, a.appendID, appendChunkOpts)
 		series.cleanupAppendIDsBelow(a.cleanupAppendIDsBelow)
 		series.pendingCommit = false
 		series.Unlock()
@@ -1084,7 +1089,7 @@ func (a *headAppender) Commit() (err error) {
 }
 
 // insert is like append, except it inserts. Used for OOO samples.
-func (s *memSeries) insert(t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, chunkDiskMapper *chunks.ChunkDiskMapper, oooCapMax int64, logger log.Logger) (inserted, chunkCreated bool, mmapRefs []chunks.ChunkDiskMapperRef) {
+func (s *memSeries) insert(t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata, chunkDiskMapper *chunks.ChunkDiskMapper, oooCapMax int64, logger log.Logger) (inserted, chunkCreated bool, mmapRefs []chunks.ChunkDiskMapperRef) {
 	if s.ooo == nil {
 		s.ooo = &memSeriesOOOFields{}
 	}
@@ -1095,7 +1100,7 @@ func (s *memSeries) insert(t int64, v float64, h *histogram.Histogram, fh *histo
 		chunkCreated = true
 	}
 
-	ok := c.chunk.Insert(t, v, h, fh)
+	ok := c.chunk.Insert(t, v, h, fh, seriesMeta)
 	if ok {
 		if chunkCreated || t < c.minTime {
 			c.minTime = t
@@ -1118,12 +1123,12 @@ type chunkOpts struct {
 // the appendID for isolation. (The appendID can be zero, which results in no
 // isolation for this append.)
 // It is unsafe to call this concurrently with s.iterator(...) without holding the series lock.
-func (s *memSeries) append(t int64, v float64, appendID uint64, o chunkOpts) (sampleInOrder, chunkCreated bool) {
+func (s *memSeries) append(t int64, v float64, seriesMeta []metadata.SeriesMetadata, appendID uint64, o chunkOpts) (sampleInOrder, chunkCreated bool) {
 	c, sampleInOrder, chunkCreated := s.appendPreprocessor(t, chunkenc.EncXOR, o)
 	if !sampleInOrder {
 		return sampleInOrder, chunkCreated
 	}
-	s.app.Append(t, v)
+	s.app.Append(t, v, seriesMeta)
 
 	c.maxTime = t
 
@@ -1143,7 +1148,7 @@ func (s *memSeries) append(t int64, v float64, appendID uint64, o chunkOpts) (sa
 // In case of recoding the existing chunk, a new chunk is allocated and the old chunk is dropped.
 // To keep the meaning of prometheus_tsdb_head_chunks and prometheus_tsdb_head_chunks_created_total
 // consistent, we return chunkCreated=false in this case.
-func (s *memSeries) appendHistogram(t int64, h *histogram.Histogram, appendID uint64, o chunkOpts) (sampleInOrder, chunkCreated bool) {
+func (s *memSeries) appendHistogram(t int64, h *histogram.Histogram, seriesMeta []metadata.SeriesMetadata, appendID uint64, o chunkOpts) (sampleInOrder, chunkCreated bool) {
 	// Head controls the execution of recoding, so that we own the proper
 	// chunk reference afterwards and mmap used up chunks.
 
@@ -1165,7 +1170,7 @@ func (s *memSeries) appendHistogram(t int64, h *histogram.Histogram, appendID ui
 		prevApp = nil
 	}
 
-	newChunk, recoded, s.app, _ = s.app.AppendHistogram(prevApp, t, h, false) // false=request a new chunk if needed
+	newChunk, recoded, s.app, _ = s.app.AppendHistogram(prevApp, t, h, seriesMeta, false) // false=request a new chunk if needed
 
 	s.lastHistogramValue = h
 	s.lastFloatHistogramValue = nil
@@ -1200,7 +1205,7 @@ func (s *memSeries) appendHistogram(t int64, h *histogram.Histogram, appendID ui
 // In case of recoding the existing chunk, a new chunk is allocated and the old chunk is dropped.
 // To keep the meaning of prometheus_tsdb_head_chunks and prometheus_tsdb_head_chunks_created_total
 // consistent, we return chunkCreated=false in this case.
-func (s *memSeries) appendFloatHistogram(t int64, fh *histogram.FloatHistogram, appendID uint64, o chunkOpts) (sampleInOrder, chunkCreated bool) {
+func (s *memSeries) appendFloatHistogram(t int64, fh *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata, appendID uint64, o chunkOpts) (sampleInOrder, chunkCreated bool) {
 	// Head controls the execution of recoding, so that we own the proper
 	// chunk reference afterwards and mmap used up chunks.
 
@@ -1222,7 +1227,7 @@ func (s *memSeries) appendFloatHistogram(t int64, fh *histogram.FloatHistogram, 
 		prevApp = nil
 	}
 
-	newChunk, recoded, s.app, _ = s.app.AppendFloatHistogram(prevApp, t, fh, false) // False means request a new chunk if needed.
+	newChunk, recoded, s.app, _ = s.app.AppendFloatHistogram(prevApp, t, fh, seriesMeta, false) // False means request a new chunk if needed.
 
 	s.lastHistogramValue = nil
 	s.lastFloatHistogramValue = fh

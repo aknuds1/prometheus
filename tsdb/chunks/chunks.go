@@ -166,11 +166,12 @@ func ChunkFromSamplesGeneric(s Samples) (Meta, error) {
 	var newChunk chunkenc.Chunk
 
 	for i := 0; i < s.Len(); i++ {
+		curS := s.Get(i)
 		switch sampleType {
 		case chunkenc.ValFloat:
-			ca.Append(s.Get(i).T(), s.Get(i).F())
+			ca.Append(curS.T(), curS.F(), curS.SeriesMetadata())
 		case chunkenc.ValHistogram:
-			newChunk, _, ca, err = ca.AppendHistogram(nil, s.Get(i).T(), s.Get(i).H(), false)
+			newChunk, _, ca, err = ca.AppendHistogram(nil, curS.T(), curS.H(), curS.SeriesMetadata(), false)
 			if err != nil {
 				return emptyChunk, err
 			}
@@ -178,7 +179,7 @@ func ChunkFromSamplesGeneric(s Samples) (Meta, error) {
 				return emptyChunk, fmt.Errorf("did not expect to start a second chunk")
 			}
 		case chunkenc.ValFloatHistogram:
-			newChunk, _, ca, err = ca.AppendFloatHistogram(nil, s.Get(i).T(), s.Get(i).FH(), false)
+			newChunk, _, ca, err = ca.AppendFloatHistogram(nil, curS.T(), curS.FH(), curS.SeriesMetadata(), false)
 			if err != nil {
 				return emptyChunk, err
 			}

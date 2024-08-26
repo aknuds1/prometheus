@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/model/metadata"
 )
 
 // Encoding is the identifier for a chunk encoding.
@@ -101,7 +102,7 @@ type Iterable interface {
 
 // Appender adds sample pairs to a chunk.
 type Appender interface {
-	Append(int64, float64)
+	Append(int64, float64, []metadata.SeriesMetadata)
 
 	// AppendHistogram and AppendFloatHistogram append a histogram sample to a histogram or float histogram chunk.
 	// Appending a histogram may require creating a completely new chunk or recoding (changing) the current chunk.
@@ -114,8 +115,8 @@ type Appender interface {
 	// The returned bool isRecoded can be used to distinguish between the new Chunk c being a completely new Chunk
 	// or the current Chunk recoded to a new Chunk.
 	// The Appender app that can be used for the next append is always returned.
-	AppendHistogram(prev *HistogramAppender, t int64, h *histogram.Histogram, appendOnly bool) (c Chunk, isRecoded bool, app Appender, err error)
-	AppendFloatHistogram(prev *FloatHistogramAppender, t int64, h *histogram.FloatHistogram, appendOnly bool) (c Chunk, isRecoded bool, app Appender, err error)
+	AppendHistogram(prev *HistogramAppender, t int64, h *histogram.Histogram, seriesMeta []metadata.SeriesMetadata, appendOnly bool) (c Chunk, isRecoded bool, app Appender, err error)
+	AppendFloatHistogram(prev *FloatHistogramAppender, t int64, h *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata, appendOnly bool) (c Chunk, isRecoded bool, app Appender, err error)
 }
 
 // Iterator is a simple iterator that can only get the next value.
@@ -151,6 +152,7 @@ type Iterator interface {
 	// AtT returns the current timestamp.
 	// Before the iterator has advanced, the behaviour is unspecified.
 	AtT() int64
+	AtSeriesMetadata() []metadata.SeriesMetadata
 	// Err returns the current error. It should be used only after the
 	// iterator is exhausted, i.e. `Next` or `Seek` have returned ValNone.
 	Err() error
@@ -241,6 +243,11 @@ func (it *mockSeriesIterator) AtT() int64 {
 	return it.timeStamps[it.currIndex]
 }
 
+func (it *mockSeriesIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	// TODO.
+	return nil
+}
+
 func (it *mockSeriesIterator) Next() ValueType {
 	if it.currIndex < len(it.timeStamps)-1 {
 		it.currIndex++
@@ -269,6 +276,9 @@ func (nopIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64, *histogra
 	return math.MinInt64, nil
 }
 func (nopIterator) AtT() int64 { return math.MinInt64 }
+func (nopIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	return nil
+}
 func (nopIterator) Err() error { return nil }
 
 // Pool is used to create and reuse chunk references to avoid allocations.

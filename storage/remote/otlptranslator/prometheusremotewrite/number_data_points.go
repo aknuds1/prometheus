@@ -53,7 +53,7 @@ func (c *PrometheusConverter) addGaugeNumberDataPoints(dataPoints pmetric.Number
 		if pt.Flags().NoRecordedValue() {
 			sample.Value = math.Float64frombits(value.StaleNaN)
 		}
-		c.addSample(sample, labels)
+		c.addSample(sample, labels, resource)
 	}
 }
 
@@ -83,7 +83,7 @@ func (c *PrometheusConverter) addSumNumberDataPoints(dataPoints pmetric.NumberDa
 		if pt.Flags().NoRecordedValue() {
 			sample.Value = math.Float64frombits(value.StaleNaN)
 		}
-		ts := c.addSample(sample, lbls)
+		ts := c.addSample(sample, lbls, resource)
 		if ts != nil {
 			exemplars := getPromExemplars[pmetric.NumberDataPoint](pt)
 			ts.Exemplars = append(ts.Exemplars, exemplars...)
@@ -104,7 +104,7 @@ func (c *PrometheusConverter) addSumNumberDataPoints(dataPoints pmetric.NumberDa
 					break
 				}
 			}
-			c.addTimeSeriesIfNeeded(createdLabels, startTimestamp, pt.Timestamp())
+			c.addTimeSeriesIfNeeded(createdLabels, startTimestamp, pt.Timestamp(), resource)
 		}
 	}
 }

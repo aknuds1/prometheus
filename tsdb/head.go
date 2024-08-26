@@ -2035,20 +2035,22 @@ func (s *stripeSeries) getOrSet(hash uint64, lset labels.Labels, createSeries fu
 }
 
 type sample struct {
-	t  int64
-	f  float64
-	h  *histogram.Histogram
-	fh *histogram.FloatHistogram
+	t          int64
+	f          float64
+	h          *histogram.Histogram
+	fh         *histogram.FloatHistogram
+	seriesMeta []metadata.SeriesMetadata
 }
 
-func newSample(t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram) chunks.Sample {
-	return sample{t, v, h, fh}
+func newSample(t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata) chunks.Sample {
+	return sample{t, v, h, fh, seriesMeta}
 }
 
-func (s sample) T() int64                      { return s.t }
-func (s sample) F() float64                    { return s.f }
-func (s sample) H() *histogram.Histogram       { return s.h }
-func (s sample) FH() *histogram.FloatHistogram { return s.fh }
+func (s sample) T() int64                                  { return s.t }
+func (s sample) F() float64                                { return s.f }
+func (s sample) H() *histogram.Histogram                   { return s.h }
+func (s sample) FH() *histogram.FloatHistogram             { return s.fh }
+func (s sample) SeriesMetadata() []metadata.SeriesMetadata { return s.seriesMeta }
 
 func (s sample) Type() chunkenc.ValueType {
 	switch {

@@ -15,6 +15,7 @@ package chunks
 
 import (
 	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
 
@@ -28,6 +29,8 @@ type Sample interface {
 	F() float64
 	H() *histogram.Histogram
 	FH() *histogram.FloatHistogram
+	// TODO: Change into metadata.SeriesMetadata.
+	SeriesMetadata() []metadata.SeriesMetadata
 	Type() chunkenc.ValueType
 }
 
@@ -57,6 +60,11 @@ func (s sample) H() *histogram.Histogram {
 
 func (s sample) FH() *histogram.FloatHistogram {
 	return s.fh
+}
+
+func (s sample) SeriesMetadata() []metadata.SeriesMetadata {
+	// TODO.
+	return nil
 }
 
 func (s sample) Type() chunkenc.ValueType {

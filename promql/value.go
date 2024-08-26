@@ -23,6 +23,7 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/util/annotations"
@@ -189,9 +190,10 @@ func totalHPointSize(histograms []HPoint) int {
 // sample or a histogram sample. If H is nil, it is a float sample. Otherwise,
 // it is a histogram sample.
 type Sample struct {
-	T int64
-	F float64
-	H *histogram.FloatHistogram
+	T          int64
+	F          float64
+	H          *histogram.FloatHistogram
+	SeriesMeta []metadata.SeriesMetadata
 
 	Metric labels.Labels
 }
@@ -423,6 +425,7 @@ type storageSeriesIterator struct {
 	currT                int64
 	currF                float64
 	currH                *histogram.FloatHistogram
+	currSeriesMetadata   []metadata.SeriesMetadata
 }
 
 func newStorageSeriesIterator(series Series) *storageSeriesIterator {
@@ -443,6 +446,7 @@ func (ssi *storageSeriesIterator) reset(series Series) {
 	ssi.currT = math.MinInt64
 	ssi.currF = 0
 	ssi.currH = nil
+	ssi.currSeriesMetadata = nil
 }
 
 func (ssi *storageSeriesIterator) Seek(t int64) chunkenc.ValueType {
@@ -474,6 +478,10 @@ func (ssi *storageSeriesIterator) AtFloatHistogram(*histogram.FloatHistogram) (i
 
 func (ssi *storageSeriesIterator) AtT() int64 {
 	return ssi.currT
+}
+
+func (ssi *storageSeriesIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	return ssi.currSeriesMetadata
 }
 
 func (ssi *storageSeriesIterator) Next() chunkenc.ValueType {

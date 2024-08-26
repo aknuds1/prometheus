@@ -20,6 +20,7 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 )
@@ -136,6 +137,11 @@ func (it *listSeriesIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64
 func (it *listSeriesIterator) AtT() int64 {
 	s := it.samples.Get(it.idx)
 	return s.T()
+}
+
+func (it *listSeriesIterator) AtSeriesMetadata() []metadata.SeriesMetadata {
+	s := it.samples.Get(it.idx)
+	return s.SeriesMetadata()
 }
 
 func (it *listSeriesIterator) Next() chunkenc.ValueType {
@@ -335,10 +341,12 @@ func (s *seriesToChunkEncoder) Iterator(it chunks.Iterator) chunks.Iterator {
 		switch typ {
 		case chunkenc.ValFloat:
 			t, v = seriesIter.At()
-			app.Append(t, v)
+			seriesMeta := seriesIter.AtSeriesMetadata()
+			app.Append(t, v, seriesMeta)
 		case chunkenc.ValHistogram:
 			t, h = seriesIter.AtHistogram(nil)
-			newChk, recoded, app, err = app.AppendHistogram(nil, t, h, false)
+			seriesMeta := seriesIter.AtSeriesMetadata()
+			newChk, recoded, app, err = app.AppendHistogram(nil, t, h, seriesMeta, false)
 			if err != nil {
 				return errChunksIterator{err: err}
 			}
@@ -353,7 +361,8 @@ func (s *seriesToChunkEncoder) Iterator(it chunks.Iterator) chunks.Iterator {
 			}
 		case chunkenc.ValFloatHistogram:
 			t, fh = seriesIter.AtFloatHistogram(nil)
-			newChk, recoded, app, err = app.AppendFloatHistogram(nil, t, fh, false)
+			seriesMeta := seriesIter.AtSeriesMetadata()
+			newChk, recoded, app, err = app.AppendFloatHistogram(nil, t, fh, seriesMeta, false)
 			if err != nil {
 				return errChunksIterator{err: err}
 			}
@@ -411,16 +420,16 @@ func (e errChunksIterator) Err() error      { return e.err }
 // ExpandSamples iterates over all samples in the iterator, buffering all in slice.
 // Optionally it takes samples constructor, useful when you want to compare sample slices with different
 // sample implementations. if nil, sample type from this package will be used.
-func ExpandSamples(iter chunkenc.Iterator, newSampleFn func(t int64, f float64, h *histogram.Histogram, fh *histogram.FloatHistogram) chunks.Sample) ([]chunks.Sample, error) {
+func ExpandSamples(iter chunkenc.Iterator, newSampleFn func(t int64, f float64, h *histogram.Histogram, fh *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata) chunks.Sample) ([]chunks.Sample, error) {
 	if newSampleFn == nil {
-		newSampleFn = func(t int64, f float64, h *histogram.Histogram, fh *histogram.FloatHistogram) chunks.Sample {
+		newSampleFn = func(t int64, f float64, h *histogram.Histogram, fh *histogram.FloatHistogram, seriesMeta []metadata.SeriesMetadata) chunks.Sample {
 			switch {
 			case h != nil:
-				return hSample{t, h}
+				return hSample{t, h, seriesMeta}
 			case fh != nil:
-				return fhSample{t, fh}
+				return fhSample{t, fh, seriesMeta}
 			default:
-				return fSample{t, f}
+				return fSample{t, f, seriesMeta}
 			}
 		}
 	}
@@ -436,13 +445,16 @@ func ExpandSamples(iter chunkenc.Iterator, newSampleFn func(t int64, f float64, 
 			if math.IsNaN(f) {
 				f = -42
 			}
-			result = append(result, newSampleFn(t, f, nil, nil))
+			seriesMeta := iter.AtSeriesMetadata()
+			result = append(result, newSampleFn(t, f, nil, nil, seriesMeta))
 		case chunkenc.ValHistogram:
 			t, h := iter.AtHistogram(nil)
-			result = append(result, newSampleFn(t, 0, h, nil))
+			seriesMeta := iter.AtSeriesMetadata()
+			result = append(result, newSampleFn(t, 0, h, nil, seriesMeta))
 		case chunkenc.ValFloatHistogram:
 			t, fh := iter.AtFloatHistogram(nil)
-			result = append(result, newSampleFn(t, 0, nil, fh))
+			seriesMeta := iter.AtSeriesMetadata()
+			result = append(result, newSampleFn(t, 0, nil, fh, seriesMeta))
 		}
 	}
 }

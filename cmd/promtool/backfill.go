@@ -170,7 +170,8 @@ func createBlocks(input []byte, mint, maxt, maxBlockDuration int64, maxSamplesIn
 				}
 				lbls := lb.Labels()
 
-				if _, err := app.Append(0, lbls, *ts, v); err != nil {
+				// TODO: Series metadata?
+				if _, err := app.Append(0, lbls, *ts, v, nil); err != nil {
 					return fmt.Errorf("add sample: %w", err)
 				}
 

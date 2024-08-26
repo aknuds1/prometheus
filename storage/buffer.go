@@ -18,6 +18,7 @@ import (
 	"math"
 
 	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 )
@@ -163,8 +164,9 @@ func (b *BufferedSeriesIterator) Err() error {
 }
 
 type fSample struct {
-	t int64
-	f float64
+	t          int64
+	f          float64
+	seriesMeta []metadata.SeriesMetadata
 }
 
 func (s fSample) T() int64 {
@@ -183,13 +185,18 @@ func (s fSample) FH() *histogram.FloatHistogram {
 	panic("FH() called for fSample")
 }
 
+func (s fSample) SeriesMetadata() []metadata.SeriesMetadata {
+	return nil
+}
+
 func (s fSample) Type() chunkenc.ValueType {
 	return chunkenc.ValFloat
 }
 
 type hSample struct {
-	t int64
-	h *histogram.Histogram
+	t          int64
+	h          *histogram.Histogram
+	seriesMeta []metadata.SeriesMetadata
 }
 
 func (s hSample) T() int64 {
@@ -208,13 +215,18 @@ func (s hSample) FH() *histogram.FloatHistogram {
 	return s.h.ToFloat(nil)
 }
 
+func (s hSample) SeriesMetadata() []metadata.SeriesMetadata {
+	return nil
+}
+
 func (s hSample) Type() chunkenc.ValueType {
 	return chunkenc.ValHistogram
 }
 
 type fhSample struct {
-	t  int64
-	fh *histogram.FloatHistogram
+	t          int64
+	fh         *histogram.FloatHistogram
+	seriesMeta []metadata.SeriesMetadata
 }
 
 func (s fhSample) T() int64 {
@@ -231,6 +243,10 @@ func (s fhSample) H() *histogram.Histogram {
 
 func (s fhSample) FH() *histogram.FloatHistogram {
 	return s.fh
+}
+
+func (s fhSample) SeriesMetadata() []metadata.SeriesMetadata {
+	return nil
 }
 
 func (s fhSample) Type() chunkenc.ValueType {
