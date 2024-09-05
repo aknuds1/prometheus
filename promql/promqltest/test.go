@@ -106,7 +106,6 @@ func NewTestEngineWithOpts(tb testing.TB, opts promql.EngineOpts) *promql.Engine
 	return ng
 }
 
-
 // RunBuiltinTests runs an acceptance test suite against the provided engine.
 func RunBuiltinTests(t TBRun, engine promql.QueryEngine) {
 	t.Cleanup(func() { parser.EnableExperimentalFunctions = false })
