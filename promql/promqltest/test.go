@@ -79,7 +79,8 @@ func LoadedStorage(t testutil.T, input string) *teststorage.TestStorage {
 	return test.storage
 }
 
-func NewTestEngine(enablePerStepStats bool, lookbackDelta time.Duration, maxSamples int) *promql.Engine {
+// NewTestEngine creates a promql.Engine with enablePerStepStats, lookbackDelta and maxSamples, and returns it.
+func NewTestEngine(tb testing.TB, enablePerStepStats bool, lookbackDelta time.Duration, maxSamples int) *promql.Engine {
 	o := promql.EngineOpts{
 		Logger:                   nil,
 		Reg:                      nil,
@@ -92,8 +93,19 @@ func NewTestEngine(enablePerStepStats bool, lookbackDelta time.Duration, maxSamp
 		LookbackDelta:            lookbackDelta,
 		EnableDelayedNameRemoval: true,
 	}
-	return promql.NewEngine(o)
+	NewTestEngineWithOpts(tb, o)
 }
+
+// NewTestEngineWithOpts creates a promql.Engine with opts and returns it.
+func NewTestEngineWithOpts(tb testing.TB, opts promql.EngineOpts) *promql.Engine {
+	tb.Helper()
+	ng := promql.NewEngine(opts)
+	tb.Cleanup(func() {
+		require.NoError(tb, ng.Close())
+	})
+	return ng
+}
+
 
 // RunBuiltinTests runs an acceptance test suite against the provided engine.
 func RunBuiltinTests(t TBRun, engine promql.QueryEngine) {
@@ -652,8 +664,9 @@ type evalCmd struct {
 	expectedFailMessage string
 	expectedFailRegexp  *regexp.Regexp
 
-	metrics  map[uint64]labels.Labels
-	expected map[uint64]entry
+	metrics      map[uint64]labels.Labels
+	expectScalar bool
+	expected     map[uint64]entry
 }
 
 type entry struct {
@@ -697,12 +710,15 @@ func (ev *evalCmd) String() string {
 // expect adds a sequence of values to the set of expected
 // results for the query.
 func (ev *evalCmd) expect(pos int, vals ...parser.SequenceValue) {
+	ev.expectScalar = true
 	ev.expected[0] = entry{pos: pos, vals: vals}
 }
 
 // expectMetric adds a new metric with a sequence of values to the set of expected
 // results for the query.
 func (ev *evalCmd) expectMetric(pos int, m labels.Labels, vals ...parser.SequenceValue) {
+	ev.expectScalar = false
+
 	h := m.Hash()
 	ev.metrics[h] = m
 	ev.expected[h] = entry{pos: pos, vals: vals}
@@ -714,6 +730,10 @@ func (ev *evalCmd) compareResult(result parser.Value) error {
 	case promql.Matrix:
 		if ev.ordered {
 			return fmt.Errorf("expected ordered result, but query returned a matrix")
+		}
+
+		if ev.expectScalar {
+			return fmt.Errorf("expected scalar result, but got matrix %s", val.String())
 		}
 
 		if err := assertMatrixSorted(val); err != nil {
@@ -784,6 +804,10 @@ func (ev *evalCmd) compareResult(result parser.Value) error {
 		}
 
 	case promql.Vector:
+		if ev.expectScalar {
+			return fmt.Errorf("expected scalar result, but got vector %s", val.String())
+		}
+
 		seen := map[uint64]bool{}
 		for pos, v := range val {
 			fp := v.Metric.Hash()
@@ -822,15 +846,15 @@ func (ev *evalCmd) compareResult(result parser.Value) error {
 		}
 
 	case promql.Scalar:
-		if len(ev.expected) != 1 {
-			return fmt.Errorf("expected vector result, but got scalar %s", val.String())
+		if !ev.expectScalar {
+			return fmt.Errorf("expected vector or matrix result, but got %s", val.String())
 		}
 		exp0 := ev.expected[0].vals[0]
 		if exp0.Histogram != nil {
-			return fmt.Errorf("expected Histogram %v but got scalar %s", exp0.Histogram.TestExpression(), val.String())
+			return fmt.Errorf("expected histogram %v but got %s", exp0.Histogram.TestExpression(), val.String())
 		}
 		if !almost.Equal(exp0.Value, val.V, defaultEpsilon) {
-			return fmt.Errorf("expected Scalar %v but got %v", val.V, exp0.Value)
+			return fmt.Errorf("expected scalar %v but got %v", exp0.Value, val.V)
 		}
 
 	default:
@@ -1425,7 +1449,11 @@ func (ll *LazyLoader) Storage() storage.Storage {
 // Close closes resources associated with the LazyLoader.
 func (ll *LazyLoader) Close() error {
 	ll.cancelCtx()
-	return ll.storage.Close()
+	err := ll.queryEngine.Close()
+	if sErr := ll.storage.Close(); sErr != nil {
+		return errors.Join(sErr, err)
+	}
+	return err
 }
 
 func makeInt64Pointer(val int64) *int64 {
