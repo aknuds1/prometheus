@@ -1458,7 +1458,7 @@ func (ev *evaluator) rangeEvalAgg(ctx context.Context, aggExpr *parser.Aggregate
 }
 
 // expandSeriesToMatrix expands a set of storage.Series to a Matrix.
-func (ev *evaluator) expandSeriesToMatrix(series []storage.Series, offset time.Duration, start, end, interval int64, recordOrigT bool) Matrix {
+func (ev *evaluator) expandSeriesToMatrix(ctx context.Context, series []storage.Series, offset time.Duration, start, end, interval int64, recordOrigT bool) Matrix {
 	numSteps := int((end-start)/interval) + 1
 
 	mat := make(Matrix, 0, len(series))
@@ -1466,7 +1466,7 @@ func (ev *evaluator) expandSeriesToMatrix(series []storage.Series, offset time.D
 	it := storage.NewMemoizedEmptyIterator(durationMilliseconds(ev.lookbackDelta))
 	var chkIter chunkenc.Iterator
 	for _, s := range series {
-		if err := contextDone(ev.ctx, "expression evaluation"); err != nil {
+		if err := contextDone(ctx, "expression evaluation"); err != nil {
 			ev.error(err)
 		}
 
@@ -1667,7 +1667,7 @@ func (ev *evaluator) eval(ctx context.Context, expr parser.Expr) (parser.Value, 
 		case "label_join":
 			return ev.evalLabelJoin(ctx, e.Args)
 		case "info":
-			return ev.evalInfo(ev.ctx, e.Args)
+			return ev.evalInfo(ctx, e.Args)
 		}
 
 		if !matrixArg {
@@ -1957,7 +1957,7 @@ func (ev *evaluator) eval(ctx context.Context, expr parser.Expr) (parser.Value, 
 		if err != nil {
 			ev.error(errWithWarnings{fmt.Errorf("expanding series: %w", err), ws})
 		}
-		mat := ev.expandSeriesToMatrix(e.Series, e.Offset, ev.startTimestamp, ev.endTimestamp, ev.interval, false)
+		mat := ev.expandSeriesToMatrix(ctx, e.Series, e.Offset, ev.startTimestamp, ev.endTimestamp, ev.interval, false)
 		return mat, ws
 
 	case *parser.MatrixSelector:

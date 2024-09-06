@@ -35,7 +35,7 @@ var identifyingLabels = []string{"instance", "job"}
 
 // evalInfo implements the info PromQL function.
 func (ev *evaluator) evalInfo(ctx context.Context, args parser.Expressions) (parser.Value, annotations.Annotations) {
-	val, annots := ev.eval(args[0])
+	val, annots := ev.eval(ctx, args[0])
 	mat := val.(Matrix)
 	// Map from data label name to matchers.
 	dataLabelMatchers := map[string][]*labels.Matcher{}
@@ -74,7 +74,7 @@ loop:
 		return nil, annots
 	}
 
-	res, ws := ev.combineWithInfoSeries(mat, infoSeries, ignoreSeries, dataLabelMatchers)
+	res, ws := ev.combineWithInfoSeries(ctx, mat, infoSeries, ignoreSeries, dataLabelMatchers)
 	annots.Merge(ws)
 	return res, annots
 }
@@ -168,12 +168,12 @@ func (ev *evaluator) fetchInfoSeries(ctx context.Context, mat Matrix, ignoreSeri
 		}
 		infoSeries = append(infoSeries, infoIt.At())
 	}
-	infoMat := ev.expandSeriesToMatrix(infoSeries, 0, ev.startTimestamp, ev.endTimestamp, ev.interval, true)
+	infoMat := ev.expandSeriesToMatrix(ctx, infoSeries, 0, ev.startTimestamp, ev.endTimestamp, ev.interval, true)
 	return infoMat, annots, infoIt.Err()
 }
 
 // combineWithInfoSeries combines mat with select data labels from infoMat.
-func (ev *evaluator) combineWithInfoSeries(mat, infoMat Matrix, ignoreSeries map[int]struct{}, dataLabelMatchers map[string][]*labels.Matcher) (Matrix, annotations.Annotations) {
+func (ev *evaluator) combineWithInfoSeries(ctx context.Context, mat, infoMat Matrix, ignoreSeries map[int]struct{}, dataLabelMatchers map[string][]*labels.Matcher) (Matrix, annotations.Annotations) {
 	buf := make([]byte, 0, 1024)
 	lb := labels.NewScratchBuilder(0)
 	sigFunction := func(name string) func(labels.Labels) string {
@@ -243,7 +243,7 @@ func (ev *evaluator) combineWithInfoSeries(mat, infoMat Matrix, ignoreSeries map
 
 	var warnings annotations.Annotations
 	for ts := ev.startTimestamp; ts <= ev.endTimestamp; ts += ev.interval {
-		if err := contextDone(ev.ctx, "expression evaluation"); err != nil {
+		if err := contextDone(ctx, "expression evaluation"); err != nil {
 			ev.error(err)
 		}
 

@@ -93,7 +93,7 @@ func NewTestEngine(tb testing.TB, enablePerStepStats bool, lookbackDelta time.Du
 		LookbackDelta:            lookbackDelta,
 		EnableDelayedNameRemoval: true,
 	}
-	NewTestEngineWithOpts(tb, o)
+	return NewTestEngineWithOpts(tb, o)
 }
 
 // NewTestEngineWithOpts creates a promql.Engine with opts and returns it.
