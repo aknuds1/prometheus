@@ -168,7 +168,7 @@ func (ev *evaluator) fetchInfoSeries(ctx context.Context, mat Matrix, ignoreSeri
 		}
 		infoSeries = append(infoSeries, infoIt.At())
 	}
-	infoMat := ev.expandSeriesToMatrix(ctx, infoSeries, 0, ev.startTimestamp, ev.endTimestamp, ev.interval, true)
+	infoMat := ev.expandSeriesToMatrix(ctx, infoSeries, 0, true)
 	return infoMat, annots, infoIt.Err()
 }
 

@@ -1007,6 +1007,8 @@ func extractGroupsFromPath(p []parser.Node) (bool, []string) {
 	return false, nil
 }
 
+// checkAndExpandSeriesSet expands expr's UnexpandedSeriesSet into expr's Series.
+// If the Series field is already non-nil, it's a no-op.
 func (ev *evaluator) checkAndExpandSeriesSet(ctx context.Context, expr parser.Expr) (annotations.Annotations, error) {
 	switch e := expr.(type) {
 	case *parser.MatrixSelector:
@@ -1467,9 +1469,9 @@ func (ev *evaluator) rangeEvalAgg(ctx context.Context, aggExpr *parser.Aggregate
 	return result, warnings
 }
 
-// expandSeriesToMatrix expands a set of storage.Series to a Matrix.
-func (ev *evaluator) expandSeriesToMatrix(ctx context.Context, series []storage.Series, offset time.Duration, start, end, interval int64, recordOrigT bool) Matrix {
-	numSteps := int((end-start)/interval) + 1
+// expandSeriesToMatrix expands vs.Series into a Matrix.
+func (ev *evaluator) expandSeriesToMatrix(ctx context.Context, series []storage.Series, offset time.Duration, recordOrigT bool) Matrix {
+	numSteps := int((ev.endTimestamp-ev.startTimestamp)/ev.interval) + 1
 
 	mat := make(Matrix, 0, len(series))
 	var prevSS *Series
@@ -1486,7 +1488,7 @@ func (ev *evaluator) expandSeriesToMatrix(ctx context.Context, series []storage.
 			Metric: s.Labels(),
 		}
 
-		for ts, step := start, -1; ts <= end; ts += interval {
+		for ts, step := ev.startTimestamp, -1; ts <= ev.endTimestamp; ts += ev.interval {
 			step++
 			origT, f, h, ok := ev.vectorSelectorSingle(it, offset, ts)
 			if !ok {
@@ -1969,7 +1971,7 @@ func (ev *evaluator) eval(ctx context.Context, expr parser.Expr) (parser.Value, 
 		if err != nil {
 			ev.error(errWithWarnings{fmt.Errorf("expanding series: %w", err), ws})
 		}
-		mat := ev.expandSeriesToMatrix(ctx, e.Series, e.Offset, ev.startTimestamp, ev.endTimestamp, ev.interval, false)
+		mat := ev.expandSeriesToMatrix(ctx, e.Series, e.Offset, false)
 		return mat, ws
 
 	case *parser.MatrixSelector:
