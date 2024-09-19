@@ -3,6 +3,7 @@
 ## unreleased
 
 * [FEATURE] PromQL: Add `info` function. #14495
+* [BUGFIX] PromQL: Only return "possible non-counter" annotation when `rate` returns points. #14910
 
 ## 3.0.0-beta.0 / 2024-09-05
 
