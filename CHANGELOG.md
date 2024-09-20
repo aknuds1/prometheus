@@ -2,6 +2,7 @@
 
 ## unreleased
 
+* [CHANGE] `holt_winters` is now called `double_exponential_smoothing` and moves behind the [experimental-promql-functions feature flag](https://prometheus.io/docs/prometheus/latest/feature_flags/#experimental-promql-functions). #14930
 * [FEATURE] PromQL: Add `info` function. #14495
 * [BUGFIX] PromQL: Only return "possible non-counter" annotation when `rate` returns points. #14910
 
