@@ -1469,7 +1469,10 @@ func (ev *evaluator) rangeEvalAgg(ctx context.Context, aggExpr *parser.Aggregate
 	return result, warnings
 }
 
-// expandSeriesToMatrix expands vs.Series into a Matrix.
+// expandSeriesToMatrix generates a Matrix between ev.startTimestamp and ev.endTimestamp (inclusive), each point spaced ev.interval apart, from series given offset.
+// For every storage.Series iterator in series, the method iterates in ev.interval sized steps from ev.startTimestamp until and including ev.endTimestamp,
+// collecting every corresponding sample (obtained via ev.vectorSelectorSingle) into a Series.
+// All of the generated Series are collected into a Matrix, that gets returned.
 func (ev *evaluator) expandSeriesToMatrix(ctx context.Context, series []storage.Series, offset time.Duration, recordOrigT bool) Matrix {
 	numSteps := int((ev.endTimestamp-ev.startTimestamp)/ev.interval) + 1
 
