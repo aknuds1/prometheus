@@ -1147,9 +1147,6 @@ type EvalNodeHelper struct {
 
 	// Additional options for the evaluation.
 	enableDelayedNameRemoval bool
-
-	// For base and info vector matching.
-	infoSamplesBySig map[string]Sample
 }
 
 func (enh *EvalNodeHelper) resetBuilder(lbls labels.Labels) {
