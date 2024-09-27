@@ -1150,7 +1150,6 @@ type EvalNodeHelper struct {
 
 	// For base and info vector matching.
 	infoSamplesBySig map[string]Sample
-	labelBuilder     *labels.ScratchBuilder
 }
 
 func (enh *EvalNodeHelper) resetBuilder(lbls labels.Labels) {
