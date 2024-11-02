@@ -150,15 +150,9 @@ func normalizeName(metric pmetric.Metric, namespace string) string {
 			if perUnitOTel != "" && !strings.ContainsAny(perUnitOTel, "{}") {
 				perUnitProm = cleanUpUnit(perUnitMapGetOrDefault(perUnitOTel))
 			}
-			if perUnitProm != "" {
-				perUnitProm = "per_" + perUnitProm
-				if slices.Contains(nameTokens, perUnitProm) {
-					perUnitProm = ""
-				}
-			}
 		}
 
-		if perUnitProm != "" {
+		if perUnitProm != "" && !slices.Contains(nameTokens, perUnitProm) {
 			mainUnitProm = strings.TrimSuffix(mainUnitProm, "_")
 		}
 
@@ -166,7 +160,7 @@ func normalizeName(metric pmetric.Metric, namespace string) string {
 			nameTokens = append(nameTokens, mainUnitProm)
 		}
 		if perUnitProm != "" {
-			nameTokens = append(nameTokens, perUnitProm)
+			nameTokens = append(nameTokens, "per", perUnitProm)
 		}
 	}
 
@@ -263,12 +257,13 @@ func removeSuffix(tokens []string, suffix string) []string {
 // cleanUpUnit cleans up unit so it matches model.LabelNameRE.
 func cleanUpUnit(unit string) string {
 	// Multiple consecutive underscores are replaced with a single underscore.
-	// This is part of the OTel to Prometheus specification: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus.
+	// This is part of the OTel to Prometheus specification: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.33.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus.
 	multipleUnderscoresRE := regexp.MustCompile(`__+`)
-	return strings.TrimPrefix(multipleUnderscoresRE.ReplaceAllString(
+	rslt := multipleUnderscoresRE.ReplaceAllString(
 		strutil.SanitizeLabelName(unit),
 		"_",
-	), "_")
+	)
+	return strings.TrimPrefix(rslt, "_")
 }
 
 // Retrieve the Prometheus "basic" unit corresponding to the specified "basic" unit
