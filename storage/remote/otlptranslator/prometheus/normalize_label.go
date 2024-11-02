@@ -17,6 +17,7 @@
 package prometheus
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -25,7 +26,8 @@ import (
 
 // Normalizes the specified label to follow Prometheus label names standard.
 //
-// See rules at https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels.
+// See rules at https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels and
+// https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#metric-attributes.
 //
 // Labels that start with non-letter rune will be prefixed with "key_".
 // An exception is made for double-underscores which are allowed.
@@ -35,12 +37,23 @@ func NormalizeLabel(label string) string {
 		return label
 	}
 
-	label = strutil.SanitizeLabelName(label)
+	doubleUnderscorePrefix := strings.HasPrefix(label, "__")
+	// Multiple consecutive underscores are replaced with a single underscore.
+	// https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#metric-attributes.
+	multipleUnderscoresRE := regexp.MustCompile(`__+`)
+	label = multipleUnderscoresRE.ReplaceAllString(
+		strutil.SanitizeLabelName(label),
+		"_",
+	)
+	if doubleUnderscorePrefix {
+		// Maintain double underscore prefix.
+		label = "_" + label
+	}
 
 	// If label starts with a number, prepend with "key_"
 	if unicode.IsDigit(rune(label[0])) {
 		label = "key_" + label
-	} else if strings.HasPrefix(label, "_") && !strings.HasPrefix(label, "__") {
+	} else if strings.HasPrefix(label, "_") && !doubleUnderscorePrefix {
 		label = "key" + label
 	}
 

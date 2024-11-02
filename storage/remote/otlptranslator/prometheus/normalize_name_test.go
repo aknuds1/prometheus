@@ -183,6 +183,7 @@ func TestBuildCompliantNameWithSuffixes(t *testing.T) {
 	require.Equal(t, "system_io_bytes_total", BuildCompliantName(createCounter("system.io", "By"), "", true))
 	require.Equal(t, "system_network_io_bytes_total", BuildCompliantName(createCounter("network.io", "By"), "system", true))
 	require.Equal(t, "_3_14_digits", BuildCompliantName(createGauge("3.14 digits", ""), "", true))
+	// Multiple consecutive _ characters must be replaced with a single _ character.
 	require.Equal(t, "envoy_rule_engine_zlib_buf_error", BuildCompliantName(createGauge("envoy__rule_engine_zlib_buf_error", ""), "", true))
 	require.Equal(t, ":foo::bar", BuildCompliantName(createGauge(":foo::bar", ""), "", true))
 	require.Equal(t, ":foo::bar_total", BuildCompliantName(createCounter(":foo::bar", ""), "", true))
@@ -196,12 +197,13 @@ func TestBuildCompliantNameWithSuffixes(t *testing.T) {
 func TestBuildCompliantNameWithoutSuffixes(t *testing.T) {
 	require.Equal(t, "system_io", BuildCompliantName(createCounter("system.io", "By"), "", false))
 	require.Equal(t, "system_network_io", BuildCompliantName(createCounter("network.io", "By"), "system", false))
-	require.Equal(t, "system_network_I_O", BuildCompliantName(createCounter("network (I/O)", "By"), "system", false))
+	require.Equal(t, "system_network_I_O_", BuildCompliantName(createCounter("network (I/O)", "By"), "system", false))
 	require.Equal(t, "_3_14_digits", BuildCompliantName(createGauge("3.14 digits", "By"), "", false))
-	require.Equal(t, "envoy__rule_engine_zlib_buf_error", BuildCompliantName(createGauge("envoy__rule_engine_zlib_buf_error", ""), "", false))
+	// Multiple consecutive _ characters must be replaced with a single _ character.
+	require.Equal(t, "envoy_rule_engine_zlib_buf_error", BuildCompliantName(createGauge("envoy__rule_engine_zlib_buf_error", ""), "", false))
 	require.Equal(t, ":foo::bar", BuildCompliantName(createGauge(":foo::bar", ""), "", false))
 	require.Equal(t, ":foo::bar", BuildCompliantName(createCounter(":foo::bar", ""), "", false))
 	require.Equal(t, "foo_bar", BuildCompliantName(createGauge("foo.bar", "1"), "", false))
 	require.Equal(t, "system_io", BuildCompliantName(createCounter("system.io", "foo/bar"), "", false))
-	require.Equal(t, "metric_with___foreign_characters", BuildCompliantName(createCounter("metric_with_字符_foreign_characters", ""), "", false))
+	require.Equal(t, "metric_with_foreign_characters", BuildCompliantName(createCounter("metric_with_字符_foreign_characters", ""), "", false))
 }

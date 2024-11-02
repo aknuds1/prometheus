@@ -98,13 +98,17 @@ func BuildCompliantName(metric pmetric.Metric, namespace string, addMetricSuffix
 	invalidMetricCharRE := regexp.MustCompile(`[^a-zA-Z0-9:_]`)
 
 	// Simple case (no full normalization, no units, etc.).
-	metricName := strings.Join(strings.FieldsFunc(metric.Name(), func(r rune) bool {
-		return invalidMetricCharRE.MatchString(string(r))
-	}), "_")
+	metricName := invalidMetricCharRE.ReplaceAllString(metric.Name(), "_")
+
+	multipleUnderscoresRE := regexp.MustCompile(`__+`)
 
 	// Namespace?
 	if namespace != "" {
-		return namespace + "_" + metricName
+		metricName = namespace + "_" + metricName
+		if !strings.HasPrefix(metricName, "__") {
+			return multipleUnderscoresRE.ReplaceAllString(metricName, "_")
+		}
+		return metricName
 	}
 
 	// Metric name starts with a digit? Prefix it with an underscore.
@@ -112,6 +116,9 @@ func BuildCompliantName(metric pmetric.Metric, namespace string, addMetricSuffix
 		metricName = "_" + metricName
 	}
 
+	if !strings.HasPrefix(metricName, "__") {
+		return multipleUnderscoresRE.ReplaceAllString(metricName, "_")
+	}
 	return metricName
 }
 
@@ -150,9 +157,15 @@ func normalizeName(metric pmetric.Metric, namespace string) string {
 			if perUnitOTel != "" && !strings.ContainsAny(perUnitOTel, "{}") {
 				perUnitProm = cleanUpUnit(perUnitMapGetOrDefault(perUnitOTel))
 			}
+			if perUnitProm != "" {
+				perUnitProm = "per_" + perUnitProm
+				if slices.Contains(nameTokens, perUnitProm) {
+					perUnitProm = ""
+				}
+			}
 		}
 
-		if perUnitProm != "" && !slices.Contains(nameTokens, perUnitProm) {
+		if perUnitProm != "" {
 			mainUnitProm = strings.TrimSuffix(mainUnitProm, "_")
 		}
 
@@ -160,7 +173,7 @@ func normalizeName(metric pmetric.Metric, namespace string) string {
 			nameTokens = append(nameTokens, mainUnitProm)
 		}
 		if perUnitProm != "" {
-			nameTokens = append(nameTokens, "per", perUnitProm)
+			nameTokens = append(nameTokens, perUnitProm)
 		}
 	}
 
@@ -257,13 +270,12 @@ func removeSuffix(tokens []string, suffix string) []string {
 // cleanUpUnit cleans up unit so it matches model.LabelNameRE.
 func cleanUpUnit(unit string) string {
 	// Multiple consecutive underscores are replaced with a single underscore.
-	// This is part of the OTel to Prometheus specification: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.33.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus.
+	// This is part of the OTel to Prometheus specification: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus.
 	multipleUnderscoresRE := regexp.MustCompile(`__+`)
-	rslt := multipleUnderscoresRE.ReplaceAllString(
+	return strings.TrimPrefix(multipleUnderscoresRE.ReplaceAllString(
 		strutil.SanitizeLabelName(unit),
 		"_",
-	)
-	return strings.TrimPrefix(rslt, "_")
+	), "_")
 }
 
 // Retrieve the Prometheus "basic" unit corresponding to the specified "basic" unit
