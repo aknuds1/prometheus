@@ -707,7 +707,7 @@ func TestBlockQuerierLimit(t *testing.T) {
 	blockDir := createBlock(t, tmpdir, seriesEntries)
 
 	// Check open err.
-	block, err := OpenBlock(nil, blockDir, nil)
+	block, err := OpenBlock(nil, blockDir, nil, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, block.Close()) })
 
