@@ -278,20 +278,26 @@ func createHeadForBenchmarkSelect(b *testing.B, numSeries int, addSeries func(ap
 func benchmarkSelect(b *testing.B, queryable storage.Queryable, numSeries int, sorted bool) {
 	matcher := labels.MustNewMatcher(labels.MatchEqual, "foo", "bar")
 	b.ResetTimer()
-	for s := 1; s <= numSeries; s *= 10 {
-		b.Run(fmt.Sprintf("%dof%d", s, numSeries), func(b *testing.B) {
-			q, err := queryable.Querier(0, int64(s-1))
-			require.NoError(b, err)
+	for _, limit := range []bool{false, true} {
+		for s := 1; s <= numSeries; s *= 10 {
+			b.Run(fmt.Sprintf("%dof%d, limit: %t", s, numSeries, limit), func(b *testing.B) {
+				q, err := queryable.Querier(0, int64(s-1))
+				require.NoError(b, err)
 
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				ss := q.Select(context.Background(), sorted, nil, matcher)
-				for ss.Next() {
+				b.ResetTimer()
+				var hints storage.SelectHints
+				if limit {
+					hints.Limit = numSeries
 				}
-				require.NoError(b, ss.Err())
-			}
-			q.Close()
-		})
+				for i := 0; i < b.N; i++ {
+					ss := q.Select(context.Background(), sorted, &hints, matcher)
+					for ss.Next() {
+					}
+					require.NoError(b, ss.Err())
+				}
+				q.Close()
+			})
+		}
 	}
 }
 
