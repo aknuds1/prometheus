@@ -939,13 +939,16 @@ func main() {
 		{
 			name:     "db_storage",
 			reloader: localStorage.ApplyConfig,
-		}, {
+		},
+		{
 			name:     "remote_storage",
 			reloader: remoteStorage.ApplyConfig,
-		}, {
+		},
+		{
 			name:     "web_handler",
 			reloader: webHandler.ApplyConfig,
-		}, {
+		},
+		{
 			name: "query_engine",
 			reloader: func(cfg *config.Config) error {
 				if agentMode {
@@ -965,12 +968,14 @@ func main() {
 				queryEngine.SetQueryLogger(l)
 				return nil
 			},
-		}, {
+		},
+		{
 			// The Scrape and notifier managers need to reload before the Discovery manager as
 			// they need to read the most updated config when receiving the new targets list.
 			name:     "scrape",
 			reloader: scrapeManager.ApplyConfig,
-		}, {
+		},
+		{
 			name: "scrape_sd",
 			reloader: func(cfg *config.Config) error {
 				c := make(map[string]discovery.Configs)
@@ -983,10 +988,12 @@ func main() {
 				}
 				return discoveryManagerScrape.ApplyConfig(c)
 			},
-		}, {
+		},
+		{
 			name:     "notify",
 			reloader: notifierManager.ApplyConfig,
-		}, {
+		},
+		{
 			name: "notify_sd",
 			reloader: func(cfg *config.Config) error {
 				c := make(map[string]discovery.Configs)
@@ -1004,7 +1011,8 @@ func main() {
 				}
 				return semconvReloader(c)
 			},
-		}, {
+		},
+		{
 			name: "rules",
 			reloader: func(cfg *config.Config) error {
 				if agentMode {
@@ -1030,7 +1038,8 @@ func main() {
 					nil,
 				)
 			},
-		}, {
+		},
+		{
 			name:     "tracing",
 			reloader: tracingManager.ApplyConfig,
 		},
