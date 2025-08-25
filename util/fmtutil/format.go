@@ -46,7 +46,7 @@ var MetricMetadataTypeValue = map[string]int32{
 
 // MetricTextToWriteRequest consumes an io.Reader and return the data in write request format.
 func MetricTextToWriteRequest(input io.Reader, labels map[string]string) (*prompb.WriteRequest, error) {
-	var parser expfmt.TextParser
+	parser := expfmt.NewTextParser(model.UTF8Validation)
 	mf, err := parser.TextToMetricFamilies(input)
 	if err != nil {
 		return nil, err
