@@ -1,6 +1,6 @@
 module github.com/prometheus/prometheus
 
-go 1.24.9
+go 1.25.3
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
@@ -34,19 +34,19 @@ require (
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/snappy v1.0.0
 	github.com/google/go-cmp v0.7.0
-	github.com/google/pprof v0.0.0-20251213031049-b05bdaca462f
+	github.com/google/pprof v0.0.0-20250923004556-9e5a51aed1e8
 	github.com/google/uuid v1.6.0
-	github.com/gophercloud/gophercloud/v2 v2.9.0
+	github.com/gophercloud/gophercloud/v2 v2.8.0
 	github.com/grafana/regexp v0.0.0-20250905093917-f7b3be9d1853
-	github.com/hashicorp/consul/api v1.32.1
-	github.com/hashicorp/nomad/api v0.0.0-20251222083347-1355d4cb1671
-	github.com/hetznercloud/hcloud-go/v2 v2.32.0
-	github.com/ionos-cloud/sdk-go/v6 v6.3.5
+	github.com/hashicorp/consul/api v1.33.0
+	github.com/hashicorp/nomad/api v0.0.0-20250930071859-eaa0fe0e27af
+	github.com/hetznercloud/hcloud-go/v2 v2.25.1
+	github.com/ionos-cloud/sdk-go/v6 v6.3.4
 	github.com/json-iterator/go v1.1.12
-	github.com/klauspost/compress v1.18.2
+	github.com/klauspost/compress v1.18.0
 	github.com/kolo/xmlrpc v0.0.0-20220921171641-a4b6fa1dd06b
-	github.com/linode/linodego v1.63.0
-	github.com/miekg/dns v1.1.69
+	github.com/linode/linodego v1.59.0
+	github.com/miekg/dns v1.1.68
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
 	github.com/mwitkow/go-conntrack v0.0.0-20190716064945-2f068394615f
 	github.com/nsf/jsondiff v0.0.0-20230430225905-43f6cf3098c1
