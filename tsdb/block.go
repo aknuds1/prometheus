@@ -379,7 +379,7 @@ func OpenBlock(logger *slog.Logger, dir string, pool chunkenc.Pool, postingsDeco
 	}
 	closers = append(closers, tr)
 
-	smr, sizeSeriesMeta, err := seriesmetadata.ReadSeriesMetadata(dir)
+	smr, sizeSeriesMeta, err := seriesmetadata.ReadSeriesMetadata(logger, dir)
 	if err != nil {
 		return nil, err
 	}
