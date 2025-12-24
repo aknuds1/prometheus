@@ -127,6 +127,37 @@ func TestMMapFile(t *testing.T) {
 	require.Equal(t, []byte(data), bytes[:2], "Mmap failed")
 }
 
+func TestTrimStringByBytes(t *testing.T) {
+	t.Run("normal ASCII string", func(t *testing.T) {
+		result := trimStringByBytes("hello", 3)
+		require.Equal(t, "hel", result)
+	})
+
+	t.Run("no trimming needed", func(t *testing.T) {
+		result := trimStringByBytes("hi", 10)
+		require.Equal(t, "hi", result)
+	})
+
+	t.Run("UTF-8 multibyte character boundary", func(t *testing.T) {
+		// "日本" is 6 bytes (3 bytes per character)
+		result := trimStringByBytes("日本", 4)
+		// Should trim back to complete character boundary
+		require.Equal(t, "日", result)
+	})
+
+	t.Run("invalid UTF-8 continuation-only bytes", func(t *testing.T) {
+		// UTF-8 continuation bytes have pattern 10xxxxxx (0x80-0xBF).
+		// They are not valid rune start bytes, so utf8.RuneStart returns false.
+		// The function should handle this gracefully by returning an empty string.
+		continuationOnlyString := string([]byte{0x80, 0x81, 0x82, 0x83, 0x84})
+
+		require.NotPanics(t, func() {
+			result := trimStringByBytes(continuationOnlyString, 4)
+			require.Equal(t, "", result)
+		}, "trimStringByBytes should not panic on invalid UTF-8 input")
+	})
+}
+
 func TestParseBrokenJSON(t *testing.T) {
 	for _, tc := range []struct {
 		b []byte
