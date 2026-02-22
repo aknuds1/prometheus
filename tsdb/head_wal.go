@@ -508,6 +508,7 @@ Outer:
 					MinTime:     r.MinTime,
 					MaxTime:     r.MaxTime,
 				})
+				h.updateSharedMetadata(s, resKind)
 				s.Unlock()
 			}
 			h.wlReplayResourcesPool.Put(v)
@@ -532,6 +533,7 @@ Outer:
 					MinTime:   sc.MinTime,
 					MaxTime:   sc.MaxTime,
 				})
+				h.updateSharedMetadata(s, scopeKind)
 				s.Unlock()
 			}
 			h.wlReplayScopesPool.Put(v)
