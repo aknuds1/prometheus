@@ -504,6 +504,7 @@ Outer:
 					s.Lock()
 					hash := labels.StableHash(s.lset)
 					ref := s.ref
+					s.stableHash = hash
 					s.Unlock()
 
 					contentChanged, oldVR, newVR := seriesmetadata.CommitResourceToStore(store, hash, seriesmetadata.ResourceCommitData{
@@ -513,7 +514,7 @@ Outer:
 						MinTime:     r.MinTime,
 						MaxTime:     r.MaxTime,
 					})
-					h.updateMetaStripes(ref, hash)
+					store.SetSeriesRef(hash, uint64(ref))
 					if contentChanged {
 						h.seriesMeta.UpdateResourceAttrIndex(hash, oldVR, newVR)
 					}
@@ -536,6 +537,7 @@ Outer:
 					s.Lock()
 					hash := labels.StableHash(s.lset)
 					ref := s.ref
+					s.stableHash = hash
 					s.Unlock()
 
 					seriesmetadata.CommitScopeToStore(store, hash, seriesmetadata.ScopeCommitData{
@@ -546,7 +548,7 @@ Outer:
 						MinTime:   sc.MinTime,
 						MaxTime:   sc.MaxTime,
 					})
-					h.updateMetaStripes(ref, hash)
+					store.SetSeriesRef(hash, uint64(ref))
 				}
 			}
 			h.wlReplayScopesPool.Put(v)
