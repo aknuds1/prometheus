@@ -455,7 +455,7 @@ func BenchmarkAppendSeriesChunks(b *testing.B) {
 		b.Run(fmt.Sprintf("headOnly/%d", numHeadChunks), func(b *testing.B) {
 			s := &memSeries{
 				ref:        1,
-				headChunks: buildHeadChunks(numHeadChunks),
+				headChunks: buildHeadChunksLight(numHeadChunks),
 			}
 			mint := int64(0)
 			maxt := int64(numHeadChunks) * 1000
@@ -479,7 +479,7 @@ func BenchmarkAppendSeriesChunks(b *testing.B) {
 			}
 			s := &memSeries{
 				ref:           1,
-				headChunks:    buildHeadChunks(numHeadChunks),
+				headChunks:    buildHeadChunksLight(numHeadChunks),
 				mmappedChunks: mmapped,
 			}
 			totalChunks := numHeadChunks * 2
@@ -502,7 +502,7 @@ func BenchmarkSeriesChunk(b *testing.B) {
 			s := &memSeries{
 				ref:          1,
 				firstChunkID: 0,
-				headChunks:   buildHeadChunks(n),
+				headChunks:   buildHeadChunksLight(n),
 			}
 			// Request the oldest head chunk (HeadChunkID 0) — worst case.
 			id := chunks.HeadChunkID(0)
@@ -525,7 +525,7 @@ func BenchmarkChunkLookup(b *testing.B) {
 			s := &memSeries{
 				ref:          1,
 				firstChunkID: 0,
-				headChunks:   buildHeadChunks(n),
+				headChunks:   buildHeadChunksLight(n),
 			}
 			// Request a mid-position chunk (complements BenchmarkSeriesChunk which does worst-case oldest).
 			id := chunks.HeadChunkID(n / 2)
@@ -542,6 +542,21 @@ func BenchmarkChunkLookup(b *testing.B) {
 	}
 }
 
+// buildHeadChunksLight creates a linked list like buildHeadChunks but without
+// allocating chunk encodings. Suitable for benchmarks that only need the
+// linked-list structure and time ranges (e.g. truncation).
+func buildHeadChunksLight(n int) *memChunk {
+	var head *memChunk
+	for i := range n {
+		head = &memChunk{
+			minTime: int64(i) * 1000,
+			maxTime: int64(i)*1000 + 999,
+			prev:    head,
+		}
+	}
+	return head
+}
+
 func BenchmarkTruncateChunksBefore(b *testing.B) {
 	for _, n := range []int{1, 4, 16, 64, 256} {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
@@ -551,9 +566,11 @@ func BenchmarkTruncateChunksBefore(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				// Rebuild each iteration since truncate is destructive.
+				// Use lightweight chunks (nil chunk field) since truncation
+				// only reads maxTime and follows prev pointers.
 				s := &memSeries{
 					firstChunkID: 0,
-					headChunks:   buildHeadChunks(n),
+					headChunks:   buildHeadChunksLight(n),
 				}
 				s.truncateChunksBefore(mint, 0)
 			}
