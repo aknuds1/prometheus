@@ -15,6 +15,7 @@ package tsdb
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -429,4 +430,41 @@ func TestHeadIndexReader_PostingsForLabelMatching(t *testing.T) {
 		require.NoError(t, err)
 		return ir
 	})
+}
+
+var benchSink *memChunk
+
+// BenchmarkSeriesChunkIteration measures iterating all N head chunks of a series
+// oldest-to-newest (the real query pattern) using the cached head-chunks slice.
+func BenchmarkSeriesChunkIteration(b *testing.B) {
+	for _, n := range []int{1, 4, 16, 64, 256} {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			s := &memSeries{
+				ref:          1,
+				firstChunkID: 0,
+				headChunks:   buildHeadChunksLight(n),
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				for i := range n {
+					benchSink, _, _, _ = s.chunk(chunks.HeadChunkID(i), nil, nil)
+				}
+			}
+		})
+	}
+}
+
+// buildHeadChunksLight creates a linked list like buildHeadChunks but without
+// allocating chunk encodings. Suitable for benchmarks that only need the
+// linked-list structure and time ranges (e.g. truncation).
+func buildHeadChunksLight(n int) *memChunk {
+	var head *memChunk
+	for i := range n {
+		head = &memChunk{
+			minTime: int64(i) * 1000,
+			maxTime: int64(i)*1000 + 999,
+			prev:    head,
+		}
+	}
+	return head
 }
