@@ -4088,6 +4088,19 @@ func (ev *evaluator) mergeSeriesWithSameLabelset(mat Matrix) Matrix {
 				ev.errorf("vector cannot contain metrics with the same labelset")
 			}
 		}
+		// Check for duplicate timestamps across floats and histograms.
+		fi, hi := 0, 0
+		for fi < len(base.Floats) && hi < len(base.Histograms) {
+			ft, ht := base.Floats[fi].T, base.Histograms[hi].T
+			switch {
+			case ft < ht:
+				fi++
+			case ft > ht:
+				hi++
+			default:
+				ev.errorf("vector cannot contain metrics with the same labelset")
+			}
+		}
 
 		merged = append(merged, base)
 	}
