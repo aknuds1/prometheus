@@ -332,7 +332,7 @@ func BenchmarkMetadataMemoryPerSeries(b *testing.B) {
 					_, err = app.UpdateResource(ref, lset,
 						map[string]string{"service.name": "bench-svc"},
 						map[string]string{"host.name": "node-1"},
-						nil, 100,
+						100,
 					)
 					require.NoError(b, err)
 				}
@@ -362,7 +362,7 @@ func BenchmarkHeadGCWithMetadata(b *testing.B) {
 					_, err = app.UpdateResource(ref, lset,
 						map[string]string{"service.name": "bench-svc"},
 						map[string]string{"host.name": "node-1"},
-						nil, 100,
+						100,
 					)
 					require.NoError(b, err)
 				}
@@ -394,7 +394,7 @@ func BenchmarkLabelsForHash(b *testing.B) {
 		_, err = app.UpdateResource(ref, lset,
 			map[string]string{"service.name": "bench-svc"},
 			map[string]string{"host.name": "node-1"},
-			nil, 100,
+			100,
 		)
 		require.NoError(b, err)
 		hashes[i] = labels.StableHash(lset)

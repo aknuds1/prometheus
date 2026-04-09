@@ -1074,11 +1074,6 @@ func (*appender) UpdateResourceAttributes(storage.SeriesRef, labels.Labels, map[
 	return 0, nil
 }
 
-func (*appender) UpdateEntities(storage.SeriesRef, labels.Labels, []storage.EntityData, int64) (storage.SeriesRef, error) {
-	// UpdateEntities is not supported in the Agent.
-	return 0, nil
-}
-
 func (a *appender) AppendHistogramSTZeroSample(ref storage.SeriesRef, l labels.Labels, t, st int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
 	if h != nil {
 		if err := h.Validate(); err != nil {
@@ -1177,7 +1172,7 @@ func (a *appender) AppendSTZeroSample(ref storage.SeriesRef, l labels.Labels, t,
 	return storage.SeriesRef(series.ref), nil
 }
 
-func (*appender) UpdateResource(_ storage.SeriesRef, _ labels.Labels, _, _ map[string]string, _ []storage.EntityData, _ int64) (storage.SeriesRef, error) {
+func (*appender) UpdateResource(_ storage.SeriesRef, _ labels.Labels, _, _ map[string]string, _ int64) (storage.SeriesRef, error) {
 	// Agent mode doesn't store resource metadata locally.
 	return 0, nil
 }
