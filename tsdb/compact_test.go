@@ -1270,6 +1270,48 @@ func BenchmarkCompactionFromHead(b *testing.B) {
 			h.Close()
 		})
 	}
+
+	// Sub-benchmark with multiple head chunks per series, as can happen with
+	// native histograms that trigger a counter reset on every sample. This
+	// stresses the linked-list traversal in s.chunk() and exercises the
+	// head-chunk cache.
+	for _, tc := range []struct{ series, chunks int }{
+		{100000, 1},  // Baseline: cache skipped (prev==nil).
+		{100000, 10}, // Realistic: cache active, but improvement negligible vs total compaction cost.
+		{10, 100},    // Moderate pathological case.
+		{10, 1000},   // Heavy pathological case.
+	} {
+		nSeries, nChunks := tc.series, tc.chunks
+		b.Run(fmt.Sprintf("many head chunks/series=%d,chunks=%d", nSeries, nChunks), func(b *testing.B) {
+			dir := b.TempDir()
+			chunkDir := b.TempDir()
+			opts := DefaultHeadOptions()
+			opts.ChunkRange = int64(nChunks+1) * 1000 // Wide enough so nothing gets mmapped.
+			opts.ChunkDirRoot = chunkDir
+			h, err := NewHead(nil, nil, nil, nil, opts, nil)
+			require.NoError(b, err)
+
+			app := h.Appender(b.Context())
+			for i := range nSeries {
+				lbls := labels.FromStrings("__name__", "bench", "series", strconv.Itoa(i))
+				for j := range nChunks {
+					// Counter reset on every histogram forces a new head chunk per sample.
+					hist := tsdbutil.GenerateTestHistogram(int64(j))
+					hist.CounterResetHint = histogram.CounterReset
+					_, err := app.AppendHistogram(0, lbls, int64(j)*1000, hist, nil)
+					require.NoError(b, err)
+				}
+			}
+			require.NoError(b, app.Commit())
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; b.Loop(); i++ {
+				createBlockFromHead(b, filepath.Join(dir, strconv.Itoa(i)), h)
+			}
+			h.Close()
+		})
+	}
 }
 
 func BenchmarkCompactionFromOOOHead(b *testing.B) {
