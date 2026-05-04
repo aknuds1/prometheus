@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	jsoniter "github.com/json-iterator/go"
@@ -629,23 +630,35 @@ func searchLabelNames(ctx context.Context, searcher storage.Searcher, matcherSet
 
 // buildSearchFilter builds a Filter for the given search terms and fuzzy settings.
 // When multiple search terms are given, results matching any term are accepted (OR logic).
-// Returns nil when no search terms are provided.
+// Empty search terms are skipped. Returns nil when no usable search terms remain.
+// For case-insensitive search, the query is lowercased here and the chain is wrapped
+// with caseFoldingFilter so values are lowercased once at the top of the chain.
 func buildSearchFilter(searches []string, fuzzThreshold int, fuzzAlg string, caseSensitive bool) storage.Filter {
-	if len(searches) == 0 {
+	terms := make([]string, 0, len(searches))
+	for _, s := range searches {
+		if s == "" {
+			continue
+		}
+		if !caseSensitive {
+			s = strings.ToLower(s)
+		}
+		terms = append(terms, s)
+	}
+	if len(terms) == 0 {
 		return nil
 	}
 	threshold := float64(fuzzThreshold) / 100.0
-	filters := make([]storage.Filter, 0, len(searches))
-	for _, s := range searches {
+	filters := make([]storage.Filter, 0, len(terms))
+	for _, s := range terms {
 		var f storage.Filter
 		if fuzzAlg == "subsequence" {
-			f = NewSubsequenceFilter(s, threshold, caseSensitive)
+			f = NewSubsequenceFilter(s, threshold)
 		} else {
 			// Jaro-Winkler: substring OR Jaro-Winkler fuzzy.
-			substringFilter := NewSubstringFilter(s, caseSensitive)
+			substringFilter := NewSubstringFilter(s)
 			var fuzzyFilter *FuzzyFilter
 			if fuzzThreshold > 0 {
-				fuzzyFilter = NewFuzzyFilter(s, threshold, caseSensitive)
+				fuzzyFilter = NewFuzzyFilter(s, threshold)
 			}
 			f = &orFilter{
 				substringFilter: substringFilter,
@@ -654,10 +667,16 @@ func buildSearchFilter(searches []string, fuzzThreshold int, fuzzAlg string, cas
 		}
 		filters = append(filters, f)
 	}
+	var combined storage.Filter
 	if len(filters) == 1 {
-		return filters[0]
+		combined = filters[0]
+	} else {
+		combined = newOrSearchesFilter(filters...)
 	}
-	return newOrSearchesFilter(filters...)
+	if !caseSensitive {
+		combined = newCaseFoldingFilter(combined)
+	}
+	return combined
 }
 
 // searchMetricNames handles GET/POST /api/v1/search/metric_names.

@@ -15,165 +15,124 @@ package v1
 
 import (
 	"strings"
-	"sync"
 
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/strutil"
 )
 
-// SubstringFilter implements fast case-insensitive substring matching.
-// Returns true if the query is a substring of the value, with score based on match quality:
-// - Exact match: score 1.0
-// - Prefix match: score 0.8
-// - Substring match: score 0.6
-// - No match: score 0.0.
+// Filters in this file expect the query passed to their constructor and the
+// value passed to Accept to share the same case. To search case-insensitively,
+// lowercase the query at construction time and wrap the resulting filter with
+// caseFoldingFilter so incoming values are lowercased once for the whole chain.
+
+// SubstringFilter implements case-sensitive substring matching with a
+// position-based score. A prefix match scores 1.0; substring matches score in
+// the range [0.1, 1.0) where earlier match positions score higher.
 type SubstringFilter struct {
-	query         string
-	caseSensitive bool
+	query string
 }
 
-// NewSubstringFilter creates a new SubstringFilter.
-func NewSubstringFilter(query string, caseSensitive bool) *SubstringFilter {
-	if !caseSensitive {
-		query = strings.ToLower(query)
-	}
-	return &SubstringFilter{
-		query:         query,
-		caseSensitive: caseSensitive,
-	}
+// NewSubstringFilter creates a new SubstringFilter. The query is matched
+// against incoming values in their literal case.
+func NewSubstringFilter(query string) *SubstringFilter {
+	return &SubstringFilter{query: query}
 }
 
-// Accept returns true if the value matches the substring query.
+// Accept returns true if the value contains the substring query, with a score
+// that decreases as the match position moves toward the end of the value.
 func (f *SubstringFilter) Accept(value string) (bool, float64) {
 	if f.query == "" {
 		return true, 1.0
 	}
-
-	compareValue := value
-	if !f.caseSensitive {
-		compareValue = strings.ToLower(value)
+	idx := strings.Index(value, f.query)
+	if idx < 0 {
+		return false, 0.0
 	}
-
-	// Substring match - check contains first.
-	if strings.Contains(compareValue, f.query) {
-		// Prefix match scores highest for autocomplete use cases.
-		if strings.HasPrefix(compareValue, f.query) {
-			return true, 1.0
-		}
-		return true, 0.9
+	if idx == 0 {
+		return true, 1.0
 	}
-
-	return false, 0.0
+	// Scale to [0.1, 1.0). Earlier positions score closer to 1.0.
+	maxIdx := len(value) - len(f.query)
+	score := 1.0 - 0.9*float64(idx)/float64(maxIdx)
+	return true, score
 }
 
-// FuzzyFilter implements Jaro-Winkler fuzzy matching with score caching.
-// The cache is scoped to a single filter instance (per-query lifecycle) and uses
-// sync.RWMutex for concurrent access safety.
+// FuzzyFilter implements Jaro-Winkler fuzzy matching against a query.
 type FuzzyFilter struct {
-	query         string
-	matcher       *strutil.JaroWinklerMatcher
-	threshold     float64
-	caseSensitive bool
-	mu            sync.RWMutex
-	cache         map[string]float64
+	query     string
+	matcher   *strutil.JaroWinklerMatcher
+	threshold float64
 }
 
 // NewFuzzyFilter creates a new FuzzyFilter.
 // threshold should be in range [0.0, 1.0] where 1.0 requires perfect match.
-func NewFuzzyFilter(query string, threshold float64, caseSensitive bool) *FuzzyFilter {
-	if !caseSensitive {
-		query = strings.ToLower(query)
-	}
+func NewFuzzyFilter(query string, threshold float64) *FuzzyFilter {
 	return &FuzzyFilter{
-		query:         query,
-		matcher:       strutil.NewJaroWinklerMatcher(query),
-		threshold:     threshold,
-		caseSensitive: caseSensitive,
-		cache:         make(map[string]float64),
+		query:     query,
+		matcher:   strutil.NewJaroWinklerMatcher(query),
+		threshold: threshold,
 	}
 }
 
 // Accept returns true if the value matches the fuzzy query above the threshold.
-// The Jaro-Winkler score is cached to avoid recomputation.
 func (f *FuzzyFilter) Accept(value string) (bool, float64) {
-	if f.query == "" {
-		return true, 1.0
-	}
-
-	compareValue := value
-	if !f.caseSensitive {
-		compareValue = strings.ToLower(value)
-	}
-
-	// Check cache first (read lock).
-	f.mu.RLock()
-	score, cached := f.cache[compareValue]
-	f.mu.RUnlock()
-
-	if cached {
-		return score >= f.threshold, score
-	}
-
-	// Compute and cache score under write lock; matcher is not concurrent-safe.
-	f.mu.Lock()
-	score = f.matcher.Score(compareValue)
-	f.cache[compareValue] = score
-	f.mu.Unlock()
-
+	score := f.matcher.Score(value)
 	return score >= f.threshold, score
 }
 
 // SubsequenceFilter implements fuzzy matching using a sequential character
-// matching algorithm. It requires all pattern characters to appear in the text
+// matching algorithm. It requires all pattern characters to appear in the value
 // in order (subsequence matching), and scores matches by rewarding consecutive
 // character runs and penalizing gaps.
 // The score is normalized to [0.0, 1.0] and compared against a threshold.
 type SubsequenceFilter struct {
-	query         string
-	matcher       *strutil.SubsequenceMatcher
-	threshold     float64
-	caseSensitive bool
+	query     string
+	matcher   *strutil.SubsequenceMatcher
+	threshold float64
 }
 
 // NewSubsequenceFilter creates a new SubsequenceFilter.
 // threshold should be in range [0.0, 1.0] where 0.0 accepts any subsequence match.
-func NewSubsequenceFilter(query string, threshold float64, caseSensitive bool) *SubsequenceFilter {
-	if !caseSensitive {
-		query = strings.ToLower(query)
-	}
+func NewSubsequenceFilter(query string, threshold float64) *SubsequenceFilter {
 	return &SubsequenceFilter{
-		query:         query,
-		matcher:       strutil.NewSubsequenceMatcher(query),
-		threshold:     threshold,
-		caseSensitive: caseSensitive,
+		query:     query,
+		matcher:   strutil.NewSubsequenceMatcher(query),
+		threshold: threshold,
 	}
 }
 
 // Accept returns true if the value matches the subsequence query above the threshold.
 // Prefix matches always score 1.0 for consistency with SubstringFilter.
 func (f *SubsequenceFilter) Accept(value string) (bool, float64) {
-	if f.query == "" {
+	if strings.HasPrefix(value, f.query) {
 		return true, 1.0
 	}
-
-	compareValue := value
-	if !f.caseSensitive {
-		compareValue = strings.ToLower(value)
-	}
-
-	// Prefix match always scores 1.0.
-	if strings.HasPrefix(compareValue, f.query) {
-		return true, 1.0
-	}
-
-	score := f.matcher.Score(compareValue)
+	score := f.matcher.Score(value)
 	// score == 0 means no subsequence match; always reject regardless of threshold.
 	return score > 0 && score >= f.threshold, score
 }
 
+// caseFoldingFilter wraps another Filter and lowercases the value once before
+// delegating, so a chain of case-insensitive matchers does not each repeat the
+// case fold. The wrapped filter must have been constructed with a lowercased
+// query.
+type caseFoldingFilter struct {
+	inner storage.Filter
+}
+
+func newCaseFoldingFilter(inner storage.Filter) *caseFoldingFilter {
+	return &caseFoldingFilter{inner: inner}
+}
+
+// Accept lowercases the value and delegates to the inner filter.
+func (f *caseFoldingFilter) Accept(value string) (bool, float64) {
+	return f.inner.Accept(strings.ToLower(value))
+}
+
 // ChainFilter combines multiple filters with AND logic.
 // Returns true only if all filters accept the value.
-// The returned score is the minimum score from all filters.
+// The returned score is the best (max) score across the filters, so that
+// rankings reflect the strongest matching dimension.
 type ChainFilter struct {
 	filters []storage.Filter
 }
@@ -186,24 +145,24 @@ func NewChainFilter(filters ...storage.Filter) *ChainFilter {
 }
 
 // Accept returns true if all filters accept the value.
-// Returns the minimum score from all filters.
+// Returns the maximum score from all filters.
 func (f *ChainFilter) Accept(value string) (bool, float64) {
 	if len(f.filters) == 0 {
 		return true, 1.0
 	}
 
-	minScore := 1.0
+	var maxScore float64
 	for _, filter := range f.filters {
 		accepted, score := filter.Accept(value)
 		if !accepted {
 			return false, 0.0
 		}
-		if score < minScore {
-			minScore = score
+		if score > maxScore {
+			maxScore = score
 		}
 	}
 
-	return true, minScore
+	return true, maxScore
 }
 
 // orSearchesFilter combines multiple per-term filters with OR logic.
@@ -218,15 +177,21 @@ func newOrSearchesFilter(filters ...storage.Filter) *orSearchesFilter {
 }
 
 // Accept returns true if any of the per-term filters accepts the value.
+// Stops iterating once a perfect (1.0) score is found.
 func (f *orSearchesFilter) Accept(value string) (bool, float64) {
 	var maxScore float64
 	accepted := false
 	for _, filter := range f.filters {
-		if ok, score := filter.Accept(value); ok {
-			accepted = true
-			if score > maxScore {
-				maxScore = score
-			}
+		ok, score := filter.Accept(value)
+		if !ok {
+			continue
+		}
+		accepted = true
+		if score > maxScore {
+			maxScore = score
+		}
+		if maxScore >= 1.0 {
+			return true, maxScore
 		}
 	}
 	return accepted, maxScore
@@ -234,7 +199,6 @@ func (f *orSearchesFilter) Accept(value string) (bool, float64) {
 
 // orFilter combines substring and fuzzy filters with OR logic.
 // Tries substring first, then fuzzy if substring doesn't match.
-// This matches the original matchName behavior.
 type orFilter struct {
 	substringFilter *SubstringFilter
 	fuzzyFilter     *FuzzyFilter

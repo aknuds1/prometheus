@@ -24,150 +24,121 @@ import (
 
 func TestSubstringFilter(t *testing.T) {
 	tests := []struct {
-		name          string
-		query         string
-		caseSensitive bool
-		value         string
-		wantAccepted  bool
-		wantScore     float64
+		name         string
+		query        string
+		value        string
+		wantAccepted bool
+		wantScore    float64
 	}{
 		{
-			name:          "exact match case insensitive",
-			query:         "prometheus",
-			caseSensitive: false,
-			value:         "Prometheus",
-			wantAccepted:  true,
-			wantScore:     1.0,
+			name:         "exact match",
+			query:        "prometheus",
+			value:        "prometheus",
+			wantAccepted: true,
+			wantScore:    1.0,
 		},
 		{
-			name:          "exact match case sensitive",
-			query:         "prometheus",
-			caseSensitive: true,
-			value:         "prometheus",
-			wantAccepted:  true,
-			wantScore:     1.0,
+			name:         "prefix match",
+			query:        "prom",
+			value:        "prometheus",
+			wantAccepted: true,
+			wantScore:    1.0,
 		},
 		{
-			name:          "case sensitive mismatch",
-			query:         "prometheus",
-			caseSensitive: true,
-			value:         "Prometheus",
-			wantAccepted:  false,
-			wantScore:     0.0,
+			name:         "substring match in middle",
+			query:        "meth",
+			value:        "prometheus",
+			wantAccepted: true,
+			// idx=3, maxIdx=10-4=6 -> 1.0 - 0.9*3/6 = 0.55.
+			wantScore: 0.55,
 		},
 		{
-			name:          "prefix match",
-			query:         "prom",
-			caseSensitive: false,
-			value:         "prometheus",
-			wantAccepted:  true,
-			wantScore:     1.0,
+			name:         "substring match at end",
+			query:        "heus",
+			value:        "prometheus",
+			wantAccepted: true,
+			// idx=6, maxIdx=10-4=6 -> 1.0 - 0.9 = 0.1.
+			wantScore: 0.1,
 		},
 		{
-			name:          "substring match",
-			query:         "meth",
-			caseSensitive: false,
-			value:         "prometheus",
-			wantAccepted:  true,
-			wantScore:     0.9,
+			name:         "case mismatch is not accepted",
+			query:        "prometheus",
+			value:        "Prometheus",
+			wantAccepted: false,
+			wantScore:    0.0,
 		},
 		{
-			name:          "no match",
-			query:         "grafana",
-			caseSensitive: false,
-			value:         "prometheus",
-			wantAccepted:  false,
-			wantScore:     0.0,
+			name:         "no match",
+			query:        "grafana",
+			value:        "prometheus",
+			wantAccepted: false,
+			wantScore:    0.0,
 		},
 		{
-			name:          "empty query accepts all",
-			query:         "",
-			caseSensitive: false,
-			value:         "anything",
-			wantAccepted:  true,
-			wantScore:     1.0,
+			name:         "empty query accepts all",
+			query:        "",
+			value:        "anything",
+			wantAccepted: true,
+			wantScore:    1.0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filter := NewSubstringFilter(tt.query, tt.caseSensitive)
+			filter := NewSubstringFilter(tt.query)
 			accepted, score := filter.Accept(tt.value)
 			require.Equal(t, tt.wantAccepted, accepted)
-			require.Equal(t, tt.wantScore, score)
+			require.InDelta(t, tt.wantScore, score, 1e-9)
 		})
 	}
 }
 
 func TestFuzzyFilter(t *testing.T) {
 	tests := []struct {
-		name          string
-		query         string
-		threshold     float64
-		caseSensitive bool
-		value         string
-		wantAccepted  bool
-		minScore      float64 // Minimum expected score.
+		name         string
+		query        string
+		threshold    float64
+		value        string
+		wantAccepted bool
+		minScore     float64 // Minimum expected score.
 	}{
 		{
-			name:          "exact match",
-			query:         "prometheus",
-			threshold:     0.8,
-			caseSensitive: false,
-			value:         "prometheus",
-			wantAccepted:  true,
-			minScore:      1.0,
+			name:         "exact match",
+			query:        "prometheus",
+			threshold:    0.8,
+			value:        "prometheus",
+			wantAccepted: true,
+			minScore:     1.0,
 		},
 		{
-			name:          "close match above threshold",
-			query:         "prometheus",
-			threshold:     0.8,
-			caseSensitive: false,
-			value:         "promethus", // Typo: one char different.
-			wantAccepted:  true,
-			minScore:      0.8,
+			name:         "close match above threshold",
+			query:        "prometheus",
+			threshold:    0.8,
+			value:        "promethus", // Typo: one char different.
+			wantAccepted: true,
+			minScore:     0.8,
 		},
 		{
-			name:          "distant match below threshold",
-			query:         "prometheus",
-			threshold:     0.8,
-			caseSensitive: false,
-			value:         "grafana",
-			wantAccepted:  false,
-			minScore:      0.0,
+			name:         "distant match below threshold",
+			query:        "prometheus",
+			threshold:    0.8,
+			value:        "grafana",
+			wantAccepted: false,
+			minScore:     0.0,
 		},
 		{
-			name:          "empty query accepts all",
-			query:         "",
-			threshold:     0.8,
-			caseSensitive: false,
-			value:         "anything",
-			wantAccepted:  true,
-			minScore:      1.0,
-		},
-		{
-			name:          "case insensitive match",
-			query:         "prometheus",
-			threshold:     0.8,
-			caseSensitive: false,
-			value:         "PROMETHEUS",
-			wantAccepted:  true,
-			minScore:      1.0,
-		},
-		{
-			name:          "case sensitive mismatch",
-			query:         "prometheus",
-			threshold:     0.8,
-			caseSensitive: true,
-			value:         "PROMETHEUS",
-			wantAccepted:  false,
-			minScore:      0.0,
+			name:         "case mismatch is not accepted",
+			query:        "prometheus",
+			threshold:    0.8,
+			value:        "PROMETHEUS",
+			wantAccepted: false,
+			minScore:     0.0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filter := NewFuzzyFilter(tt.query, tt.threshold, tt.caseSensitive)
+			filter := NewFuzzyFilter(tt.query, tt.threshold)
 			accepted, score := filter.Accept(tt.value)
 			require.Equal(t, tt.wantAccepted, accepted)
 			if tt.wantAccepted {
@@ -177,29 +148,8 @@ func TestFuzzyFilter(t *testing.T) {
 	}
 }
 
-func TestFuzzyFilterCaching(t *testing.T) {
-	filter := NewFuzzyFilter("prometheus", 0.8, false)
-
-	// First call: cache miss.
-	accepted1, score1 := filter.Accept("promethus")
-	require.True(t, accepted1)
-	require.Greater(t, score1, 0.8)
-
-	// Second call: cache hit (should return same score).
-	accepted2, score2 := filter.Accept("promethus")
-	require.True(t, accepted2)
-	require.Equal(t, score1, score2)
-
-	// Verify cache contains the value.
-	filter.mu.RLock()
-	cachedScore, found := filter.cache["promethus"]
-	filter.mu.RUnlock()
-	require.True(t, found)
-	require.Equal(t, score1, cachedScore)
-}
-
 func TestFuzzyFilterConcurrency(t *testing.T) {
-	filter := NewFuzzyFilter("prometheus", 0.8, false)
+	filter := NewFuzzyFilter("prometheus", 0.8)
 	values := []string{"prometheus", "promethus", "promethius", "prmetheus", "prometeus"} //nolint:misspell
 
 	var wg sync.WaitGroup
@@ -212,104 +162,70 @@ func TestFuzzyFilterConcurrency(t *testing.T) {
 	}
 
 	wg.Wait()
-
-	// Verify cache contains all values.
-	filter.mu.RLock()
-	defer filter.mu.RUnlock()
-	require.Len(t, filter.cache, len(values))
-	for _, value := range values {
-		_, found := filter.cache[value]
-		require.True(t, found, "value %s not in cache", value)
-	}
 }
 
 func TestSubsequenceFilter(t *testing.T) {
 	tests := []struct {
-		name          string
-		query         string
-		threshold     float64
-		caseSensitive bool
-		value         string
-		wantAccepted  bool
-		wantScore     float64 // -1 means "any positive value".
+		name         string
+		query        string
+		threshold    float64
+		value        string
+		wantAccepted bool
+		wantScore    float64 // -1 means "any positive value".
 	}{
 		{
-			name:          "empty query accepts all",
-			query:         "",
-			threshold:     0.0,
-			caseSensitive: false,
-			value:         "anything",
-			wantAccepted:  true,
-			wantScore:     1.0,
+			name:         "exact match",
+			query:        "prometheus",
+			threshold:    1.0,
+			value:        "prometheus",
+			wantAccepted: true,
+			wantScore:    1.0,
 		},
 		{
-			name:          "exact match",
-			query:         "prometheus",
-			threshold:     1.0,
-			caseSensitive: true,
-			value:         "prometheus",
-			wantAccepted:  true,
-			wantScore:     1.0,
+			name:         "prefix match scores 1.0",
+			query:        "prom",
+			threshold:    1.0,
+			value:        "prometheus",
+			wantAccepted: true,
+			wantScore:    1.0,
 		},
 		{
-			name:          "prefix match scores 1.0",
-			query:         "prom",
-			threshold:     1.0,
-			caseSensitive: true,
-			value:         "prometheus",
-			wantAccepted:  true,
-			wantScore:     1.0,
+			name:         "subsequence match above zero threshold",
+			query:        "pms",
+			threshold:    0.0,
+			value:        "prometheus",
+			wantAccepted: true,
+			wantScore:    -1,
 		},
 		{
-			name:          "subsequence match above zero threshold",
-			query:         "pms",
-			threshold:     0.0,
-			caseSensitive: true,
-			value:         "prometheus",
-			wantAccepted:  true,
-			wantScore:     -1,
+			name:         "non-subsequence rejected",
+			query:        "xyz",
+			threshold:    0.0,
+			value:        "prometheus",
+			wantAccepted: false,
+			wantScore:    0.0,
 		},
 		{
-			name:          "non-subsequence rejected",
-			query:         "xyz",
-			threshold:     0.0,
-			caseSensitive: true,
-			value:         "prometheus",
-			wantAccepted:  false,
-			wantScore:     0.0,
+			name:         "case mismatch rejected",
+			query:        "prom",
+			threshold:    0.0,
+			value:        "PROMETHEUS",
+			wantAccepted: false,
+			wantScore:    0.0,
 		},
 		{
-			name:          "case insensitive match",
-			query:         "prom",
-			threshold:     1.0,
-			caseSensitive: false,
-			value:         "PROMETHEUS",
-			wantAccepted:  true,
-			wantScore:     1.0,
-		},
-		{
-			name:          "case sensitive mismatch",
-			query:         "prom",
-			threshold:     0.0,
-			caseSensitive: true,
-			value:         "PROMETHEUS",
-			wantAccepted:  false,
-			wantScore:     0.0,
-		},
-		{
-			name:          "below threshold rejected",
-			query:         "pms",
-			threshold:     0.99,
-			caseSensitive: true,
-			value:         "prometheus",
-			wantAccepted:  false,
-			wantScore:     -1,
+			name:         "below threshold rejected",
+			query:        "pms",
+			threshold:    0.99,
+			value:        "prometheus",
+			wantAccepted: false,
+			wantScore:    -1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filter := NewSubsequenceFilter(tt.query, tt.threshold, tt.caseSensitive)
+			filter := NewSubsequenceFilter(tt.query, tt.threshold)
 			accepted, score := filter.Accept(tt.value)
 			require.Equal(t, tt.wantAccepted, accepted)
 			if tt.wantScore >= 0 {
@@ -319,13 +235,25 @@ func TestSubsequenceFilter(t *testing.T) {
 	}
 }
 
+func TestCaseFoldingFilter(t *testing.T) {
+	// Inner filter expects lowercased query and value.
+	inner := NewSubstringFilter("prom")
+	wrapped := newCaseFoldingFilter(inner)
+
+	accepted, score := wrapped.Accept("Prometheus")
+	require.True(t, accepted)
+	require.Equal(t, 1.0, score)
+
+	accepted, _ = wrapped.Accept("Grafana")
+	require.False(t, accepted)
+}
+
 func TestOrFilter(t *testing.T) {
 	tests := []struct {
 		name           string
 		substringQuery string
 		fuzzyQuery     string
 		fuzzyThreshold float64
-		caseSensitive  bool
 		value          string
 		wantAccepted   bool
 		minScore       float64
@@ -333,7 +261,6 @@ func TestOrFilter(t *testing.T) {
 		{
 			name:           "substring match only",
 			substringQuery: "prom",
-			caseSensitive:  true,
 			value:          "prometheus",
 			wantAccepted:   true,
 			minScore:       1.0, // Prefix match.
@@ -341,7 +268,6 @@ func TestOrFilter(t *testing.T) {
 		{
 			name:           "substring rejects",
 			substringQuery: "prom",
-			caseSensitive:  true,
 			value:          "node",
 			wantAccepted:   false,
 		},
@@ -350,7 +276,6 @@ func TestOrFilter(t *testing.T) {
 			substringQuery: "go_gor",
 			fuzzyQuery:     "go_gor",
 			fuzzyThreshold: 0.8,
-			caseSensitive:  true,
 			value:          "go_goroutins", // Not substring, but fuzzy matches.
 			wantAccepted:   true,
 			minScore:       0.8,
@@ -369,10 +294,10 @@ func TestOrFilter(t *testing.T) {
 			var fuzzyFilter *FuzzyFilter
 
 			if tt.substringQuery != "" {
-				substringFilter = NewSubstringFilter(tt.substringQuery, tt.caseSensitive)
+				substringFilter = NewSubstringFilter(tt.substringQuery)
 			}
 			if tt.fuzzyQuery != "" {
-				fuzzyFilter = NewFuzzyFilter(tt.fuzzyQuery, tt.fuzzyThreshold, tt.caseSensitive)
+				fuzzyFilter = NewFuzzyFilter(tt.fuzzyQuery, tt.fuzzyThreshold)
 			}
 
 			filter := &orFilter{substringFilter: substringFilter, fuzzyFilter: fuzzyFilter}
@@ -387,89 +312,64 @@ func TestOrFilter(t *testing.T) {
 }
 
 func TestChainFilter(t *testing.T) {
+	type filterSpec struct {
+		query       string
+		threshold   float64
+		isSubstring bool
+	}
 	tests := []struct {
-		name    string
-		filters []struct {
-			query         string
-			threshold     float64
-			caseSensitive bool
-			isSubstring   bool
-		}
+		name         string
+		filters      []filterSpec
 		value        string
 		wantAccepted bool
-		maxScore     float64 // Maximum expected score (minimum from filters).
+		wantScore    float64
 	}{
 		{
 			name: "both filters accept",
-			filters: []struct {
-				query         string
-				threshold     float64
-				caseSensitive bool
-				isSubstring   bool
-			}{
-				{query: "prom", isSubstring: true, caseSensitive: false},
-				{query: "prometheus", threshold: 0.8, caseSensitive: false},
+			filters: []filterSpec{
+				{query: "prom", isSubstring: true},
+				{query: "prometheus", threshold: 0.8},
 			},
 			value:        "prometheus",
 			wantAccepted: true,
-			maxScore:     1.0,
+			wantScore:    1.0,
 		},
 		{
 			name: "first filter rejects",
-			filters: []struct {
-				query         string
-				threshold     float64
-				caseSensitive bool
-				isSubstring   bool
-			}{
-				{query: "grafana", isSubstring: true, caseSensitive: false},
-				{query: "prometheus", threshold: 0.8, caseSensitive: false},
+			filters: []filterSpec{
+				{query: "grafana", isSubstring: true},
+				{query: "prometheus", threshold: 0.8},
 			},
 			value:        "prometheus",
 			wantAccepted: false,
-			maxScore:     0.0,
+			wantScore:    0.0,
 		},
 		{
 			name: "second filter rejects",
-			filters: []struct {
-				query         string
-				threshold     float64
-				caseSensitive bool
-				isSubstring   bool
-			}{
-				{query: "prom", isSubstring: true, caseSensitive: false},
-				{query: "grafana", threshold: 0.9, caseSensitive: false},
+			filters: []filterSpec{
+				{query: "prom", isSubstring: true},
+				{query: "grafana", threshold: 0.9},
 			},
 			value:        "prometheus",
 			wantAccepted: false,
-			maxScore:     0.0,
+			wantScore:    0.0,
 		},
 		{
-			name: "empty chain accepts all",
-			filters: []struct {
-				query         string
-				threshold     float64
-				caseSensitive bool
-				isSubstring   bool
-			}{},
+			name:         "empty chain accepts all",
+			filters:      nil,
 			value:        "anything",
 			wantAccepted: true,
-			maxScore:     1.0,
+			wantScore:    1.0,
 		},
 		{
-			name: "minimum score from multiple filters",
-			filters: []struct {
-				query         string
-				threshold     float64
-				caseSensitive bool
-				isSubstring   bool
-			}{
-				{query: "prom", isSubstring: true, caseSensitive: false},    // Score: 1.0 (prefix).
-				{query: "prometheus", threshold: 0.5, caseSensitive: false}, // Score: 1.0 (exact).
+			name: "max score wins for ranking",
+			filters: []filterSpec{
+				{query: "prom", isSubstring: true},    // Score: 1.0 (prefix).
+				{query: "prometheus", threshold: 0.5}, // Score: 1.0 (exact).
 			},
 			value:        "prometheus",
 			wantAccepted: true,
-			maxScore:     1.0, // Both return 1.0, minimum is 1.0.
+			wantScore:    1.0,
 		},
 	}
 
@@ -478,20 +378,16 @@ func TestChainFilter(t *testing.T) {
 			var filters []storage.Filter
 			for _, f := range tt.filters {
 				if f.isSubstring {
-					filters = append(filters, NewSubstringFilter(f.query, f.caseSensitive))
+					filters = append(filters, NewSubstringFilter(f.query))
 				} else {
-					filters = append(filters, NewFuzzyFilter(f.query, f.threshold, f.caseSensitive))
+					filters = append(filters, NewFuzzyFilter(f.query, f.threshold))
 				}
 			}
 
 			chain := NewChainFilter(filters...)
 			accepted, score := chain.Accept(tt.value)
 			require.Equal(t, tt.wantAccepted, accepted)
-			if tt.wantAccepted {
-				require.LessOrEqual(t, score, tt.maxScore+0.01) // Allow small floating point error.
-			} else {
-				require.Equal(t, 0.0, score)
-			}
+			require.InDelta(t, tt.wantScore, score, 1e-9)
 		})
 	}
 }

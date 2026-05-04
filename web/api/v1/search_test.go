@@ -728,27 +728,31 @@ func TestMatchName(t *testing.T) {
 			wantMatched: false, // Fuzzy disabled with threshold=100.
 		},
 		{
-			// Substring but not prefix gets score 0.9.
+			// Substring but not prefix gets a position-based score < 1.0.
+			// idx=3, maxIdx=13-9=4 -> 1.0 - 0.9*3/4 = 0.325.
 			name: "go_goroutines", search: "goroutine", fuzzThreshold: 100, caseSensitive: true,
-			wantMatched: true, wantScore: 0.9,
+			wantMatched: true, wantScore: 0.325,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name+"_"+tt.search, func(t *testing.T) {
-			// Build filters to match search logic (OR, not AND).
-			var substringFilter *SubstringFilter
-			var fuzzyFilter *FuzzyFilter
-			if tt.search != "" {
-				substringFilter = NewSubstringFilter(tt.search, tt.caseSensitive)
-				if tt.fuzzThreshold < 100 {
-					threshold := float64(tt.fuzzThreshold) / 100.0
-					fuzzyFilter = NewFuzzyFilter(tt.search, threshold, tt.caseSensitive)
-				}
+			searches := []string{tt.search}
+			if tt.search == "" {
+				searches = nil
 			}
-			filter := &orFilter{substringFilter: substringFilter, fuzzyFilter: fuzzyFilter}
+			filter := buildSearchFilter(searches, tt.fuzzThreshold, "jarowinkler", tt.caseSensitive)
 
-			matched, score := filter.Accept(tt.name)
+			var (
+				matched bool
+				score   float64
+			)
+			if filter == nil {
+				matched, score = true, 1.0
+			} else {
+				matched, score = filter.Accept(tt.name)
+			}
+
 			require.Equal(t, tt.wantMatched, matched)
 			if tt.wantMatched && tt.wantScore > 0 {
 				require.InDelta(t, tt.wantScore, score, 0.01)
