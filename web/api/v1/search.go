@@ -633,6 +633,8 @@ func searchLabelNames(ctx context.Context, searcher storage.Searcher, matcherSet
 // Empty search terms are skipped. Returns nil when no usable search terms remain.
 // For case-insensitive search, the query is lowercased here and the chain is wrapped
 // with caseFoldingFilter so values are lowercased once at the top of the chain.
+// The returned filter is wrapped with memoizingFilter so values that reach the
+// chain multiple times in one search (e.g. once per TSDB block) are scored once.
 func buildSearchFilter(searches []string, fuzzThreshold int, fuzzAlg string, caseSensitive bool) storage.Filter {
 	terms := make([]string, 0, len(searches))
 	for _, s := range searches {
@@ -676,7 +678,7 @@ func buildSearchFilter(searches []string, fuzzThreshold int, fuzzAlg string, cas
 	if !caseSensitive {
 		combined = newCaseFoldingFilter(combined)
 	}
-	return combined
+	return newMemoizingFilter(combined)
 }
 
 // searchMetricNames handles GET/POST /api/v1/search/metric_names.

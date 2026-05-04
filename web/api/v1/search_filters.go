@@ -15,6 +15,7 @@ package v1
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/strutil"
@@ -127,6 +128,47 @@ func newCaseFoldingFilter(inner storage.Filter) *caseFoldingFilter {
 // Accept lowercases the value and delegates to the inner filter.
 func (f *caseFoldingFilter) Accept(value string) (bool, float64) {
 	return f.inner.Accept(strings.ToLower(value))
+}
+
+// memoEntry stores a cached filter result.
+type memoEntry struct {
+	accepted bool
+	score    float64
+}
+
+// memoizingFilter caches the (accepted, score) returned by the inner filter
+// for each distinct value. It is intended to be used as the outermost wrapper
+// in buildSearchFilter so that values reaching the chain multiple times in a
+// single search (e.g. once per TSDB block during a multi-block lookup) are
+// scored only once.
+type memoizingFilter struct {
+	inner storage.Filter
+	mu    sync.RWMutex
+	cache map[string]memoEntry
+}
+
+func newMemoizingFilter(inner storage.Filter) *memoizingFilter {
+	return &memoizingFilter{
+		inner: inner,
+		cache: make(map[string]memoEntry),
+	}
+}
+
+// Accept returns the cached result for value, computing and caching it on miss.
+// Concurrent callers may both compute on a miss; results are deterministic so
+// the duplicate work is harmless and the final cache entry is the same.
+func (f *memoizingFilter) Accept(value string) (bool, float64) {
+	f.mu.RLock()
+	e, ok := f.cache[value]
+	f.mu.RUnlock()
+	if ok {
+		return e.accepted, e.score
+	}
+	accepted, score := f.inner.Accept(value)
+	f.mu.Lock()
+	f.cache[value] = memoEntry{accepted: accepted, score: score}
+	f.mu.Unlock()
+	return accepted, score
 }
 
 // ChainFilter combines multiple filters with AND logic.

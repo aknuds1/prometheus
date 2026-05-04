@@ -235,6 +235,53 @@ func TestSubsequenceFilter(t *testing.T) {
 	}
 }
 
+// countingFilter records how many times Accept is called per value.
+type countingFilter struct {
+	mu     sync.Mutex
+	calls  map[string]int
+	result map[string]memoEntry
+}
+
+func (f *countingFilter) Accept(value string) (bool, float64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls[value]++
+	r := f.result[value]
+	return r.accepted, r.score
+}
+
+func TestMemoizingFilter(t *testing.T) {
+	inner := &countingFilter{
+		calls: map[string]int{},
+		result: map[string]memoEntry{
+			"prometheus": {accepted: true, score: 1.0},
+			"grafana":    {accepted: false, score: 0.0},
+		},
+	}
+	memo := newMemoizingFilter(inner)
+
+	// First call computes.
+	accepted, score := memo.Accept("prometheus")
+	require.True(t, accepted)
+	require.Equal(t, 1.0, score)
+
+	// Repeat calls hit the cache.
+	for range 5 {
+		accepted, score = memo.Accept("prometheus")
+		require.True(t, accepted)
+		require.Equal(t, 1.0, score)
+	}
+
+	// Distinct values are computed once each.
+	accepted, score = memo.Accept("grafana")
+	require.False(t, accepted)
+	require.Equal(t, 0.0, score)
+	memo.Accept("grafana")
+
+	require.Equal(t, 1, inner.calls["prometheus"])
+	require.Equal(t, 1, inner.calls["grafana"])
+}
+
 func TestCaseFoldingFilter(t *testing.T) {
 	// Inner filter expects lowercased query and value.
 	inner := NewSubstringFilter("prom")
