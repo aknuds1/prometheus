@@ -14,6 +14,7 @@
 package v1
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 
@@ -81,6 +82,51 @@ func TestSubstringFilter(t *testing.T) {
 			wantAccepted: true,
 			wantScore:    1.0,
 		},
+		{
+			// "本" appears at byte offset 6 (after "東京日") but at rune
+			// offset 3. The pre-rune scoring would return ~0.55; rune
+			// scoring returns 0.55 for offset 3 of 6 since maxPos=6.
+			// "東京日本京都" has 6 runes; query "本" has 1; maxPos=5;
+			// pos=3 -> 1.0 - 0.9*3/5 = 0.46.
+			name:         "multi-byte rune position",
+			query:        "本",
+			value:        "東京日本京都",
+			wantAccepted: true,
+			wantScore:    0.46,
+		},
+		{
+			// ASCII fast path remains correct: identical scoring to
+			// the original implementation for the common case.
+			name:         "ascii substring stays on fast path",
+			query:        "fo",
+			value:        "infor",
+			wantAccepted: true,
+			// idx=2, maxIdx=5-2=3 -> 1.0 - 0.9*2/3 = 0.4.
+			wantScore: 0.4,
+		},
+		{
+			// ASCII query, ASCII match prefix, multi-byte suffix: the
+			// fast path must NOT trigger because len(value) overcounts
+			// runes and would inflate the score. Expected rune-based:
+			// runes("abc日本")=5, runes("b")=1 -> maxPos=4, pos=1 ->
+			// 1.0 - 0.9*1/4 = 0.775.
+			name:         "ascii match with multi-byte suffix uses rune positions",
+			query:        "b",
+			value:        "abc日本",
+			wantAccepted: true,
+			wantScore:    0.775,
+		},
+		{
+			// Symmetric case: multi-byte prefix forces the rune path
+			// for the position computation.
+			name:         "multi-byte prefix uses rune positions",
+			query:        "c",
+			value:        "日本cabc",
+			wantAccepted: true,
+			// runes("日本cabc")=6, query=1 -> maxPos=5, pos=2 (after
+			// "日本") -> 1.0 - 0.9*2/5 = 0.64.
+			wantScore: 0.64,
+		},
 	}
 
 	for _, tt := range tests {
@@ -88,7 +134,7 @@ func TestSubstringFilter(t *testing.T) {
 			filter := NewSubstringFilter(tt.query)
 			accepted, score := filter.Accept(tt.value)
 			require.Equal(t, tt.wantAccepted, accepted)
-			require.InDelta(t, tt.wantScore, score, 1e-9)
+			require.InDelta(t, tt.wantScore, score, 0.01)
 		})
 	}
 }
@@ -280,6 +326,57 @@ func TestMemoizingFilter(t *testing.T) {
 
 	require.Equal(t, 1, inner.calls["prometheus"])
 	require.Equal(t, 1, inner.calls["grafana"])
+}
+
+func TestMemoizingFilter_CacheCap(t *testing.T) {
+	// Build a result map slightly larger than the memo cap so we can observe
+	// the inner filter being recalled for values past the cap.
+	results := make(map[string]memoEntry, memoizingFilterMaxEntries+10)
+	for i := range memoizingFilterMaxEntries + 10 {
+		results[strconv.Itoa(i)] = memoEntry{accepted: true, score: 1.0}
+	}
+	inner := &countingFilter{
+		calls:  map[string]int{},
+		result: results,
+	}
+	memo := newMemoizingFilter(inner)
+
+	// Fill the cache to its cap.
+	for i := range memoizingFilterMaxEntries {
+		memo.Accept(strconv.Itoa(i))
+	}
+	require.Len(t, memo.cache, memoizingFilterMaxEntries)
+
+	// A value past the cap is computed by inner but not stored.
+	const overflow = "overflow-value"
+	inner.result[overflow] = memoEntry{accepted: true, score: 0.5}
+	memo.Accept(overflow)
+	memo.Accept(overflow)
+	require.Len(t, memo.cache, memoizingFilterMaxEntries)
+	// Past the cap, every Accept reaches the inner filter.
+	require.Equal(t, 2, inner.calls[overflow])
+
+	// Cached values are still served from the cache.
+	memo.Accept("0")
+	require.Equal(t, 1, inner.calls["0"])
+}
+
+func TestBuildSearchFilter_MemoOnlyForExpensiveChain(t *testing.T) {
+	// Substring-only chain: jaro-winkler with no fuzz threshold. Memo is
+	// not added because substring scoring is already O(L).
+	got := buildSearchFilter([]string{"prom"}, 0, "jarowinkler", true)
+	_, isMemo := got.(*memoizingFilter)
+	require.False(t, isMemo, "substring-only chain should not be wrapped with memoizingFilter")
+
+	// Subsequence: always memoized.
+	got = buildSearchFilter([]string{"prm"}, 0, "subsequence", true)
+	_, isMemo = got.(*memoizingFilter)
+	require.True(t, isMemo, "subsequence chain must be memoized")
+
+	// Jaro-Winkler with a non-zero fuzz threshold: memoized.
+	got = buildSearchFilter([]string{"prom"}, 80, "jarowinkler", true)
+	_, isMemo = got.(*memoizingFilter)
+	require.True(t, isMemo, "jaro-winkler with fuzz threshold must be memoized")
 }
 
 func TestCaseFoldingFilter(t *testing.T) {

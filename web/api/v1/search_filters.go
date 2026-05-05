@@ -15,7 +15,7 @@ package v1
 
 import (
 	"strings"
-	"sync"
+	"unicode/utf8"
 
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/strutil"
@@ -41,6 +41,11 @@ func NewSubstringFilter(query string) *SubstringFilter {
 
 // Accept returns true if the value contains the substring query, with a score
 // that decreases as the match position moves toward the end of the value.
+//
+// The position component is computed in characters (runes), not bytes, so a
+// match at character offset 1 in a multi-byte string scores the same as a
+// match at byte offset 1 in an ASCII string. An ASCII fast path keeps the
+// common case at byte arithmetic.
 func (f *SubstringFilter) Accept(value string) (bool, float64) {
 	if f.query == "" {
 		return true, 1.0
@@ -52,10 +57,39 @@ func (f *SubstringFilter) Accept(value string) (bool, float64) {
 	if idx == 0 {
 		return true, 1.0
 	}
+	var pos, maxPos int
+	// The fast path requires the entire value to be ASCII: if any byte
+	// after the match is multi-byte, len(value) overcounts characters and
+	// inflates the score. Checking the whole string is O(len(value)) but
+	// short-circuits on the first non-ASCII byte, so the typical metric
+	// name pays only a tight byte-loop.
+	if isASCII(f.query) && isASCII(value) {
+		pos = idx
+		maxPos = len(value) - len(f.query)
+	} else {
+		pos = utf8.RuneCountInString(value[:idx])
+		maxPos = utf8.RuneCountInString(value) - utf8.RuneCountInString(f.query)
+	}
+	if maxPos <= 0 {
+		// Defensive: maxPos==0 would imply value and query have equal
+		// rune counts, which forces idx==0 and is handled above. Treat
+		// any unreachable case as a perfect match rather than dividing
+		// by zero.
+		return true, 1.0
+	}
 	// Scale to [0.1, 1.0). Earlier positions score closer to 1.0.
-	maxIdx := len(value) - len(f.query)
-	score := 1.0 - 0.9*float64(idx)/float64(maxIdx)
+	score := 1.0 - 0.9*float64(pos)/float64(maxPos)
 	return true, score
+}
+
+// isASCII reports whether s contains only ASCII bytes (< 0x80).
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // FuzzyFilter implements Jaro-Winkler fuzzy matching against a query.
@@ -136,14 +170,24 @@ type memoEntry struct {
 	score    float64
 }
 
+// memoizingFilterMaxEntries caps the memoization cache. Past the cap, lookups
+// fall through to the inner filter so a search over a label with millions of
+// distinct values cannot inflate per-request memory without bound.
+const memoizingFilterMaxEntries = 100_000
+
 // memoizingFilter caches the (accepted, score) returned by the inner filter
 // for each distinct value. It is intended to be used as the outermost wrapper
 // in buildSearchFilter so that values reaching the chain multiple times in a
 // single search (e.g. once per TSDB block during a multi-block lookup) are
 // scored only once.
+//
+// memoizingFilter is not safe for concurrent use: the search path drives
+// SearchResultSet iteration from a single goroutine (the merge driver pulls
+// child sets sequentially and ApplySearchHints runs synchronously inside one
+// Searcher). Adding a cache lock would charge every Accept on the hot path
+// without buying anything, so the lock is omitted.
 type memoizingFilter struct {
 	inner storage.Filter
-	mu    sync.RWMutex
 	cache map[string]memoEntry
 }
 
@@ -155,19 +199,17 @@ func newMemoizingFilter(inner storage.Filter) *memoizingFilter {
 }
 
 // Accept returns the cached result for value, computing and caching it on miss.
-// Concurrent callers may both compute on a miss; results are deterministic so
-// the duplicate work is harmless and the final cache entry is the same.
+// Once the cache reaches memoizingFilterMaxEntries the inner filter is called
+// directly without populating the cache further; this preserves correctness
+// while bounding memory.
 func (f *memoizingFilter) Accept(value string) (bool, float64) {
-	f.mu.RLock()
-	e, ok := f.cache[value]
-	f.mu.RUnlock()
-	if ok {
+	if e, ok := f.cache[value]; ok {
 		return e.accepted, e.score
 	}
 	accepted, score := f.inner.Accept(value)
-	f.mu.Lock()
-	f.cache[value] = memoEntry{accepted: accepted, score: score}
-	f.mu.Unlock()
+	if len(f.cache) < memoizingFilterMaxEntries {
+		f.cache[value] = memoEntry{accepted: accepted, score: score}
+	}
 	return accepted, score
 }
 

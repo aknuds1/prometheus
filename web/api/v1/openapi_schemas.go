@@ -757,7 +757,7 @@ func propsMap(pairs []schemaProp) *orderedmap.Map[string, *base.SchemaProxy] {
 func commonSearchPostProps() []schemaProp {
 	return []schemaProp{
 		{"fuzz_threshold", integerSchemaWithDescriptionAndExample("Form field: Fuzzy threshold in the range 0-100. Default is 0, the lowest fuzzy threshold.", 80)},
-		{"fuzz_alg", enumStringSchemaWithDescription("Form field: Fuzzy algorithm. Supported values are subsequence (default) and jarowinkler.", FuzzAlgorithms...)},
+		{"fuzz_alg", enumStringSchemaWithDescription("Form field: Fuzzy algorithm. Supported values are subsequence (default) and jarowinkler.", FuzzAlgorithms()...)},
 		{"case_sensitive", booleanSchemaWithDescription("Form field: Whether matching is case-sensitive.")},
 		{"sort_by", enumStringSchemaWithDescription("Form field: Sort mode. Supported values are alpha and score. If unset, results are returned in natural order.", "alpha", "score")},
 		{"sort_dir", enumStringSchemaWithDescription("Form field: Sort direction. Only valid with sort_by=alpha. Supported values are asc and dsc.", "asc", "dsc")},

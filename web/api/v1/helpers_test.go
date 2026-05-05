@@ -53,6 +53,7 @@ func newTestAPI(t *testing.T, cfg testhelpers.APIConfig) *testhelpers.APIWrapper
 		params.DBDir,
 		false, // enableAdmin
 		false, // enableSearch
+		0,     // maxSearchLimit
 		params.Logger,
 		func(ctx context.Context) RulesRetriever {
 			return adaptRulesRetriever(params.RulesRetriever(ctx))

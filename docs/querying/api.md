@@ -539,17 +539,32 @@ POST /api/v1/search/label_values
 ```
 
 These endpoints return newline-delimited JSON with content type
-`application/x-ndjson`. Each response contains one or more result batches,
-followed by a final trailer line:
+`application/x-ndjson`. The stream contract is:
+
+- Zero or more **batch lines**, each with a `results` array and an optional
+  `warnings` array.
+- The stream then ends with **either** a **trailer line** (`status`, `has_more`,
+  optional `warnings`) **or** an **error line** (`status`, `errorType`, `error`)
+  if iteration failed mid-stream after the first batch was sent.
 
 ```json
 {"results":[{"name":"http_requests_total","type":"counter","help":"Total HTTP requests."}]}
 {"status":"success","has_more":false}
 ```
 
-If an error occurs before streaming starts, the API returns the usual
-Prometheus JSON error object. If an error occurs after streaming starts, the
-stream ends with an NDJSON error line instead.
+If an error occurs **before** streaming starts, the API returns the usual
+Prometheus JSON error object with a 4xx/5xx status code. If an error occurs
+**after** streaming starts, the stream ends with an NDJSON error line in place
+of the trailer.
+
+Clients must tolerate an abrupt EOF without a trailer (for example, on
+transport failure or server shutdown) and must ignore unknown fields in the
+trailer for forward compatibility.
+
+The `has_more` field in the trailer is informational only: this version of
+the API does not provide a pagination cursor. To retrieve more results, raise
+`limit` (subject to the operator-configured `--web.search.max-limit`) or narrow
+the request via `match[]`. A future version of the API may add a cursor.
 
 Common URL query parameters:
 

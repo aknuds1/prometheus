@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -105,11 +106,21 @@ func parseNDJSON(t *testing.T, body string) []json.RawMessage {
 // doSearchRequest performs a GET request to the search endpoint.
 func doSearchRequest(t *testing.T, api *API, path string, params url.Values) *httptest.ResponseRecorder {
 	t.Helper()
+	return doSearchRequestCtx(t, api, path, params, nil)
+}
+
+// doSearchRequestCtx performs a GET request to the search endpoint with a
+// caller-supplied context. A nil ctx uses the default request context.
+func doSearchRequestCtx(t *testing.T, api *API, path string, params url.Values, ctx context.Context) *httptest.ResponseRecorder {
+	t.Helper()
 
 	r := route.New()
 	api.Register(r)
 
 	req := httptest.NewRequest(http.MethodGet, path+"?"+params.Encode(), http.NoBody)
+	if ctx != nil {
+		req = req.WithContext(ctx)
+	}
 	rec := httptest.NewRecorder()
 
 	r.ServeHTTP(rec, req)
@@ -485,6 +496,70 @@ func TestSearchMetricNames(t *testing.T) {
 		require.Len(t, batch.Results, 1)
 	})
 
+	t.Run("end before start is rejected", func(t *testing.T) {
+		rec := doSearchRequest(t, api, "/search/metric_names", url.Values{
+			"start": []string{"7200"},
+			"end":   []string{"3600"},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Contains(t, rec.Body.String(), "end timestamp must not be before start timestamp")
+	})
+
+	t.Run("limit cap rejects excessive limits", func(t *testing.T) {
+		capped := newSearchTestAPI(t)
+		capped.maxSearchLimit = 50
+
+		rec := doSearchRequest(t, capped, "/search/metric_names", url.Values{
+			"limit": []string{"5000"},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Contains(t, rec.Body.String(), "exceeds the configured maximum")
+	})
+
+	t.Run("limit cap below default still serves request", func(t *testing.T) {
+		// Operators with a small cap should still be able to serve requests
+		// that omit "limit"; the implicit default must shrink to the cap,
+		// and the trailer must still report has_more so the client knows
+		// the cap truncated the result set.
+		capped := newSearchTestAPI(t)
+		capped.maxSearchLimit = 3
+
+		rec := doSearchRequest(t, capped, "/search/metric_names", url.Values{})
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		lines := parseNDJSON(t, rec.Body.String())
+		require.NotEmpty(t, lines)
+		var batch searchBatch[searchMetricNameResult]
+		require.NoError(t, json.Unmarshal(lines[0], &batch))
+		require.LessOrEqual(t, len(batch.Results), 3,
+			"default limit must be clamped to maxSearchLimit when smaller")
+
+		var trailer searchTrailer
+		require.NoError(t, json.Unmarshal(lines[len(lines)-1], &trailer))
+		require.Equal(t, "success", trailer.Status)
+		require.True(t, trailer.HasMore,
+			"has_more must be true when the cap truncated a fixture with more values than the cap")
+	})
+
+	t.Run("limit cap allows in-range explicit limit", func(t *testing.T) {
+		capped := newSearchTestAPI(t)
+		capped.maxSearchLimit = 50
+
+		rec := doSearchRequest(t, capped, "/search/metric_names", url.Values{
+			"limit": []string{"2"},
+		})
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("limit cap zero disables the cap", func(t *testing.T) {
+		// maxSearchLimit defaults to 0 in the test fixture; oversize limits
+		// must therefore be accepted.
+		rec := doSearchRequest(t, api, "/search/metric_names", url.Values{
+			"limit": []string{"100000"},
+		})
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
 	t.Run("multiple match sets are merged and deduplicated", func(t *testing.T) {
 		rec := doSearchRequest(t, api, "/search/metric_names", url.Values{
 			"match[]": []string{"up", `{job="prometheus"}`},
@@ -759,4 +834,274 @@ func TestMatchName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// countingTargetRetriever wraps a TargetRetriever and counts TargetsActive
+// invocations, used to assert that buildMetricMetadataMap is called once per
+// search request rather than once per result.
+type countingTargetRetriever struct {
+	inner            TargetRetriever
+	targetsActiveCnt int
+}
+
+func (c *countingTargetRetriever) ScrapePoolConfig(pool string) (*config.ScrapeConfig, error) {
+	return c.inner.ScrapePoolConfig(pool)
+}
+
+func (c *countingTargetRetriever) TargetsActive() map[string][]*scrape.Target {
+	c.targetsActiveCnt++
+	return c.inner.TargetsActive()
+}
+
+func (c *countingTargetRetriever) TargetsDropped() map[string][]*scrape.Target {
+	return c.inner.TargetsDropped()
+}
+
+func (c *countingTargetRetriever) TargetsDroppedCounts() map[string]int {
+	return c.inner.TargetsDroppedCounts()
+}
+
+func TestSearchMetricNamesMetadataMapBuiltOnce(t *testing.T) {
+	api := newSearchTestAPI(t)
+	counting := &countingTargetRetriever{inner: api.targetRetriever(t.Context())}
+	api.targetRetriever = func(context.Context) TargetRetriever { return counting }
+
+	rec := doSearchRequest(t, api, "/search/metric_names", url.Values{
+		"include_metadata": []string{"true"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	lines := parseNDJSON(t, rec.Body.String())
+	var batch searchBatch[searchMetricNameResult]
+	require.NoError(t, json.Unmarshal(lines[0], &batch))
+	require.GreaterOrEqual(t, len(batch.Results), 5)
+
+	require.Equal(t, 1, counting.targetsActiveCnt,
+		"buildMetricMetadataMap must call TargetsActive exactly once per request")
+}
+
+func TestSearchMetricNamesMetadataMapNotBuiltWhenEmpty(t *testing.T) {
+	// With no matching results, the lazy metadata builder must not run at
+	// all so that the request avoids the scrape-manager lock entirely.
+	api := newSearchTestAPI(t)
+	counting := &countingTargetRetriever{inner: api.targetRetriever(t.Context())}
+	api.targetRetriever = func(context.Context) TargetRetriever { return counting }
+
+	rec := doSearchRequest(t, api, "/search/metric_names", url.Values{
+		"include_metadata": []string{"true"},
+		"search[]":         []string{"this_metric_definitely_does_not_exist_xyz"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, 0, counting.targetsActiveCnt,
+		"buildMetricMetadataMap must not be called when no results are emitted")
+}
+
+// sequentialSearchQuerier returns a different SearchResultSet for each
+// successive call to SearchLabelNames or SearchLabelValues. It is used to test
+// the multi-matcher-set merge behaviour where one set fails and the others
+// must still surface their results.
+type sequentialSearchQuerier struct {
+	errorTestQuerier
+	calls           []sequentialResp
+	labelNameCount  int
+	labelValueCount int
+}
+
+type sequentialResp struct {
+	results []storage.SearchResult
+	err     error
+}
+
+func (q *sequentialSearchQuerier) nextResp(idx int) sequentialResp {
+	if idx >= len(q.calls) {
+		return sequentialResp{}
+	}
+	return q.calls[idx]
+}
+
+func (q *sequentialSearchQuerier) SearchLabelNames(context.Context, *storage.SearchHints, ...*labels.Matcher) storage.SearchResultSet {
+	r := q.nextResp(q.labelNameCount)
+	q.labelNameCount++
+	if r.err != nil {
+		return storage.ErrSearchResultSet(r.err)
+	}
+	return storage.NewSearchResultSetFromSlice(r.results, nil)
+}
+
+func (q *sequentialSearchQuerier) SearchLabelValues(context.Context, string, *storage.SearchHints, ...*labels.Matcher) storage.SearchResultSet {
+	r := q.nextResp(q.labelValueCount)
+	q.labelValueCount++
+	if r.err != nil {
+		return storage.ErrSearchResultSet(r.err)
+	}
+	return storage.NewSearchResultSetFromSlice(r.results, nil)
+}
+
+func TestSearchEndpointsPartialMatcherSetError(t *testing.T) {
+	// Two match[] sets: the first yields three values, the second errors.
+	// The merge should emit the surviving set's values and the streamer
+	// then writes a mid-stream error line.
+	q := &sequentialSearchQuerier{
+		calls: []sequentialResp{
+			{results: []storage.SearchResult{
+				{Value: "alpha", Score: 1.0},
+				{Value: "beta", Score: 1.0},
+				{Value: "gamma", Score: 1.0},
+			}},
+			{err: errors.New("simulated set failure")},
+		},
+	}
+	queryable := errorTestQueryable{q: q}
+
+	api := &API{
+		Queryable:    queryable,
+		now:          func() time.Time { return time.Unix(7200, 0) },
+		ready:        func(f http.HandlerFunc) http.HandlerFunc { return f },
+		parser:       parser.NewParser(parser.Options{}),
+		enableSearch: true,
+	}
+
+	rec := doSearchRequest(t, api, "/search/metric_names", url.Values{
+		"match[]":    []string{"up", `{job="prometheus"}`},
+		"batch_size": []string{"2"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	lines := parseNDJSON(t, rec.Body.String())
+	require.NotEmpty(t, lines)
+
+	// Concatenate batch values across all batch lines.
+	var values []string
+	var lastIsError bool
+	for i, line := range lines {
+		var trailer searchTrailer
+		if err := json.Unmarshal(line, &trailer); err == nil && trailer.Status != "" {
+			if i == len(lines)-1 && trailer.Status == "error" {
+				lastIsError = true
+				continue
+			}
+		}
+		var batch searchBatch[searchMetricNameResult]
+		if err := json.Unmarshal(line, &batch); err == nil && batch.Results != nil {
+			for _, r := range batch.Results {
+				values = append(values, r.Name)
+			}
+		}
+	}
+	require.Equal(t, []string{"alpha", "beta", "gamma"}, values, "values from the surviving match[] set must reach the client")
+	require.True(t, lastIsError, "stream must terminate with an NDJSON error line, not a success trailer")
+}
+
+func TestSearchEndpointsCtxCancelled(t *testing.T) {
+	// Use a controlled fake searcher so the test does not depend on the
+	// shape of any storage fixture. With three explicit results and
+	// batch_size=1, firstBatch is non-empty and the streaming loop must
+	// observe the pre-cancelled context on its first iteration and return
+	// before writing a success trailer.
+	q := &sequentialSearchQuerier{
+		calls: []sequentialResp{
+			{results: []storage.SearchResult{
+				{Value: "alpha", Score: 1.0},
+				{Value: "beta", Score: 1.0},
+				{Value: "gamma", Score: 1.0},
+			}},
+		},
+	}
+	queryable := errorTestQueryable{q: q}
+
+	api := &API{
+		Queryable:    queryable,
+		now:          func() time.Time { return time.Unix(7200, 0) },
+		ready:        func(f http.HandlerFunc) http.HandlerFunc { return f },
+		parser:       parser.NewParser(parser.Options{}),
+		enableSearch: true,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	rec := doSearchRequestCtx(t, api, "/search/metric_names", url.Values{
+		"batch_size": []string{"1"},
+	}, ctx)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	lines := parseNDJSON(t, rec.Body.String())
+
+	// The streaming loop only checks ctx.Done() AFTER writing the first
+	// batch, so a successful run always emits at least one line before
+	// returning. An empty body would otherwise let a regression slip
+	// through this test silently.
+	require.NotEmpty(t, lines, "expected at least the first batch line to be written before ctx-cancel takes effect")
+
+	// No line should decode as a success trailer. This is robust to a
+	// truncated body, an empty firstBatch path, or an earlier exit before
+	// any batch is written.
+	for i, line := range lines {
+		var trailer searchTrailer
+		if err := json.Unmarshal(line, &trailer); err == nil {
+			require.NotEqual(t, "success", trailer.Status,
+				"line %d is a success trailer but ctx was cancelled before iteration began: %s", i, line)
+		}
+	}
+}
+
+// fixedSearchQuerier returns a caller-provided SearchResultSet for both label
+// search methods. It's used to construct controlled failure modes in tests.
+type fixedSearchQuerier struct {
+	errorTestQuerier
+	rs storage.SearchResultSet
+}
+
+func (q fixedSearchQuerier) SearchLabelNames(context.Context, *storage.SearchHints, ...*labels.Matcher) storage.SearchResultSet {
+	return q.rs
+}
+
+func (q fixedSearchQuerier) SearchLabelValues(context.Context, string, *storage.SearchHints, ...*labels.Matcher) storage.SearchResultSet {
+	return q.rs
+}
+
+// TestSearchStreamFirstBatchError exercises the boundary where the first
+// batch that streamSearchResults assembles already contains both partial
+// results and a tail error. The handler must stream the partial results
+// before terminating with an in-band NDJSON error line.
+func TestSearchStreamFirstBatchError(t *testing.T) {
+	rs := storage.NewSearchResultSetFromSliceAndError(
+		[]storage.SearchResult{
+			{Value: "alpha", Score: 1.0},
+			{Value: "beta", Score: 1.0},
+		},
+		nil,
+		errors.New("tail failure"),
+	)
+	queryable := errorTestQueryable{q: fixedSearchQuerier{rs: rs}}
+
+	api := &API{
+		Queryable:    queryable,
+		now:          func() time.Time { return time.Unix(7200, 0) },
+		ready:        func(f http.HandlerFunc) http.HandlerFunc { return f },
+		parser:       parser.NewParser(parser.Options{}),
+		enableSearch: true,
+	}
+
+	// batch_size=5 ensures both results land in firstBatch; the iterator
+	// then surfaces the tail error in the same nextBatch call.
+	rec := doSearchRequest(t, api, "/search/metric_names", url.Values{
+		"batch_size": []string{"5"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "partial first-batch results must not be lost to a JSON error response")
+
+	lines := parseNDJSON(t, rec.Body.String())
+	require.GreaterOrEqual(t, len(lines), 2, "expected a batch line followed by an error line")
+
+	var firstBatch searchBatch[searchMetricNameResult]
+	require.NoError(t, json.Unmarshal(lines[0], &firstBatch))
+	names := make([]string, 0, len(firstBatch.Results))
+	for _, r := range firstBatch.Results {
+		names = append(names, r.Name)
+	}
+	require.Equal(t, []string{"alpha", "beta"}, names)
+
+	var lastTrailer searchTrailer
+	require.NoError(t, json.Unmarshal(lines[len(lines)-1], &lastTrailer))
+	require.Equal(t, "error", lastTrailer.Status, "stream must terminate with an error line, not a success trailer")
 }

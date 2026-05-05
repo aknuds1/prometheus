@@ -203,7 +203,7 @@ func (*OpenAPIBuilder) labelValuesPath() *v3.PathItem {
 func commonSearchParams() []*v3.Parameter {
 	return []*v3.Parameter{
 		queryParamWithExample("fuzz_threshold", "Fuzzy threshold in the range 0-100. A value of 0 is the lowest fuzzy threshold.", false, integerSchema(), []example{{"example", 80}}),
-		queryParamWithExample("fuzz_alg", "Fuzzy algorithm. Supported values are subsequence (default) and jarowinkler.", false, enumStringSchema(FuzzAlgorithms...), nil),
+		queryParamWithExample("fuzz_alg", "Fuzzy algorithm. Supported values are subsequence (default) and jarowinkler.", false, enumStringSchema(FuzzAlgorithms()...), nil),
 		queryParamWithExample("case_sensitive", "Whether matching is case-sensitive.", false, booleanSchema(), []example{{"example", true}}),
 		queryParamWithExample("sort_by", "Sort mode. Supported values are alpha and score.", false, enumStringSchema("alpha", "score"), nil),
 		queryParamWithExample("sort_dir", "Sort direction. Only valid with sort_by=alpha. Supported values are asc and dsc.", false, enumStringSchema("asc", "dsc"), nil),

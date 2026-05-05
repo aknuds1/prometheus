@@ -241,6 +241,7 @@ type API struct {
 	dbDir               string
 	enableAdmin         bool
 	enableSearch        bool
+	maxSearchLimit      int
 	logger              *slog.Logger
 	CORSOrigin          *regexp.Regexp
 	buildInfo           *PrometheusVersion
@@ -282,6 +283,7 @@ func NewAPI(
 	dbDir string,
 	enableAdmin bool,
 	enableSearch bool,
+	maxSearchLimit int,
 	logger *slog.Logger,
 	rr func(context.Context) RulesRetriever,
 	remoteReadSampleLimit int,
@@ -326,6 +328,7 @@ func NewAPI(
 		dbDir:               dbDir,
 		enableAdmin:         enableAdmin,
 		enableSearch:        enableSearch,
+		maxSearchLimit:      maxSearchLimit,
 		rulesRetriever:      rr,
 		logger:              logger,
 		CORSOrigin:          corsOrigin,

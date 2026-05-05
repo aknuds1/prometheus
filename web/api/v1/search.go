@@ -13,12 +13,34 @@
 
 package v1
 
+// Search API stream contract:
+//
+//   - Successful responses use Content-Type "application/x-ndjson" and consist
+//     of one JSON object per line.
+//   - Zero or more searchBatch lines are emitted, each carrying a "results"
+//     array and an optional "warnings" array. The first batch always emits
+//     even when "results" is empty so clients can observe warnings reliably.
+//   - The stream then terminates with EITHER a searchTrailer line (status
+//     "success", optional "warnings" delta, "has_more" indicator) OR a
+//     searchErrorResponse line (status "error", "errorType", "error") if the
+//     storage backend errored mid-stream after the first batch was sent.
+//   - Errors that occur before the first batch is written are reported as the
+//     usual non-streaming JSON error object with a 4xx/5xx status code.
+//   - Clients MUST tolerate an abrupt EOF without a trailer (e.g. transport
+//     failures or server shutdown) and MUST ignore unknown fields in the
+//     trailer for forward compatibility.
+//
+// Pagination scope: this version of the API has no cursor mechanism. The
+// "has_more" flag in the trailer is informational only; clients that need
+// more results should re-issue the request with a higher "limit"
+// (subject to --web.search.max-limit) or narrow the "match[]" series selectors.
+// A future version may introduce a cursor field in the trailer.
+
 import (
-	"cmp"
-	"container/heap"
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -31,13 +53,23 @@ import (
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
-	"github.com/prometheus/prometheus/util/annotations"
 	"github.com/prometheus/prometheus/util/httputil"
 )
 
-// FuzzAlgorithms is the canonical list of supported fuzzy matching algorithms.
-// It is the single source of truth used for validation, feature registration, and API documentation.
-var FuzzAlgorithms = []string{"subsequence", "jarowinkler"}
+// defaultFuzzAlg is the algorithm assumed when fuzz_alg is not specified.
+const defaultFuzzAlg = "subsequence"
+
+// fuzzAlgorithms is the canonical list of supported fuzzy matching algorithms,
+// used by validation, feature registration, and API documentation. It is kept
+// unexported so it cannot be mutated by external packages; use FuzzAlgorithms()
+// to obtain a defensive copy.
+var fuzzAlgorithms = []string{defaultFuzzAlg, "jarowinkler"}
+
+// FuzzAlgorithms returns the canonical list of supported fuzzy matching
+// algorithms. The returned slice is a copy and may be modified safely.
+func FuzzAlgorithms() []string {
+	return slices.Clone(fuzzAlgorithms)
+}
 
 // searchParams holds the common parsed parameters for all search endpoints.
 type searchParams struct {
@@ -148,6 +180,13 @@ func (api *API) parseSearchParams(r *http.Request) (searchParams, *apiError) {
 		return sp, &apiError{errorBadData, err}
 	}
 	sp.end = end
+	// end == start is permitted: it represents a zero-duration "snapshot at
+	// this instant" search. Only strictly inverted ranges are rejected, so
+	// a client that accidentally sets end < start gets an immediate error
+	// rather than empty (and possibly misleading) results.
+	if sp.end.Before(sp.start) {
+		return sp, &apiError{errorBadData, errors.New("end timestamp must not be before start timestamp")}
+	}
 
 	if matchers := r.Form["match[]"]; len(matchers) > 0 {
 		matcherSets, err := api.parseMatchersParam(matchers)
@@ -168,11 +207,11 @@ func (api *API) parseSearchParams(r *http.Request) (searchParams, *apiError) {
 		sp.fuzzThreshold = ft
 	}
 
-	// Validate fuzz_alg if provided; FuzzAlgorithms lists all supported values.
-	sp.fuzzAlg = FuzzAlgorithms[0]
+	// Validate fuzz_alg if provided; fuzzAlgorithms lists all supported values.
+	sp.fuzzAlg = defaultFuzzAlg
 	if v := r.FormValue("fuzz_alg"); v != "" {
-		if !slices.Contains(FuzzAlgorithms, v) {
-			return sp, &apiError{errorBadData, fmt.Errorf("unsupported fuzz_alg %q: must be one of %v", v, FuzzAlgorithms)}
+		if !slices.Contains(fuzzAlgorithms, v) {
+			return sp, &apiError{errorBadData, fmt.Errorf("unsupported fuzz_alg %q: must be one of %v", v, fuzzAlgorithms)}
 		}
 		sp.fuzzAlg = v
 	}
@@ -207,13 +246,22 @@ func (api *API) parseSearchParams(r *http.Request) (searchParams, *apiError) {
 		return sp, &apiError{errorBadData, errors.New("sort_by=score requires search[] to be set")}
 	}
 
+	// Default limit is shrunk to maxSearchLimit when the operator configured
+	// a smaller cap, so a request that omits "limit" still serves up to the
+	// configured maximum rather than failing the cap check unconditionally.
 	sp.limit = 100
+	if api.maxSearchLimit > 0 && sp.limit > api.maxSearchLimit {
+		sp.limit = api.maxSearchLimit
+	}
 	if v := r.FormValue("limit"); v != "" {
 		l, err := strconv.Atoi(v)
 		if err != nil || l < 0 {
 			return sp, &apiError{errorBadData, fmt.Errorf("invalid limit %q: must be non-negative integer", v)}
 		}
 		if l > 0 {
+			if api.maxSearchLimit > 0 && l > api.maxSearchLimit {
+				return sp, &apiError{errorBadData, fmt.Errorf("limit %d exceeds the configured maximum (%d, see --web.search.max-limit)", l, api.maxSearchLimit)}
+			}
 			sp.limit = l
 		}
 	}
@@ -233,6 +281,18 @@ func (api *API) parseSearchParams(r *http.Request) (searchParams, *apiError) {
 	return sp, nil
 }
 
+// searchHintsLimit returns the storage-level Limit for a request: one above
+// sp.limit so the streamer can detect has_more by probing past the cap. The
+// saturation guard avoids the int overflow that would be possible when the
+// operator has disabled the cap with --web.search.max-limit=0 and a client
+// supplies a near-MaxInt limit.
+func searchHintsLimit(spLimit int) int {
+	if spLimit >= math.MaxInt {
+		return math.MaxInt
+	}
+	return spLimit + 1
+}
+
 func parseSearchBoolParam(r *http.Request, name string, defaultValue bool) (bool, *apiError) {
 	v := r.FormValue(name)
 	if v == "" {
@@ -245,20 +305,45 @@ func parseSearchBoolParam(r *http.Request, name string, defaultValue bool) (bool
 	return b, nil
 }
 
-// getMetricMetadata retrieves type, help, and unit metadata for a metric name.
-func (api *API) getMetricMetadata(ctx context.Context, metricName string) (typ, help, unit string, ok bool) {
+// buildMetricMetadataMap snapshots metric metadata across all active targets
+// into a single map keyed by metric family name. It is intended to be called
+// once per request when include_metadata=true so that per-result metadata
+// lookups are O(1) and we acquire the scrape manager lock only once instead
+// of once per emitted result.
+//
+// Iteration order over active targets is non-deterministic; for a metric name
+// that appears on multiple targets we keep the first metadata seen, matching
+// the prior per-result fallthrough behaviour.
+//
+// The traversal aborts as soon as ctx is done so a request that the client
+// has already abandoned (or one that has run past its deadline) does not
+// keep accumulating per-target locks. Callers tolerate a partial map: a
+// missing entry just means the result is emitted without metadata.
+func (api *API) buildMetricMetadataMap(ctx context.Context) map[string]scrape.MetricMetadata {
 	tr := api.targetRetriever(ctx)
 	if tr == nil {
-		return "", "", "", false
+		return nil
 	}
+	out := map[string]scrape.MetricMetadata{}
 	for _, targets := range tr.TargetsActive() {
+		if ctx.Err() != nil {
+			return out
+		}
 		for _, t := range targets {
-			if md, found := t.GetMetadata(metricName); found {
-				return string(md.Type), md.Help, md.Unit, true
+			if ctx.Err() != nil {
+				return out
+			}
+			for _, md := range t.ListMetadata() {
+				if ctx.Err() != nil {
+					return out
+				}
+				if _, exists := out[md.MetricFamily]; !exists {
+					out[md.MetricFamily] = md
+				}
 			}
 		}
 	}
-	return "", "", "", false
+	return out
 }
 
 // sortOrdering maps sort_by and sort_dir parameters to a storage.Ordering.
@@ -272,23 +357,6 @@ func sortOrdering(sortBy, sortDir string) storage.Ordering {
 		}
 	}
 	return storage.OrderByValueAsc
-}
-
-// compareByOrdering returns a comparison function for the given ordering.
-func compareByOrdering(o storage.Ordering) func(a, b storage.SearchResult) int {
-	switch o {
-	case storage.OrderByScoreDesc:
-		return func(a, b storage.SearchResult) int {
-			if c := cmp.Compare(b.Score, a.Score); c != 0 {
-				return c
-			}
-			return cmp.Compare(a.Value, b.Value)
-		}
-	case storage.OrderByValueDesc:
-		return func(a, b storage.SearchResult) int { return cmp.Compare(b.Value, a.Value) }
-	default:
-		return func(a, b storage.SearchResult) int { return cmp.Compare(a.Value, b.Value) }
-	}
 }
 
 func searchAPIError(err error) *apiError {
@@ -349,7 +417,7 @@ func (s *searchResultStreamer[T]) nextBatch() ([]T, error) {
 	return batch, nil
 }
 
-func streamSearchResults[T any](api *API, w http.ResponseWriter, rs storage.SearchResultSet, sp searchParams, toResult func(storage.SearchResult) T) {
+func streamSearchResults[T any](ctx context.Context, api *API, w http.ResponseWriter, rs storage.SearchResultSet, sp searchParams, toResult func(storage.SearchResult) T) {
 	defer func() { _ = rs.Close() }()
 
 	streamer := &searchResultStreamer[T]{
@@ -359,9 +427,15 @@ func streamSearchResults[T any](api *API, w http.ResponseWriter, rs storage.Sear
 		toResult:  toResult,
 	}
 
-	firstBatch, err := streamer.nextBatch()
-	if err != nil {
-		api.respondPreStreamSearchError(w, err)
+	firstBatch, firstErr := streamer.nextBatch()
+	// A non-nil firstErr with zero results means the underlying iterator
+	// could not produce anything; respond with the standard JSON error so
+	// clients see a well-formed failure. When firstErr arrives alongside
+	// partial results (e.g. one matcher-set succeeded and another failed,
+	// fitting in the first batch), we open the stream so the partial data
+	// is not lost — the in-band error line below signals the failure.
+	if firstErr != nil && len(firstBatch) == 0 {
+		api.respondPreStreamSearchError(w, firstErr)
 		return
 	}
 	firstWarnings := searchWarnings(rs)
@@ -372,21 +446,32 @@ func streamSearchResults[T any](api *API, w http.ResponseWriter, rs storage.Sear
 		return
 	}
 
+	// Always emit a first batch line so warnings are observable before any
+	// trailer or error line, even when there are no results.
+	if writeErr := nw.writeLine(searchBatch[T]{Results: firstBatch, Warnings: firstWarnings}); writeErr != nil {
+		writeStreamInternalError(nw, writeErr)
+		return
+	}
+
+	if firstErr != nil {
+		writeStreamSearchError(nw, firstErr)
+		return
+	}
+
 	if len(firstBatch) == 0 {
-		if err := nw.writeLine(searchBatch[T]{Results: []T{}, Warnings: firstWarnings}); err != nil {
-			writeStreamInternalError(nw, err)
-			return
-		}
 		_ = nw.writeLine(searchTrailer{Status: "success", HasMore: streamer.hasMore})
 		return
 	}
 
-	if err := nw.writeLine(searchBatch[T]{Results: firstBatch, Warnings: firstWarnings}); err != nil {
-		writeStreamInternalError(nw, err)
-		return
-	}
-
 	for {
+		// Stop pulling from storage as soon as the client goes away.
+		// Without this check, an abandoned request keeps iterating the
+		// underlying SearchResultSet (which may itself be doing real I/O).
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		batch, err := streamer.nextBatch()
 		if len(batch) > 0 {
 			if writeErr := nw.writeLine(searchBatch[T]{Results: batch}); writeErr != nil {
@@ -403,6 +488,10 @@ func streamSearchResults[T any](api *API, w http.ResponseWriter, rs storage.Sear
 		}
 	}
 
+	// Re-snapshot warnings after iteration: a Searcher may emit new warnings
+	// while the merge tree is drained (e.g. a secondary querier whose error
+	// becomes a warning at exhaustion). Dedup against the first batch so we
+	// don't echo warnings the client has already received.
 	trailerWarnings := searchWarnings(rs)
 	if slices.Equal(trailerWarnings, firstWarnings) {
 		trailerWarnings = nil
@@ -410,197 +499,16 @@ func streamSearchResults[T any](api *API, w http.ResponseWriter, rs storage.Sear
 	_ = nw.writeLine(searchTrailer{Status: "success", HasMore: streamer.hasMore, Warnings: trailerWarnings})
 }
 
-type searchResultSetItem struct {
-	rs    storage.SearchResultSet
-	value storage.SearchResult
-}
-
-type searchResultSetHeap struct {
-	items []*searchResultSetItem
-	cmp   func(a, b storage.SearchResult) int
-}
-
-func (h searchResultSetHeap) Len() int { return len(h.items) }
-
-func (h searchResultSetHeap) Less(i, j int) bool {
-	return h.cmp(h.items[i].value, h.items[j].value) < 0
-}
-
-func (h searchResultSetHeap) Swap(i, j int) {
-	h.items[i], h.items[j] = h.items[j], h.items[i]
-}
-
-func (h *searchResultSetHeap) Push(x any) {
-	h.items = append(h.items, x.(*searchResultSetItem))
-}
-
-func (h *searchResultSetHeap) Pop() any {
-	old := h.items
-	n := len(old)
-	item := old[n-1]
-	h.items = old[:n-1]
-	return item
-}
-
-func (h searchResultSetHeap) peek() *searchResultSetItem {
-	if len(h.items) == 0 {
-		return nil
-	}
-	return h.items[0]
-}
-
-type mergedSearchResultSet struct {
-	sets        []storage.SearchResultSet
-	heap        searchResultSetHeap
-	order       storage.Ordering
-	limit       int
-	emitted     int
-	initialized bool
-	done        bool
-	err         error
-	curr        storage.SearchResult
-}
-
-func newMergedSearchResultSet(sets []storage.SearchResultSet, hints *storage.SearchHints) storage.SearchResultSet {
-	if len(sets) == 0 {
-		return storage.EmptySearchResultSet()
-	}
-	var (
-		order storage.Ordering
-		limit int
-	)
-	if hints != nil {
-		order = hints.OrderBy
-		limit = hints.Limit
-	}
-	return &mergedSearchResultSet{
-		sets:  sets,
-		heap:  searchResultSetHeap{cmp: compareByOrdering(order)},
-		order: order,
-		limit: limit,
-	}
-}
-
-func (s *mergedSearchResultSet) initialize() {
-	if s.initialized {
-		return
-	}
-	s.initialized = true
-	for _, rs := range s.sets {
-		if rs.Next() {
-			heap.Push(&s.heap, &searchResultSetItem{rs: rs, value: rs.At()})
-			continue
-		}
-		if err := rs.Err(); err != nil {
-			s.err = err
-			s.done = true
-			return
-		}
-	}
-}
-
-func (s *mergedSearchResultSet) advance(item *searchResultSetItem) {
-	if s.done {
-		return
-	}
-	if item.rs.Next() {
-		item.value = item.rs.At()
-		heap.Push(&s.heap, item)
-		return
-	}
-	if err := item.rs.Err(); err != nil {
-		s.err = err
-	}
-}
-
-func (s *mergedSearchResultSet) sameResult(a, b storage.SearchResult) bool {
-	if s.order == storage.OrderByValueAsc || s.order == storage.OrderByValueDesc {
-		return a.Value == b.Value
-	}
-	return compareByOrdering(s.order)(a, b) == 0
-}
-
-func (s *mergedSearchResultSet) Next() bool {
-	if s.done {
-		return false
-	}
-	if s.err != nil {
-		s.done = true
-		return false
-	}
-	if s.limit > 0 && s.emitted >= s.limit {
-		s.done = true
-		return false
-	}
-
-	s.initialize()
-	if s.done || s.heap.Len() == 0 {
-		s.done = true
-		return false
-	}
-
-	item := heap.Pop(&s.heap).(*searchResultSetItem)
-	curr := item.value
-	s.advance(item)
-
-	for {
-		next := s.heap.peek()
-		if next == nil || !s.sameResult(curr, next.value) {
-			break
-		}
-		dup := heap.Pop(&s.heap).(*searchResultSetItem)
-		if dup.value.Score > curr.Score {
-			curr.Score = dup.value.Score
-		}
-		s.advance(dup)
-	}
-
-	s.curr = curr
-	s.emitted++
-	return true
-}
-
-func (s *mergedSearchResultSet) At() storage.SearchResult {
-	return s.curr
-}
-
-func (s *mergedSearchResultSet) Warnings() annotations.Annotations {
-	var warnings annotations.Annotations
-	for _, rs := range s.sets {
-		warnings.Merge(rs.Warnings())
-	}
-	return warnings
-}
-
-func (s *mergedSearchResultSet) Err() error {
-	if s.err != nil {
-		return s.err
-	}
-	for _, rs := range s.sets {
-		if err := rs.Err(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *mergedSearchResultSet) Close() error {
-	errs := make([]error, 0, len(s.sets))
-	for _, rs := range s.sets {
-		errs = append(errs, rs.Close())
-	}
-	return errors.Join(errs...)
-}
-
 // searchLabelValues retrieves label values using the Searcher interface.
-// For multiple matcher sets it unions results from each, taking the max score per value.
+// For multiple matcher sets the per-set results are merged via the storage
+// helper, which handles deduplication, max-score collapse, and ordering.
 func searchLabelValues(ctx context.Context, searcher storage.Searcher, name string, matcherSets [][]*labels.Matcher, hints *storage.SearchHints) storage.SearchResultSet {
 	if len(matcherSets) > 1 {
 		sets := make([]storage.SearchResultSet, 0, len(matcherSets))
 		for _, matchers := range matcherSets {
 			sets = append(sets, searcher.SearchLabelValues(ctx, name, hints, matchers...))
 		}
-		return newMergedSearchResultSet(sets, hints)
+		return storage.MergeSearchResultSets(sets, hints)
 	}
 
 	var matchers []*labels.Matcher
@@ -611,14 +519,15 @@ func searchLabelValues(ctx context.Context, searcher storage.Searcher, name stri
 }
 
 // searchLabelNames retrieves label names using the Searcher interface.
-// For multiple matcher sets it unions results from each, taking the max score per name.
+// For multiple matcher sets the per-set results are merged via the storage
+// helper, which handles deduplication, max-score collapse, and ordering.
 func searchLabelNames(ctx context.Context, searcher storage.Searcher, matcherSets [][]*labels.Matcher, hints *storage.SearchHints) storage.SearchResultSet {
 	if len(matcherSets) > 1 {
 		sets := make([]storage.SearchResultSet, 0, len(matcherSets))
 		for _, matchers := range matcherSets {
 			sets = append(sets, searcher.SearchLabelNames(ctx, hints, matchers...))
 		}
-		return newMergedSearchResultSet(sets, hints)
+		return storage.MergeSearchResultSets(sets, hints)
 	}
 
 	var matchers []*labels.Matcher
@@ -633,8 +542,11 @@ func searchLabelNames(ctx context.Context, searcher storage.Searcher, matcherSet
 // Empty search terms are skipped. Returns nil when no usable search terms remain.
 // For case-insensitive search, the query is lowercased here and the chain is wrapped
 // with caseFoldingFilter so values are lowercased once at the top of the chain.
-// The returned filter is wrapped with memoizingFilter so values that reach the
+// When the chain contains an expensive matcher (subsequence, or Jaro-Winkler with a
+// non-zero threshold) it is wrapped with memoizingFilter so values that reach the
 // chain multiple times in one search (e.g. once per TSDB block) are scored once.
+// Substring-only chains skip the memo: substring scoring is already O(L) and
+// the cache lookup would only add overhead.
 func buildSearchFilter(searches []string, fuzzThreshold int, fuzzAlg string, caseSensitive bool) storage.Filter {
 	terms := make([]string, 0, len(searches))
 	for _, s := range searches {
@@ -678,7 +590,22 @@ func buildSearchFilter(searches []string, fuzzThreshold int, fuzzAlg string, cas
 	if !caseSensitive {
 		combined = newCaseFoldingFilter(combined)
 	}
-	return newMemoizingFilter(combined)
+	if filterChainHasExpensiveScoring(fuzzThreshold, fuzzAlg) {
+		combined = newMemoizingFilter(combined)
+	}
+	return combined
+}
+
+// filterChainHasExpensiveScoring reports whether the search filter chain built
+// by buildSearchFilter will exercise a non-trivial scoring path that justifies
+// memoization across blocks.
+func filterChainHasExpensiveScoring(fuzzThreshold int, fuzzAlg string) bool {
+	if fuzzAlg == "subsequence" {
+		return true
+	}
+	// Jaro-Winkler is only constructed when fuzzThreshold > 0; below that the
+	// chain is substring-only and memoization is not worth its overhead.
+	return fuzzThreshold > 0
 }
 
 // searchMetricNames handles GET/POST /api/v1/search/metric_names.
@@ -735,22 +662,35 @@ func (api *API) searchMetricNames(w http.ResponseWriter, r *http.Request) {
 
 	searchHints := &storage.SearchHints{
 		Filter: buildSearchFilter(sp.searches, sp.fuzzThreshold, sp.fuzzAlg, sp.caseSensitive),
-		Limit:  sp.limit + 1, // Fetch one extra to detect has_more.
+		Limit:  searchHintsLimit(sp.limit), // Fetch one extra to detect has_more (with saturation guard).
 	}
 	searchHints.OrderBy = sortOrdering(sp.sortBy, sp.sortDir)
 
+	// metaMap is built lazily on the first metadata lookup so a search that
+	// returns zero results never pays the scrape-manager lock + map-build
+	// cost. The streamer drives toResult from a single goroutine, so the
+	// captured flag does not need a lock.
+	var (
+		metaMap     map[string]scrape.MetricMetadata
+		metaMapDone bool
+	)
+
 	searchResults := searchLabelValues(ctx, searcher, labels.MetricName, sp.matcherSets, searchHints)
-	streamSearchResults(api, w, searchResults, sp, func(sr storage.SearchResult) searchMetricNameResult {
+	streamSearchResults(ctx, api, w, searchResults, sp, func(sr storage.SearchResult) searchMetricNameResult {
 		result := searchMetricNameResult{Name: sr.Value}
 		if sp.includeScore {
 			score := sr.Score
 			result.Score = &score
 		}
 		if includeMetadata {
-			if typ, help, unit, ok := api.getMetricMetadata(ctx, sr.Value); ok {
-				result.Type = typ
-				result.Help = help
-				result.Unit = unit
+			if !metaMapDone {
+				metaMap = api.buildMetricMetadataMap(ctx)
+				metaMapDone = true
+			}
+			if md, ok := metaMap[sr.Value]; ok {
+				result.Type = string(md.Type)
+				result.Help = md.Help
+				result.Unit = md.Unit
 			}
 		}
 		return result
@@ -805,12 +745,12 @@ func (api *API) searchLabelNames(w http.ResponseWriter, r *http.Request) {
 
 	searchHints := &storage.SearchHints{
 		Filter: buildSearchFilter(sp.searches, sp.fuzzThreshold, sp.fuzzAlg, sp.caseSensitive),
-		Limit:  sp.limit + 1, // Fetch one extra to detect has_more.
+		Limit:  searchHintsLimit(sp.limit), // Fetch one extra to detect has_more (with saturation guard).
 	}
 	searchHints.OrderBy = sortOrdering(sp.sortBy, sp.sortDir)
 
 	searchResults := searchLabelNames(ctx, searcher, sp.matcherSets, searchHints)
-	streamSearchResults(api, w, searchResults, sp, func(sr storage.SearchResult) searchLabelNameResult {
+	streamSearchResults(ctx, api, w, searchResults, sp, func(sr storage.SearchResult) searchLabelNameResult {
 		result := searchLabelNameResult{Name: sr.Value}
 		if sp.includeScore {
 			score := sr.Score
@@ -874,12 +814,12 @@ func (api *API) searchLabelValues(w http.ResponseWriter, r *http.Request) {
 
 	searchHints := &storage.SearchHints{
 		Filter: buildSearchFilter(sp.searches, sp.fuzzThreshold, sp.fuzzAlg, sp.caseSensitive),
-		Limit:  sp.limit + 1, // Fetch one extra to detect has_more.
+		Limit:  searchHintsLimit(sp.limit), // Fetch one extra to detect has_more (with saturation guard).
 	}
 	searchHints.OrderBy = sortOrdering(sp.sortBy, sp.sortDir)
 
 	searchResults := searchLabelValues(ctx, searcher, labelName, sp.matcherSets, searchHints)
-	streamSearchResults(api, w, searchResults, sp, func(sr storage.SearchResult) searchLabelValueResult {
+	streamSearchResults(ctx, api, w, searchResults, sp, func(sr storage.SearchResult) searchLabelValueResult {
 		result := searchLabelValueResult{Name: sr.Value}
 		if sp.includeScore {
 			score := sr.Score
@@ -889,7 +829,3 @@ func (api *API) searchLabelValues(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Ensure scrape.Target implements the metadata methods we need.
-var _ interface {
-	GetMetadata(string) (scrape.MetricMetadata, bool)
-} = (*scrape.Target)(nil)

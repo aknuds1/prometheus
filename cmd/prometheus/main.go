@@ -575,6 +575,9 @@ func main() {
 	serverOnlyFlag(a, "storage.remote.read-max-bytes-in-frame", "Maximum number of bytes in a single frame for streaming remote read response types before marshalling. Note that client might have limit on frame size as well. 1MB as recommended by protobuf by default.").
 		Default("1048576").IntVar(&cfg.web.RemoteReadBytesInFrame)
 
+	serverOnlyFlag(a, "web.search.max-limit", "Hard upper bound on the \"limit\" query parameter accepted by the experimental search API (--enable-feature=search-api). Requests with a higher limit are rejected with HTTP 400. 0 disables the cap.").
+		Default("10000").IntVar(&cfg.web.MaxSearchLimit)
+
 	serverOnlyFlag(a, "rules.alert.for-outage-tolerance", "Max time to tolerate prometheus outage for restoring \"for\" state of alert.").
 		Default("1h").SetValue(&cfg.outageTolerance)
 
@@ -651,6 +654,11 @@ func main() {
 	if err := cfg.setFeatureListOptions(logger); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing feature list: %s\n", err)
 		os.Exit(1)
+	}
+
+	if cfg.web.MaxSearchLimit < 0 {
+		fmt.Fprintf(os.Stderr, "--web.search.max-limit must be non-negative; got %d (use 0 to disable the cap)\n", cfg.web.MaxSearchLimit)
+		os.Exit(2)
 	}
 
 	promqlParser := parser.NewParser(cfg.parserOpts)
