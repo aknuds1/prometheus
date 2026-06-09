@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/grafana/regexp"
+	"github.com/prometheus/common/model"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -68,9 +69,8 @@ type semconv struct {
 
 	version string
 
-	// attributesPerMetric lists, per metric name, the attributes the metric
-	// declares at this semconv version (populated by loadSemconv). It seeds
-	// attribute-rename normalisation; see buildAttributeRenameMap.
+	// Pre-computed lookups (populated by init()).
+	metricMetadata      map[string]metricMeta
 	attributesPerMetric map[string][]string
 }
 
@@ -97,7 +97,7 @@ type otelSchema struct {
 	Versions   map[string]otelSchemaVersion `yaml:"versions"`
 
 	// versionRenames holds per-version renames for generating matcher variants
-	// (populated by loadOTelSchema).
+	// (populated by fetchOTelSchema).
 	versionRenames []versionRenames
 }
 
@@ -158,12 +158,20 @@ type semconvGroup struct {
 	ID         string             `yaml:"id"`
 	Type       string             `yaml:"type"`        // "metric", "attribute", "span", etc.
 	MetricName string             `yaml:"metric_name"` // Only for type="metric"
+	Instrument string             `yaml:"instrument"`  // counter, histogram, gauge, updowncounter
+	Unit       string             `yaml:"unit"`
 	Attributes []semconvAttribute `yaml:"attributes,omitempty"`
 }
 
 type semconvAttribute struct {
 	// Ref to attribute ID.
 	Ref string `yaml:"ref"`
+}
+
+// metricMeta contains unit and type information for a metric.
+type metricMeta struct {
+	Unit string
+	Type model.MetricType
 }
 
 type otelSchemaVersion struct {
@@ -187,6 +195,20 @@ type otelRenameAttributes struct {
 
 type otelRenameMetrics struct {
 	NameMap map[string]string `yaml:"name_map,omitempty"`
+}
+
+// instrumentToMetricType converts OTel instrument to Prometheus metric type.
+func instrumentToMetricType(instrument string) model.MetricType {
+	switch instrument {
+	case "counter":
+		return model.MetricTypeCounter
+	case "histogram":
+		return model.MetricTypeHistogram
+	case "gauge", "updowncounter":
+		return model.MetricTypeGauge
+	default:
+		return model.MetricTypeUnknown
+	}
 }
 
 // staticCache is a generic, goroutine-safe cache keyed by URL for static
@@ -309,9 +331,17 @@ func loadSemconv(b []byte, version string) (semconv, error) {
 		return semconv{}, fmt.Errorf("unmarshal: %w", err)
 	}
 	s.version = version
+	s.metricMetadata = make(map[string]metricMeta)
 	s.attributesPerMetric = make(map[string][]string)
 	for _, group := range s.Groups {
-		if group.Type != "metric" || group.MetricName == "" || len(group.Attributes) == 0 {
+		if group.Type != "metric" || group.MetricName == "" {
+			continue
+		}
+		s.metricMetadata[group.MetricName] = metricMeta{
+			Unit: group.Unit,
+			Type: instrumentToMetricType(group.Instrument),
+		}
+		if len(group.Attributes) == 0 {
 			continue
 		}
 		attrs := make([]string, 0, len(group.Attributes))

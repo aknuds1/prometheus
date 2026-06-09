@@ -16,13 +16,20 @@ package semconv
 import (
 	"errors"
 	"iter"
+	"maps"
 	"slices"
 	"strings"
 
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/otlptranslator"
 
 	"github.com/prometheus/prometheus/model/labels"
 )
+
+// errStrategyUnresolved is returned by findMatcherVariants when an
+// __otlp_strategy__ is supplied but the metric name does not resolve to any
+// metric in the referenced semconv registry under that strategy.
+var errStrategyUnresolved = errors.New("__otlp_strategy__ set but no matching metric found in the semconv registry")
 
 type schemaEngine struct {
 	otelSchemaCache *staticCache[otelSchema]
@@ -128,6 +135,48 @@ func walkVersions(
 	return result
 }
 
+// matcherKey generates a string key for a matcher set to detect duplicates.
+func matcherKey(matchers []*labels.Matcher) string {
+	var b strings.Builder
+	for i, m := range matchers {
+		if i > 0 {
+			b.WriteByte('|')
+		}
+		b.WriteString(m.Name)
+		b.WriteByte('=')
+		b.WriteString(m.Value)
+	}
+	return b.String()
+}
+
+// applyVersionRenames applies a version's metric and attribute renames to matchers.
+// Returns nil if no renames apply. Uses lazy allocation to avoid allocating when no changes are made.
+func applyVersionRenames(matchers []*labels.Matcher, renames versionRenames) []*labels.Matcher {
+	var result []*labels.Matcher
+	for i, m := range matchers {
+		var newMatcher *labels.Matcher
+		if m.Name == model.MetricNameLabel {
+			if variant, ok := renames.metrics[m.Value]; ok {
+				newMatcher = labels.MustNewMatcher(m.Type, m.Name, variant)
+			}
+		} else if variant, ok := renames.attributes[m.Name]; ok {
+			newMatcher = labels.MustNewMatcher(m.Type, variant, m.Value)
+		}
+		if newMatcher != nil {
+			if result == nil {
+				// Lazy allocate and copy preceding unchanged matchers.
+				result = make([]*labels.Matcher, len(matchers))
+				copy(result[:i], matchers[:i])
+			}
+			result[i] = newMatcher
+		} else if result != nil {
+			result[i] = m
+		}
+	}
+
+	return result
+}
+
 // buildAttributeRenameMap returns a map from each historical or forward
 // attribute alias to its name at anchorVersion, for the attributes in
 // canonicalAttrs (the metric's attributes declared by the anchor semconv
@@ -192,51 +241,19 @@ func walkAttributeRenames(versions []versionRenames, canon string, reverse bool,
 	}
 }
 
-// matcherKey generates a string key for a matcher set to detect duplicates.
-func matcherKey(matchers []*labels.Matcher) string {
-	var b strings.Builder
-	for i, m := range matchers {
-		if i > 0 {
-			b.WriteByte('|')
-		}
-		b.WriteString(m.Name)
-		b.WriteByte('=')
-		b.WriteString(m.Value)
-	}
-	return b.String()
-}
-
-// applyVersionRenames applies a version's metric and attribute renames to matchers.
-// Returns nil if no renames apply. Uses lazy allocation to avoid allocating when no changes are made.
-func applyVersionRenames(matchers []*labels.Matcher, renames versionRenames) []*labels.Matcher {
-	var result []*labels.Matcher
-	for i, m := range matchers {
-		var newMatcher *labels.Matcher
-		if m.Name == model.MetricNameLabel {
-			if variant, ok := renames.metrics[m.Value]; ok {
-				newMatcher = labels.MustNewMatcher(m.Type, m.Name, variant)
-			}
-		} else if variant, ok := renames.attributes[m.Name]; ok {
-			newMatcher = labels.MustNewMatcher(m.Type, variant, m.Value)
-		}
-		if newMatcher != nil {
-			if result == nil {
-				// Lazy allocate and copy preceding unchanged matchers.
-				result = make([]*labels.Matcher, len(matchers))
-				copy(result[:i], matchers[:i])
-			}
-			result[i] = newMatcher
-		} else if result != nil {
-			result[i] = m
-		}
-	}
-
-	return result
-}
-
 type queryContext struct {
 	// labelMapping is a mapping to the requested OTel semantic conventions version.
 	labelMapping *labelMapping
+
+	// outputStrategy, when non-nil, renders result labels in that OTLP
+	// strategy's dialect instead of canonical OTel names. outputMeta carries
+	// the canonical metric's unit/type so the metric name can be suffixed.
+	outputStrategy *otlptranslator.TranslationStrategyOption
+	outputMeta     *metricMeta
+
+	// warning, when non-empty, is an advisory message the wrapper surfaces
+	// alongside the (still-produced) results.
+	warning string
 }
 
 // getSemconv returns the semconv parsed from url, fetching it via the
@@ -267,16 +284,14 @@ func (e *schemaEngine) getOTelSchema(url string) (otelSchema, error) {
 	return s, nil
 }
 
-// findMatcherVariants returns all variants to match for a single schematized
-// metric selection. semconvURL points to a semantic conventions file and is
-// always required. In production schemaURL (an OTel schema file with versioned
-// renames) is also always set, because classifyMatchers only triggers fan-out
-// when both are present; the empty-schemaURL path exists only for the direct
-// unit test. It returns one variant per schema-version rename of the metric,
-// plus a label mapping for transforming results back to the requested version.
-// The returned matchers do not include the reserved schema matchers. It returns
-// an error if semconvURL is not provided.
-func (e *schemaEngine) findMatcherVariants(semconvURL, schemaURL string, originalMatchers []*labels.Matcher) ([][]*labels.Matcher, queryContext, error) {
+// findMatcherVariants returns all variants to match for a single schematized metric selection.
+// semconvURL points to a semantic conventions file (groups with metric metadata) and is required.
+// schemaURL points to an OTel schema file (versions with attribute renames) and is optional.
+// Returns variants for all semantic conventions renames and OTLP translation strategies,
+// plus a label mapping for transforming results to the current version.
+// The returned matchers do not include __semconv_url__ or __schema_url__.
+// It returns an error if semconvURL is not provided or if the metric is not found.
+func (e *schemaEngine) findMatcherVariants(semconvURL, schemaURL string, strategy *otlptranslator.TranslationStrategyOption, originalMatchers []*labels.Matcher) ([][]*labels.Matcher, queryContext, error) {
 	if semconvURL == "" {
 		return nil, queryContext{}, errors.New("semconvURL is required")
 	}
@@ -284,7 +299,7 @@ func (e *schemaEngine) findMatcherVariants(semconvURL, schemaURL string, origina
 	// Filter out the wrapper's reserved matchers.
 	matchers := stripReservedLabels(originalMatchers)
 
-	// Fetch semantic conventions for the anchor version (also validates the URL).
+	// Fetch semantic conventions for metric metadata.
 	sc, err := e.getSemconv(semconvURL)
 	if err != nil {
 		return nil, queryContext{}, err
@@ -296,31 +311,124 @@ func (e *schemaEngine) findMatcherVariants(semconvURL, schemaURL string, origina
 	}
 	if metricName == "" {
 		// Without an explicit __name__ matcher we have no anchor to resolve
-		// renames against; fall through to the underlying querier without
-		// applying any rewrite.
+		// attribute or metric renames against; fall through to the underlying
+		// querier without applying any rewrite.
 		return [][]*labels.Matcher{matchers}, queryContext{}, nil
 	}
 
-	// Generate schema-version rename variants. In production schemaURL is always
-	// set (classifyMatchers gates fan-out on it); the empty case is reached only
-	// by direct unit tests and falls through to the unmodified matchers.
-	allVariants := [][]*labels.Matcher{matchers}
-	var attrRenames map[string]string
+	// When an OTLP strategy is declared, the query is expressed in that
+	// strategy's dialect. Reverse-resolve the metric name and label matchers to
+	// canonical OTel names so the schema/strategy fan-out below anchors on the
+	// canonical metric. A name that matches no registry metric is reported so
+	// the wrapper can warn and pass through.
+	var outputMeta *metricMeta
+	var dialectWarning string
+	if strategy != nil {
+		canonical, ok := resolveCanonicalMetric(sc, metricName, *strategy)
+		if !ok {
+			return nil, queryContext{}, errStrategyUnresolved
+		}
+		// Detect mismatched-dialect label matchers before canonicalizing, while
+		// the names are still as the caller wrote them.
+		dialectWarning = dialectMismatchWarning(sc, canonical, *strategy, matchers)
+		matchers = canonicalizeMatchers(sc, canonical, *strategy, matchers)
+		metricName = canonical
+		meta := sc.metricMetadata[canonical]
+		outputMeta = &meta
+	}
+
+	// Stage 1: Generate schema version variants (if schemaURL provided).
+	schemaVariants := [][]*labels.Matcher{matchers}
+	var schema otelSchema
+	haveSchema := false
+	// aliasToCanonical maps every attribute name a returned series may carry —
+	// the canonical anchor-version names plus their historical aliases from
+	// schema-version renames — back to the canonical name. buildLabelMapping
+	// expands it across OTLP escapings so both the schema-version rename axis
+	// and the OTLP-strategy axis normalise attribute names in the output.
+	aliasToCanonical := map[string]string{}
+	for _, attr := range sc.attributesPerMetric[metricName] {
+		aliasToCanonical[attr] = attr
+	}
 	if schemaURL != "" {
-		schema, err := e.getOTelSchema(schemaURL)
+		schema, err = e.getOTelSchema(schemaURL)
 		if err != nil {
 			return nil, queryContext{}, err
 		}
-		allVariants = generateMatcherVariants(sc.version, &schema, matchers)
-		// Map each historical attribute alias back to its anchor-version name so
-		// results from older or newer eras merge under the queried version's
-		// labels instead of splitting on the renamed attribute. Recomputed per
-		// query on purpose: it is a pure function of the cached schema/semconv and
-		// costs only a few map ops, far less than the fan-out it feeds.
-		attrRenames = buildAttributeRenameMap(sc.version, &schema, sc.attributesPerMetric[metricName])
+		haveSchema = true
+		schemaVariants = generateMatcherVariants(sc.version, &schema, matchers)
+		maps.Copy(aliasToCanonical, buildAttributeRenameMap(sc.version, &schema, sc.attributesPerMetric[metricName]))
 	}
 
-	return allVariants, queryContext{labelMapping: buildLabelMapping(metricName, attrRenames)}, nil
+	// Build a metric-name → meta lookup that covers every version a schema
+	// variant may resolve to, not just the anchor. Without this, OTLP
+	// variants for historical metric names would be escaped using the
+	// anchor's unit/type, which is incorrect once a metric's unit or
+	// instrument changes across schema versions.
+	metaLookup := map[string]*metricMeta{}
+	for n, m := range sc.metricMetadata {
+		metaLookup[n] = &m
+	}
+	if haveSchema {
+		// Walk every version listed in the schema, not just the ones with
+		// renames: a baseline version (e.g. 1.0.0) may have no rename
+		// changes and therefore not appear in versionRenames, yet still
+		// own the historical metric metadata (unit/type) needed for OTLP
+		// translation of its metric names. Walk in sorted order so the
+		// first-writer-wins selection below is deterministic.
+		versions := make([]string, 0, len(schema.Versions))
+		for versionStr := range schema.Versions {
+			versions = append(versions, versionStr)
+		}
+		slices.SortFunc(versions, compareSemver)
+		for _, versionStr := range versions {
+			if versionStr == sc.version {
+				continue
+			}
+			verSC, err := e.getSemconv("registry/" + versionStr)
+			if err != nil {
+				// Best-effort: missing version-specific semconv files just
+				// mean we fall back to the anchor's meta for those variants.
+				continue
+			}
+			for n, m := range verSC.metricMetadata {
+				if _, exists := metaLookup[n]; exists {
+					continue
+				}
+				metaLookup[n] = &m
+			}
+		}
+	}
+
+	// Stage 2: Generate OTLP translation variants for each schema variant,
+	// using each variant's own metric metadata where available. OTLP-strategy
+	// fan-out only runs when an __otlp_strategy__ was supplied; otherwise the
+	// schema variants are queried under their raw OTel names.
+	seen := map[string]struct{}{}
+	allVariants := make([][]*labels.Matcher, 0, len(schemaVariants)*(len(otelStrategies)+1))
+	for _, sv := range schemaVariants {
+		variants := [][]*labels.Matcher{sv}
+		if strategy != nil {
+			svMetric, _ := extractMetricName(sv)
+			variants = generateOTLPVariants(sv, metaLookup[svMetric]) // nil meta for unknown metrics
+		}
+		for _, v := range variants {
+			key := matcherKey(v)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			allVariants = append(allVariants, v)
+		}
+	}
+
+	qc := queryContext{labelMapping: buildLabelMapping(metricName, aliasToCanonical)}
+	if strategy != nil {
+		qc.outputStrategy = strategy
+		qc.outputMeta = outputMeta
+		qc.warning = dialectWarning
+	}
+	return allVariants, qc, nil
 }
 
 // transformSeries returns the series labels rewritten to the canonical OTel
@@ -329,7 +437,13 @@ func (e *schemaEngine) findMatcherVariants(semconvURL, schemaURL string, origina
 // returned otherwise unchanged.
 func (*schemaEngine) transformSeries(q queryContext, originalLabels labels.Labels) labels.Labels {
 	if q.labelMapping != nil {
-		return transformOTelSchemaLabels(originalLabels, q.labelMapping)
+		canonical := transformOTelSchemaLabels(originalLabels, q.labelMapping)
+		if q.outputStrategy == nil {
+			return canonical
+		}
+		// Render the canonical labels in the requested strategy's dialect so
+		// every era converges on the same names and merges into one series.
+		return forwardTranslateLabels(canonical, q.labelMapping.translatedMetric, q.outputMeta, *q.outputStrategy)
 	}
 	if originalLabels.Get(schemaURLLabel) == "" {
 		return originalLabels
@@ -339,33 +453,50 @@ func (*schemaEngine) transformSeries(q queryContext, originalLabels labels.Label
 	return builder.Labels()
 }
 
-// labelMapping rewrites a returned series' names to the queried semantic-
-// conventions version: translatedMetric is the queried (anchor) metric name
-// that every variant collapses to, and translatedLabels maps each historical
-// attribute alias back to its anchor-version name.
+// labelMapping maps translated Prometheus names back to original OTLP names.
 type labelMapping struct {
-	translatedLabels map[string]string // historical attribute alias → anchor name, e.g. "user" -> "tenant"
+	translatedLabels map[string]string // e.g., "http_method" -> "http.method"
 	translatedMetric string
 }
 
 // buildLabelMapping creates the mapping used to rewrite result labels back to
-// the requested semantic-conventions version: the result metric name maps to
-// the queried (anchor) name, and translatedLabels maps each historical
-// attribute alias back to its anchor-version name (nil/empty when no attribute
-// was renamed).
-func buildLabelMapping(metricName string, translatedLabels map[string]string) *labelMapping {
-	return &labelMapping{translatedMetric: metricName, translatedLabels: translatedLabels}
+// the requested semantic-conventions version. aliasToCanonical maps every
+// attribute alias a returned series may carry (the canonical names plus their
+// historical schema-version aliases) to its canonical anchor-version name; for
+// each alias every OTLP escaping is also mapped to the same canonical name, so
+// the output normalises across both the schema-version-rename and
+// OTLP-strategy axes. Translation errors are silently ignored to be lenient
+// with malformed attribute names.
+func buildLabelMapping(metricName string, aliasToCanonical map[string]string) *labelMapping {
+	mapping := &labelMapping{
+		translatedLabels: make(map[string]string, len(aliasToCanonical)*(len(otelStrategies)+1)),
+		translatedMetric: metricName,
+	}
+
+	for alias, canonical := range aliasToCanonical {
+		// Raw (NoTranslation) form maps back to the canonical name...
+		mapping.translatedLabels[alias] = canonical
+		// ...as does every escaped rendering of the alias.
+		for _, strategy := range otelStrategies {
+			translatedName, err := translateLabelName(alias, strategy)
+			if err != nil {
+				continue
+			}
+			mapping.translatedLabels[translatedName] = canonical
+		}
+	}
+
+	return mapping
 }
 
-// aliasesOf returns name together with every historical alias that maps to it,
-// i.e. the set of label names a returned series may carry for the canonical
-// name. It is the inverse of translatedLabels and is used to fan LabelValues
-// out across a renamed attribute's historical names. The metric name has no
-// attribute aliases, so it is returned unchanged.
+// aliasesOf returns name together with every alias that maps to it in
+// translatedLabels — the set of label names a returned series may carry for the
+// canonical name. It is used to fan LabelValues out across a renamed
+// attribute's historical/escaped names.
 func (m *labelMapping) aliasesOf(name string) []string {
 	aliases := []string{name}
 	for alias, canonical := range m.translatedLabels {
-		if canonical == name {
+		if canonical == name && alias != name {
 			aliases = append(aliases, alias)
 		}
 	}

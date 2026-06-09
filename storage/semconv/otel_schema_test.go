@@ -37,6 +37,19 @@ func loadOTelSchemaFile(t *testing.T, path string) otelSchema {
 	return s
 }
 
+// loadSemconvFile is the test-only counterpart to fetchSemconv. The version
+// argument plays the role that path.Split would extract from the URL at
+// runtime; tests pass a fixed valid semver because the fixture filenames are
+// not semver strings.
+func loadSemconvFile(t *testing.T, path, version string) semconv {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	s, err := loadSemconv(b, version)
+	require.NoError(t, err)
+	return s
+}
+
 func TestLoadOTelSchema(t *testing.T) {
 	t.Run("rejects unsupported file format", func(t *testing.T) {
 		b, err := os.ReadFile("./testdata/otel_unsupported_format.yaml")
@@ -130,6 +143,23 @@ func TestValidateSemver(t *testing.T) {
 }
 
 func TestFetchSemconv(t *testing.T) {
+	t.Run("parses groups section", func(t *testing.T) {
+		sc := loadSemconvFile(t, "./testdata/otel.yaml", "1.0.0")
+
+		meta, ok := sc.metricMetadata["http.server.duration"]
+		require.True(t, ok)
+		require.Equal(t, "s", meta.Unit)
+		require.Equal(t, model.MetricTypeHistogram, meta.Type)
+
+		meta, ok = sc.metricMetadata["http.server.request.count"]
+		require.True(t, ok)
+		require.Equal(t, "{request}", meta.Unit)
+		require.Equal(t, model.MetricTypeCounter, meta.Type)
+
+		_, ok = sc.metricMetadata["unknown.metric"]
+		require.False(t, ok)
+	})
+
 	t.Run("registry: loads embedded version file", func(t *testing.T) {
 		sc, err := fetchSemconv("registry/1.0.0")
 		require.NoError(t, err)
@@ -160,6 +190,27 @@ func TestFetchSemconv(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid semver")
 	})
+}
+
+func TestInstrumentToMetricType(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected model.MetricType
+	}{
+		{"counter", model.MetricTypeCounter},
+		{"gauge", model.MetricTypeGauge},
+		{"updowncounter", model.MetricTypeGauge},
+		{"histogram", model.MetricTypeHistogram},
+		{"unknown", model.MetricTypeUnknown},
+		{"", model.MetricTypeUnknown},
+		{"invalid", model.MetricTypeUnknown},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			result := instrumentToMetricType(tc.input)
+			require.Equal(t, tc.expected, result)
+		})
+	}
 }
 
 func TestTransformOTelSchemaLabels(t *testing.T) {
