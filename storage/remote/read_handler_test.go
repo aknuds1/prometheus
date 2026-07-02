@@ -15,6 +15,7 @@ package remote
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -24,6 +25,8 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
+	"github.com/prometheus/client_golang/prometheus"
+	client_testutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/config"
@@ -463,6 +466,69 @@ func TestStreamReadEndpoint(t *testing.T) {
 	}, results)
 }
 
+func TestReadHandlerGateWaitDuration(t *testing.T) {
+	t.Run("acquired", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		h := NewReadHandler(nil, reg, nil, func() config.Config { return config.Config{} }, 0, 1, 0).(*readHandler)
+		gate := &testReadGate{
+			startFunc: func(context.Context) error {
+				return nil
+			},
+		}
+		h.remoteReadGate = gate
+		h.now = newReadHandlerTestClock(
+			time.Unix(100, 0),
+			time.Unix(101, int64(500*time.Millisecond)),
+		)
+
+		require.NoError(t, h.startRemoteRead(context.Background()))
+		require.Equal(t, 1.0, client_testutil.ToFloat64(h.queries))
+
+		gate.doneFunc = func() {
+			require.Equal(t, 0.0, client_testutil.ToFloat64(h.queries))
+		}
+		h.finishRemoteRead()
+		require.Equal(t, 1, gate.doneCalls)
+		require.Equal(t, 0.0, client_testutil.ToFloat64(h.queries))
+
+		count, sum := readGateWaitMetric(t, reg, remoteReadGateWaitResultAcquired)
+		require.Equal(t, uint64(1), count)
+		require.InDelta(t, 1.5, sum, 0.001)
+
+		count, _ = readGateWaitMetric(t, reg, remoteReadGateWaitResultCanceled)
+		require.Equal(t, uint64(0), count)
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		h := NewReadHandler(nil, reg, nil, func() config.Config { return config.Config{} }, 0, 1, 0).(*readHandler)
+		gate := &testReadGate{
+			startFunc: func(ctx context.Context) error {
+				return ctx.Err()
+			},
+		}
+		h.remoteReadGate = gate
+		h.now = newReadHandlerTestClock(
+			time.Unix(100, 0),
+			time.Unix(103, 0),
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		require.ErrorIs(t, h.startRemoteRead(ctx), context.Canceled)
+		require.Equal(t, 0, gate.doneCalls)
+		require.Equal(t, 0.0, client_testutil.ToFloat64(h.queries))
+
+		count, sum := readGateWaitMetric(t, reg, remoteReadGateWaitResultCanceled)
+		require.Equal(t, uint64(1), count)
+		require.InDelta(t, 3.0, sum, 0.001)
+
+		count, _ = readGateWaitMetric(t, reg, remoteReadGateWaitResultAcquired)
+		require.Equal(t, uint64(0), count)
+	})
+}
+
 func addNativeHistogramsToTestSuite(t *testing.T, storage *teststorage.TestStorage, n int) {
 	lbls := labels.FromStrings("__name__", "test_histogram_metric1", "baz", "qux")
 
@@ -479,4 +545,57 @@ func addNativeHistogramsToTestSuite(t *testing.T, storage *teststorage.TestStora
 	}
 
 	require.NoError(t, app.Commit())
+}
+
+type testReadGate struct {
+	startFunc func(context.Context) error
+	doneFunc  func()
+	doneCalls int
+}
+
+func (g *testReadGate) Start(ctx context.Context) error {
+	return g.startFunc(ctx)
+}
+
+func (g *testReadGate) Done() {
+	if g.doneFunc != nil {
+		g.doneFunc()
+	}
+	g.doneCalls++
+}
+
+func newReadHandlerTestClock(times ...time.Time) func() time.Time {
+	i := 0
+	return func() time.Time {
+		if i >= len(times) {
+			return times[len(times)-1]
+		}
+		t := times[i]
+		i++
+		return t
+	}
+}
+
+func readGateWaitMetric(t *testing.T, reg *prometheus.Registry, result string) (uint64, float64) {
+	t.Helper()
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+
+	for _, mf := range mfs {
+		if mf.GetName() != "prometheus_remote_read_handler_"+remoteReadGateWaitDurationSeconds {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, label := range m.GetLabel() {
+				if label.GetName() != "result" || label.GetValue() != result {
+					continue
+				}
+				hist := m.GetHistogram()
+				require.NotNil(t, hist)
+				return hist.GetSampleCount(), hist.GetSampleSum()
+			}
+		}
+	}
+	return 0, 0
 }

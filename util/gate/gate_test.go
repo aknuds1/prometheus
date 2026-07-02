@@ -18,86 +18,33 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 )
 
-func TestGateStart(t *testing.T) {
-	g := New(1, nil)
+func TestGate(t *testing.T) {
+	t.Run("start succeeds", func(t *testing.T) {
+		g := New(1)
 
-	require.NoError(t, g.Start(context.Background()))
-	g.Done()
-}
-
-func TestGateStartBlocksWhenFull(t *testing.T) {
-	g := New(1, nil)
-
-	require.NoError(t, g.Start(context.Background()))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	err := g.Start(ctx)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-
-	g.Done()
-}
-
-func TestGateWaitDurationObserved(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	g := New(1, reg)
-
-	require.NoError(t, g.Start(context.Background()))
-	g.Done()
-
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-
-	var hist *dto.Histogram
-	for _, mf := range mfs {
-		if mf.GetName() == "gate_wait_duration_seconds" {
-			hist = mf.GetMetric()[0].GetHistogram()
-			break
-		}
-	}
-	require.NotNil(t, hist, "expected gate_wait_duration_seconds histogram to be present")
-	require.Equal(t, uint64(1), hist.GetSampleCount())
-}
-
-func TestGateWaitDurationReflectsActualWait(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	g := New(1, reg)
-
-	// Fill the gate.
-	require.NoError(t, g.Start(context.Background()))
-
-	// Release after a short delay so the next Start observes non-zero wait.
-	go func() {
-		time.Sleep(100 * time.Millisecond)
+		require.NoError(t, g.Start(context.Background()))
 		g.Done()
-	}()
+	})
 
-	require.NoError(t, g.Start(context.Background()))
-	g.Done()
+	t.Run("start blocks when full", func(t *testing.T) {
+		g := New(1)
 
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
+		require.NoError(t, g.Start(context.Background()))
 
-	var hist *dto.Histogram
-	for _, mf := range mfs {
-		if mf.GetName() == "gate_wait_duration_seconds" {
-			hist = mf.GetMetric()[0].GetHistogram()
-			break
-		}
-	}
-	require.NotNil(t, hist)
-	// Two Start calls observed: one fast, one ~100ms.
-	require.Equal(t, uint64(2), hist.GetSampleCount())
-	require.Greater(t, hist.GetSampleSum(), 0.05, "expected meaningful wait time to be recorded")
-}
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
 
-func TestGateDonePanicsWhenNoneStarted(t *testing.T) {
-	g := New(1, nil)
-	require.Panics(t, func() { g.Done() })
+		err := g.Start(ctx)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+
+		g.Done()
+	})
+
+	t.Run("done panics when none started", func(t *testing.T) {
+		g := New(1)
+		require.Panics(t, func() { g.Done() })
+	})
 }

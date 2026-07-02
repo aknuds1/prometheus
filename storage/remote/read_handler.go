@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -32,14 +33,28 @@ import (
 	"github.com/prometheus/prometheus/util/gate"
 )
 
+const (
+	remoteReadHandlerSubsystem        = "remote_read_handler"
+	remoteReadGateWaitResultAcquired  = "acquired"
+	remoteReadGateWaitResultCanceled  = "canceled"
+	remoteReadGateWaitDurationSeconds = "gate_wait_duration_seconds"
+)
+
+type readGate interface {
+	Start(context.Context) error
+	Done()
+}
+
 type readHandler struct {
 	logger                    *slog.Logger
 	queryable                 storage.SampleAndChunkQueryable
 	config                    func() config.Config
 	remoteReadSampleLimit     int
 	remoteReadMaxBytesInFrame int
-	remoteReadGate            *gate.Gate
+	remoteReadGate            readGate
 	queries                   prometheus.Gauge
+	gateWaitDuration          *prometheus.HistogramVec
+	now                       func() time.Time
 	marshalPool               *sync.Pool
 }
 
@@ -51,33 +66,40 @@ func NewReadHandler(logger *slog.Logger, r prometheus.Registerer, queryable stor
 		queryable:                 queryable,
 		config:                    config,
 		remoteReadSampleLimit:     remoteReadSampleLimit,
-		remoteReadGate:            gate.New(remoteReadConcurrencyLimit, prometheus.WrapRegistererWithPrefix("prometheus_remote_read_handler_", r)),
+		remoteReadGate:            gate.New(remoteReadConcurrencyLimit),
 		remoteReadMaxBytesInFrame: remoteReadMaxBytesInFrame,
+		now:                       time.Now,
 		marshalPool:               &sync.Pool{},
 
 		queries: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
-			Subsystem: "remote_read_handler",
+			Subsystem: remoteReadHandlerSubsystem,
 			Name:      "queries",
 			Help:      "The current number of remote read queries that are either in execution or queued on the handler.",
 		}),
+		gateWaitDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace:                       namespace,
+			Subsystem:                       remoteReadHandlerSubsystem,
+			Name:                            remoteReadGateWaitDurationSeconds,
+			Help:                            "How long a remote read request spent waiting for the concurrency gate.",
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  100,
+			NativeHistogramMinResetDuration: 1 * time.Hour,
+		}, []string{"result"}),
 	}
 	if r != nil {
-		r.MustRegister(h.queries)
+		r.MustRegister(h.queries, h.gateWaitDuration)
 	}
 	return h
 }
 
 func (h *readHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if err := h.remoteReadGate.Start(ctx); err != nil {
+	if err := h.startRemoteRead(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	h.queries.Inc()
-
-	defer h.remoteReadGate.Done()
-	defer h.queries.Dec()
+	defer h.finishRemoteRead()
 
 	req, err := DecodeReadRequest(r)
 	if err != nil {
@@ -111,6 +133,26 @@ func (h *readHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// On empty or unknown types in req.AcceptedResponseTypes we default to non streamed, raw samples response.
 		h.remoteReadSamples(ctx, w, req, externalLabels, sortedExternalLabels)
 	}
+}
+
+func (h *readHandler) startRemoteRead(ctx context.Context) error {
+	start := h.now()
+	err := h.remoteReadGate.Start(ctx)
+	result := remoteReadGateWaitResultAcquired
+	if err != nil {
+		result = remoteReadGateWaitResultCanceled
+	}
+	h.gateWaitDuration.WithLabelValues(result).Observe(h.now().Sub(start).Seconds())
+	if err != nil {
+		return err
+	}
+	h.queries.Inc()
+	return nil
+}
+
+func (h *readHandler) finishRemoteRead() {
+	h.queries.Dec()
+	h.remoteReadGate.Done()
 }
 
 func (h *readHandler) remoteReadSamples(
