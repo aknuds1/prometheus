@@ -69,7 +69,7 @@ func NewReadHandler(logger *slog.Logger, r prometheus.Registerer, queryable stor
 			Namespace:                       namespace,
 			Subsystem:                       "remote_read_handler",
 			Name:                            "gate_wait_duration_seconds",
-			Help:                            "How long a remote read request spent waiting for the concurrency gate to open before proceeding.",
+			Help:                            "How long a remote read request spent waiting for the concurrency gate, including requests canceled while waiting.",
 			NativeHistogramBucketFactor:     1.1,
 			NativeHistogramMaxBucketNumber:  100,
 			NativeHistogramMinResetDuration: 1 * time.Hour,
@@ -84,11 +84,12 @@ func NewReadHandler(logger *slog.Logger, r prometheus.Registerer, queryable stor
 func (h *readHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	gateStart := time.Now()
-	if err := h.remoteReadGate.Start(ctx); err != nil {
+	err := h.remoteReadGate.Start(ctx)
+	h.gateWaitDuration.Observe(time.Since(gateStart).Seconds())
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	h.gateWaitDuration.Observe(time.Since(gateStart).Seconds())
 	h.queries.Inc()
 
 	defer h.remoteReadGate.Done()

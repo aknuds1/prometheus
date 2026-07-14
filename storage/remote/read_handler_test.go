@@ -960,43 +960,161 @@ func addNativeHistogramsToTestSuite(t *testing.T, storage *teststorage.TestStora
 }
 
 func TestRemoteReadGateWaitDurationObserved(t *testing.T) {
-	store := promqltest.LoadedStorage(t, `
-		load 1m
-			test_metric1{foo="bar"} 1
-	`)
-	defer store.Close()
+	const minimumWait = 25 * time.Millisecond
 
-	reg := prometheus.NewRegistry()
-	h := NewReadHandler(nil, reg, store, func() config.Config {
-		return config.Config{}
-	}, 1e6, 1, 0)
+	newHandlerAndRequest := func(t *testing.T) (*readHandler, *prometheus.Registry, *http.Request) {
+		store := promqltest.LoadedStorage(t, `
+			load 1m
+				test_metric1{foo="bar"} 1
+		`)
+		t.Cleanup(func() { store.Close() })
 
-	matcher, err := labels.NewMatcher(labels.MatchEqual, "__name__", "test_metric1")
-	require.NoError(t, err)
+		reg := prometheus.NewRegistry()
+		h, ok := NewReadHandler(nil, reg, store, func() config.Config {
+			return config.Config{}
+		}, 1e6, 1, 0).(*readHandler)
+		require.True(t, ok)
 
-	query, err := ToQuery(0, 1, []*labels.Matcher{matcher}, &storage.SelectHints{Step: 0, Func: "avg"})
-	require.NoError(t, err)
+		matcher, err := labels.NewMatcher(labels.MatchEqual, "__name__", "test_metric1")
+		require.NoError(t, err)
 
-	data, err := proto.Marshal(&prompb.ReadRequest{Queries: []*prompb.Query{query}})
-	require.NoError(t, err)
+		query, err := ToQuery(0, 1, []*labels.Matcher{matcher}, &storage.SelectHints{Step: 0, Func: "avg"})
+		require.NoError(t, err)
 
-	request, err := http.NewRequest(http.MethodPost, "", bytes.NewBuffer(snappy.Encode(nil, data)))
-	require.NoError(t, err)
+		data, err := proto.Marshal(&prompb.ReadRequest{Queries: []*prompb.Query{query}})
+		require.NoError(t, err)
 
-	recorder := httptest.NewRecorder()
-	h.ServeHTTP(recorder, request)
-	require.Equal(t, 2, recorder.Code/100)
+		request, err := http.NewRequest(http.MethodPost, "", bytes.NewBuffer(snappy.Encode(nil, data)))
+		require.NoError(t, err)
+		return h, reg, request
+	}
 
+	t.Run("successful acquisition", func(t *testing.T) {
+		h, reg, request := newHandlerAndRequest(t)
+		releaseGate := holdRemoteReadGate(t, h)
+
+		ctx := newGateStartContext(t.Context())
+		request = request.WithContext(ctx)
+		recorder := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			h.ServeHTTP(recorder, request)
+			close(done)
+		}()
+
+		waitForSignal(t, ctx.started)
+		time.Sleep(minimumWait)
+		releaseGate()
+		waitForSignal(t, done)
+
+		require.Equal(t, 2, recorder.Code/100)
+		hist := gatherHistogram(t, reg, "prometheus_remote_read_handler_gate_wait_duration_seconds")
+		require.Equal(t, uint64(1), hist.GetSampleCount())
+		require.GreaterOrEqual(t, hist.GetSampleSum(), minimumWait.Seconds())
+	})
+
+	t.Run("canceled acquisition", func(t *testing.T) {
+		h, reg, request := newHandlerAndRequest(t)
+		releaseGate := holdRemoteReadGate(t, h)
+
+		baseCtx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+		ctx := newGateStartContext(baseCtx)
+		request = request.WithContext(ctx)
+		recorder := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			h.ServeHTTP(recorder, request)
+			close(done)
+		}()
+
+		waitForSignal(t, ctx.started)
+		time.Sleep(minimumWait)
+		cancel()
+		waitForSignal(t, done)
+
+		require.Equal(t, http.StatusInternalServerError, recorder.Code)
+		hist := gatherHistogram(t, reg, "prometheus_remote_read_handler_gate_wait_duration_seconds")
+		require.Equal(t, uint64(1), hist.GetSampleCount())
+		require.GreaterOrEqual(t, hist.GetSampleSum(), minimumWait.Seconds())
+		require.Equal(t, float64(0), gatherGauge(t, reg, "prometheus_remote_read_handler_queries"))
+
+		releaseGate()
+		gateCtx, gateCancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer gateCancel()
+		require.NoError(t, h.remoteReadGate.Start(gateCtx))
+		h.remoteReadGate.Done()
+	})
+}
+
+// gateStartContext signals when the gate reads the context's cancellation channel.
+type gateStartContext struct {
+	context.Context
+	started chan struct{}
+	once    sync.Once
+}
+
+func newGateStartContext(ctx context.Context) *gateStartContext {
+	return &gateStartContext{
+		Context: ctx,
+		started: make(chan struct{}),
+	}
+}
+
+func (c *gateStartContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.started) })
+	return c.Context.Done()
+}
+
+func holdRemoteReadGate(t *testing.T, h *readHandler) func() {
+	t.Helper()
+	require.NoError(t, h.remoteReadGate.Start(t.Context()))
+
+	held := true
+	t.Cleanup(func() {
+		if held {
+			h.remoteReadGate.Done()
+		}
+	})
+	return func() {
+		h.remoteReadGate.Done()
+		held = false
+	}
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for remote read handler")
+	}
+}
+
+func gatherHistogram(t *testing.T, reg *prometheus.Registry, name string) *dto.Histogram {
+	t.Helper()
+	metric := gatherMetric(t, reg, name)
+	require.NotNil(t, metric.GetHistogram())
+	return metric.GetHistogram()
+}
+
+func gatherGauge(t *testing.T, reg *prometheus.Registry, name string) float64 {
+	t.Helper()
+	metric := gatherMetric(t, reg, name)
+	require.NotNil(t, metric.GetGauge())
+	return metric.GetGauge().GetValue()
+}
+
+func gatherMetric(t *testing.T, reg *prometheus.Registry, name string) *dto.Metric {
+	t.Helper()
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
-
-	var hist *dto.Histogram
 	for _, mf := range mfs {
-		if mf.GetName() == "prometheus_remote_read_handler_gate_wait_duration_seconds" {
-			hist = mf.GetMetric()[0].GetHistogram()
-			break
+		if mf.GetName() == name {
+			require.Len(t, mf.GetMetric(), 1)
+			return mf.GetMetric()[0]
 		}
 	}
-	require.NotNil(t, hist, "expected gate wait duration histogram to be registered and observed")
-	require.Equal(t, uint64(1), hist.GetSampleCount())
+	t.Fatalf("metric %q not found", name)
+	return nil
 }
