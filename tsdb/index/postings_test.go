@@ -1585,3 +1585,49 @@ func TestMemPostings_OutOfOrderAdd(t *testing.T) {
 		}
 	})
 }
+
+// BenchmarkMemPostings_Add benchmarks adding series to already large postings lists,
+// where out-of-order additions are expensive, see https://github.com/prometheus/prometheus/issues/15317.
+func BenchmarkMemPostings_Add(b *testing.B) {
+	const (
+		seeded = 200000
+		// Out of order refs go back this far at most, the order of magnitude observed for concurrent series creation in the head.
+		maxShift = 256
+	)
+
+	for _, bc := range []struct {
+		name string
+		// outOfOrderEvery is how often an added ref is lower than the previous one.
+		outOfOrderEvery int
+	}{
+		{name: "ordered", outOfOrderEvery: 0},
+		{name: "out_of_order", outOfOrderEvery: 30},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			mp := NewMemPostings()
+			lbls := labels.FromStrings("job", "bench")
+			// Refs go up in steps of maxShift*2 so that out of order refs never collide with one that was already added.
+			next := storage.SeriesRef(0)
+			step := storage.SeriesRef(maxShift * 2)
+			for range seeded {
+				next += step
+				mp.Add(next, lbls)
+			}
+
+			rnd := rand.New(rand.NewSource(1))
+			i := 0
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				i++
+				next += step
+				ref := next
+				if bc.outOfOrderEvery > 0 && i%bc.outOfOrderEvery == 0 {
+					// Go back a random number of positions, subtracting one to stay unique since every in-order ref is a multiple of step.
+					ref = next - storage.SeriesRef(rnd.Intn(maxShift)+1)*step - 1
+				}
+				mp.Add(ref, lbls)
+			}
+		})
+	}
+}
