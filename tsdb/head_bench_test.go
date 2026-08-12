@@ -287,6 +287,40 @@ func BenchmarkHeadStripeSeriesCreateParallel(b *testing.B) {
 	})
 }
 
+func BenchmarkHeadStripeSeriesCreatePreparedParallel(b *testing.B) {
+	for _, labelCount := range []int{1, 2, 10} {
+		b.Run(fmt.Sprintf("labels=%d", labelCount), func(b *testing.B) {
+			series := genSeries(b.N, labelCount, 0, 0)
+			lsets := make([]labels.Labels, len(series))
+			hashes := make([]uint64, len(series))
+			for i := range series {
+				lsets[i] = series[i].Labels()
+				hashes[i] = lsets[i].Hash()
+			}
+
+			opts := DefaultHeadOptions()
+			opts.ChunkRange = 1000
+			opts.ChunkDirRoot = b.TempDir()
+			h, err := NewHead(nil, nil, nil, nil, opts, nil)
+			require.NoError(b, err)
+			defer h.Close()
+
+			var next atomic.Int64
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					i := int(next.Inc()) - 1
+					if _, _, err := h.getOrCreate(hashes[i], lsets[i], false); err != nil {
+						b.Error(err)
+						return
+					}
+				}
+			})
+		})
+	}
+}
+
 func BenchmarkHeadStripeSeriesCreate_PreCreationFailure(b *testing.B) {
 	chunkDir := b.TempDir()
 	// Put a series, select it. GC it and then access it.
