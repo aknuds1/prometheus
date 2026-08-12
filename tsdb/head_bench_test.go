@@ -14,10 +14,13 @@
 package tsdb
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
+	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -317,6 +320,74 @@ func BenchmarkHeadStripeSeriesCreatePreparedParallel(b *testing.B) {
 					}
 				}
 			})
+		})
+	}
+}
+
+// BenchmarkHeadStripeSeriesCreateParallelWithReaders benchmarks concurrent series creation
+// while readers repeatedly take postings for a label all new series share, as queries do
+// during series churn.
+func BenchmarkHeadStripeSeriesCreateParallelWithReaders(b *testing.B) {
+	// Seed enough series that the shared postings list is large from the start.
+	const seeded = 10_000
+
+	for _, readers := range []int{0, 2} {
+		b.Run(fmt.Sprintf("readers=%d", readers), func(b *testing.B) {
+			lsets := make([]labels.Labels, seeded+b.N)
+			hashes := make([]uint64, len(lsets))
+			for i := range lsets {
+				lsets[i] = labels.FromStrings("instance", strconv.Itoa(i), "job", "bench")
+				hashes[i] = lsets[i].Hash()
+			}
+
+			opts := DefaultHeadOptions()
+			opts.ChunkRange = 1000
+			opts.ChunkDirRoot = b.TempDir()
+			h, err := NewHead(nil, nil, nil, nil, opts, nil)
+			require.NoError(b, err)
+			defer h.Close()
+
+			for i := range seeded {
+				_, _, err := h.getOrCreate(hashes[i], lsets[i], false)
+				require.NoError(b, err)
+			}
+
+			stop := make(chan struct{})
+			var readerWG sync.WaitGroup
+			for range readers {
+				readerWG.Go(func() {
+					for {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						// Taking the postings is what interacts with concurrent additions;
+						// read a bounded prefix so reader cost stays constant.
+						p := h.postings.Postings(context.Background(), "job", "bench")
+						for i := 0; i < 64 && p.Next(); i++ {
+						}
+						runtime.Gosched()
+					}
+				})
+			}
+
+			var next atomic.Int64
+			next.Store(seeded)
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					i := int(next.Inc()) - 1
+					if _, _, err := h.getOrCreate(hashes[i], lsets[i], false); err != nil {
+						b.Error(err)
+						return
+					}
+				}
+			})
+			b.StopTimer()
+			close(stop)
+			readerWG.Wait()
 		})
 	}
 }
