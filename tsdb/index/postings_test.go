@@ -1520,456 +1520,68 @@ func TestMemPostings_PostingsForLabelMatchingHonorsContextCancel(t *testing.T) {
 	require.Equal(t, failAfter+1, ctx.Count()) // Plus one for the Err() call that puts the error in the result.
 }
 
-func TestMemPostings_Unordered_Add_Get(t *testing.T) {
-	mp := NewMemPostings()
-	for ref := storage.SeriesRef(1); ref < 8; ref += 2 {
-		// First, add next series.
-		next := ref + 1
-		mp.Add(next, labels.FromStrings(labels.MetricName, "test", "series", strconv.Itoa(int(next))))
-		nextPostings := mp.Postings(context.Background(), labels.MetricName, "test")
+func TestMemPostings_OutOfOrderAdd(t *testing.T) {
+	lset := labels.FromStrings(labels.MetricName, "test")
 
-		// Now add current ref.
-		mp.Add(ref, labels.FromStrings(labels.MetricName, "test", "series", strconv.Itoa(int(ref))))
-
-		// Next postings should still reference the next series.
-		nextExpanded, err := ExpandPostings(nextPostings)
-		require.NoError(t, err)
-		require.Len(t, nextExpanded, int(ref))
-		require.Equal(t, next, nextExpanded[len(nextExpanded)-1])
-	}
-}
-
-func TestMemPostings_Concurrent_Add_Get(t *testing.T) {
-	refs := make(chan storage.SeriesRef)
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	t.Cleanup(wg.Wait)
-	t.Cleanup(func() { close(refs) })
-
-	mp := NewMemPostings()
-	go func() {
-		defer wg.Done()
-		for ref := range refs {
-			mp.Add(ref, labels.FromStrings(labels.MetricName, "test", "series", strconv.Itoa(int(ref))))
-			p := mp.Postings(context.Background(), labels.MetricName, "test")
-
-			_, err := ExpandPostings(p)
-			if err != nil {
-				t.Errorf("unexpected error: %s", err)
-			}
-		}
-	}()
-
-	for ref := storage.SeriesRef(1); ref < 8; ref += 2 {
-		// Add next ref in another goroutine so they would race.
-		refs <- ref + 1
-		// Add current ref here.
-		mp.Add(ref, labels.FromStrings(labels.MetricName, "test", "series", strconv.Itoa(int(ref))))
-
-		// This test only checks that there's no data race, the values are checked in TestMemPostings_Unordered_Add_Get where determinism is easier.
-		p := mp.Postings(context.Background(), labels.MetricName, "test")
-		_, err := ExpandPostings(p)
-		require.NoError(t, err)
-	}
-}
-
-func TestMemPostings_OutOfOrderRuns(t *testing.T) {
-	const labelValue = "big"
-	l := labels.Label{Name: "name", Value: labelValue}
-	lset := labels.FromStrings(l.Name, l.Value)
-
-	seed := func(t *testing.T, count int) (*MemPostings, []storage.SeriesRef) {
-		t.Helper()
-		mp := NewMemPostings()
-		refs := make([]storage.SeriesRef, count)
-		for i := range count {
-			refs[i] = storage.SeriesRef((i + 1) * 4)
-			mp.Add(refs[i], lset)
-		}
-		return mp, refs
-	}
-
-	t.Run("threshold", func(t *testing.T) {
-		for _, tc := range []struct {
-			name     string
-			seeded   int
-			wantRuns bool
-		}{
-			{name: "short with spare capacity", seeded: outOfOrderRunMinLen - 2},
-			{name: "short requiring growth", seeded: outOfOrderRunMinLen - 1},
-			{name: "large", seeded: outOfOrderRunMinLen, wantRuns: true},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				mp, seeded := seed(t, tc.seeded)
-				baseBefore := mp.m[l.Name][l.Value]
-				before := mp.Postings(context.Background(), l.Name, l.Value)
-				mp.Add(1, lset)
-
-				_, hasRuns := mp.outOfOrder[l]
-				require.Equal(t, tc.wantRuns, hasRuns)
-				if tc.wantRuns {
-					baseAfter := mp.m[l.Name][l.Value]
-					require.Len(t, baseAfter, len(baseBefore))
-					require.Equal(t, &baseBefore[0], &baseAfter[0], "out-of-order addition replaced the base list")
-				}
-				require.Equal(t, seeded, expandPostings(t, before))
-
-				want := append([]storage.SeriesRef{1}, seeded...)
-				require.Equal(t, want, expandPostings(t, mp.Postings(context.Background(), l.Name, l.Value)))
-			})
-		}
-	})
-
-	t.Run("binary carries", func(t *testing.T) {
-		mp, seeded := seed(t, outOfOrderRunMinLen)
-		for i := range 8 {
-			mp.Add(seeded[len(seeded)-1]-storage.SeriesRef(i*2+1), lset)
-		}
-
-		state := mp.outOfOrder[l]
-		require.NotNil(t, state)
-		require.Equal(t, 8, state.count)
-		require.Len(t, state.runs, 4)
-		require.Nil(t, state.runs[0])
-		require.Nil(t, state.runs[1])
-		require.Nil(t, state.runs[2])
-		require.Len(t, state.runs[3], 8)
-		require.True(t, slices.IsSorted(state.runs[3]))
-		require.IsIncreasing(t, expandPostings(t, mp.Postings(context.Background(), l.Name, l.Value)))
-	})
-
-	t.Run("retained iterators across a carry", func(t *testing.T) {
-		mp, seeded := seed(t, outOfOrderRunMinLen)
-		before := mp.Postings(context.Background(), l.Name, l.Value)
-
-		firstAdded := make(chan struct{})
-		continueAdding := make(chan struct{})
-		var writer sync.WaitGroup
-		writer.Go(func() {
-			mp.Add(1, lset)
-			close(firstAdded)
-			<-continueAdding
-			mp.Add(3, lset)
-		})
-
-		<-firstAdded
-		afterFirst := mp.Postings(context.Background(), l.Name, l.Value)
-		state := mp.outOfOrder[l]
-		require.NotNil(t, state)
-		require.Equal(t, 1, state.count)
-		require.Len(t, state.runs[0], 1)
-
-		close(continueAdding)
-		writer.Wait()
-		state = mp.outOfOrder[l]
-		require.Equal(t, 2, state.count)
-		require.Nil(t, state.runs[0])
-		require.Len(t, state.runs[1], 2)
-
-		require.Equal(t, seeded, expandPostings(t, before))
-		require.Equal(t, append([]storage.SeriesRef{1}, seeded...), expandPostings(t, afterFirst))
-		require.Equal(t, append([]storage.SeriesRef{1, 3}, seeded...), expandPostings(t, mp.Postings(context.Background(), l.Name, l.Value)))
-	})
-
-	t.Run("consolidation", func(t *testing.T) {
-		mp := NewMemPostings()
-		base := make([]storage.SeriesRef, outOfOrderRunMinLen, outOfOrderRunMinLen+1)
-		for i := range base {
-			base[i] = storage.SeriesRef((i + 1) * 4)
-		}
-		mp.m[l.Name] = map[string][]storage.SeriesRef{l.Value: base}
-		mp.lvs[l.Name] = []string{l.Value}
-
-		mp.Add(1, lset)
-		require.Contains(t, mp.outOfOrder, l)
-		afterRun := mp.Postings(context.Background(), l.Name, l.Value)
-
-		mp.Add(base[len(base)-1]+4, lset)
-		beforeConsolidation := mp.Postings(context.Background(), l.Name, l.Value)
-		mp.Add(base[len(base)-1]+8, lset)
-
-		require.NotContains(t, mp.outOfOrder, l)
-		require.NotContains(t, mp.outOfOrderNames, l.Name)
-		require.Equal(t, append([]storage.SeriesRef{1}, base...), expandPostings(t, afterRun))
-		require.Equal(t, append(append([]storage.SeriesRef{1}, base...), base[len(base)-1]+4), expandPostings(t, beforeConsolidation))
-		require.Equal(t, append(append([]storage.SeriesRef{1}, base...), base[len(base)-1]+4, base[len(base)-1]+8), expandPostings(t, mp.Postings(context.Background(), l.Name, l.Value)))
-	})
-}
-
-func expandPostings(t testing.TB, postings Postings) []storage.SeriesRef {
-	t.Helper()
-	refs, err := ExpandPostings(postings)
-	require.NoError(t, err)
-	return refs
-}
-
-func TestPostingsWithRuns_NextAndSeek(t *testing.T) {
-	base := []storage.SeriesRef{1, 2, 10, 20, 30}
-	want := []storage.SeriesRef{1, 2, 3, 10, 15, 20, 25, 30}
-	for name, state := range map[string]*postingsListState{
-		"single run": {
-			runs:  [][]storage.SeriesRef{{3, 15, 25}},
-			count: 3,
-		},
-		"multiple runs": {
-			runs:  [][]storage.SeriesRef{{25}, {3, 15}},
-			count: 3,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			require.Equal(t, want, expandPostings(t, newPostingsWithRuns(context.Background(), base, state)))
-
-			for _, tc := range []struct {
-				target storage.SeriesRef
-				want   storage.SeriesRef
-				ok     bool
-			}{
-				{target: 1, want: 1, ok: true},
-				{target: 2, want: 2, ok: true},
-				{target: 4, want: 10, ok: true},
-				{target: 10, want: 10, ok: true},
-				{target: 16, want: 20, ok: true},
-				{target: 25, want: 25, ok: true},
-				{target: 26, want: 30, ok: true},
-				{target: 30, want: 30, ok: true},
-				{target: 31},
-			} {
-				t.Run(strconv.FormatUint(uint64(tc.target), 10), func(t *testing.T) {
-					postings := newPostingsWithRuns(context.Background(), base, state)
-					require.Equal(t, tc.ok, postings.Seek(tc.target))
-					if tc.ok {
-						require.Equal(t, tc.want, postings.At())
-					}
-				})
-			}
-
-			postings := newPostingsWithRuns(context.Background(), base, state)
-			require.True(t, postings.Next())
-			require.Equal(t, storage.SeriesRef(1), postings.At())
-			require.True(t, postings.Seek(15))
-			require.Equal(t, storage.SeriesRef(15), postings.At())
-			require.True(t, postings.Next())
-			require.Equal(t, storage.SeriesRef(20), postings.At())
-			require.True(t, postings.Seek(19))
-			require.Equal(t, storage.SeriesRef(20), postings.At())
-		})
-	}
-}
-
-func TestMemPostings_OutOfOrderRuns_ReadAndDelete(t *testing.T) {
-	const (
-		name   = "foo"
-		valueA = "a"
-		valueB = "b"
-	)
-	lA := labels.Label{Name: name, Value: valueA}
-	mp := NewMemPostings()
-	seeded := make([]storage.SeriesRef, outOfOrderRunMinLen)
-	for i := range seeded {
-		seeded[i] = storage.SeriesRef((i + 1) * 4)
-		mp.Add(seeded[i], labels.FromStrings(name, valueA))
-	}
-	mp.Add(1, labels.FromStrings(name, valueA))
-	extra := seeded[len(seeded)-1] + 4
-	mp.Add(extra, labels.FromStrings(name, valueB))
-
-	wantA := append([]storage.SeriesRef{1}, seeded...)
-	wantAll := append(slices.Clone(wantA), extra)
-	assertReadAPIs := func(t *testing.T, wantA, wantAll []storage.SeriesRef) {
-		t.Helper()
-		require.Equal(t, wantA, expandPostings(t, mp.Postings(context.Background(), name, valueA)))
-		require.Equal(t, wantAll, expandPostings(t, mp.Postings(context.Background(), name, valueA, valueB)))
-		require.Equal(t, wantAll, expandPostings(t, mp.PostingsForLabelMatching(context.Background(), name, func(string) bool { return true })))
-		require.Equal(t, wantAll, expandPostings(t, mp.PostingsForAllLabelValues(context.Background(), name)))
-		require.Equal(t, wantAll, expandPostings(t, mp.All()))
-
-		seen := map[labels.Label][]storage.SeriesRef{}
-		require.NoError(t, mp.Iter(func(l labels.Label, postings Postings) error {
-			seen[l] = expandPostings(t, postings)
-			return nil
-		}))
-		require.Equal(t, wantA, seen[lA])
-		require.Equal(t, wantAll, seen[allPostingsKey])
-	}
-	assertReadAPIs(t, wantA, wantAll)
-
-	stats := mp.Stats(name, 10, func(_, _ string, count uint64) uint64 { return count })
-	require.Contains(t, stats.CardinalityMetricsStats, Stat{Name: valueA, Count: uint64(len(wantA))})
-	require.Contains(t, stats.LabelValuePairsStats, Stat{Name: name + "=" + valueA, Count: uint64(len(wantA))})
-
-	beforeDelete := mp.Postings(context.Background(), name, valueA)
-	deleted := map[storage.SeriesRef]struct{}{1: {}, seeded[10]: {}}
-	mp.Delete(deleted, map[labels.Label]struct{}{lA: {}})
-	wantAAfterDelete := slices.DeleteFunc(slices.Clone(wantA), func(ref storage.SeriesRef) bool {
-		_, ok := deleted[ref]
-		return ok
-	})
-	wantAllAfterDelete := append(slices.Clone(wantAAfterDelete), extra)
-
-	require.Equal(t, wantA, expandPostings(t, beforeDelete))
-	require.NotContains(t, mp.outOfOrder, lA)
-	require.NotContains(t, mp.outOfOrder, allPostingsKey)
-	assertReadAPIs(t, wantAAfterDelete, wantAllAfterDelete)
-}
-
-func TestMemPostings_OutOfOrderRuns_Model(t *testing.T) {
-	l := labels.Label{Name: "model", Value: "value"}
-	lset := labels.FromStrings(l.Name, l.Value)
-	mp := NewMemPostings()
-	wantSet := map[storage.SeriesRef]struct{}{}
-
-	for i := range outOfOrderRunMinLen {
-		ref := storage.SeriesRef((i + 1) * 10)
-		mp.Add(ref, lset)
-		wantSet[ref] = struct{}{}
-	}
-
-	rnd := rand.New(rand.NewSource(1))
-	added := make([]storage.SeriesRef, 200)
-	for position, i := range rnd.Perm(len(added)) {
-		ref := storage.SeriesRef(i*10 + 1)
-		added[position] = ref
-		mp.Add(ref, lset)
-		wantSet[ref] = struct{}{}
-		if position%17 == 0 {
-			require.Equal(t, sortedRefs(wantSet), expandPostings(t, mp.Postings(context.Background(), l.Name, l.Value)))
-		}
-	}
-
-	deleted := map[storage.SeriesRef]struct{}{}
-	for i := 0; i < len(added); i += 3 {
-		deleted[added[i]] = struct{}{}
-		delete(wantSet, added[i])
-	}
-	for i := 0; i < outOfOrderRunMinLen; i += 113 {
-		ref := storage.SeriesRef((i + 1) * 10)
-		deleted[ref] = struct{}{}
-		delete(wantSet, ref)
-	}
-	mp.Delete(deleted, map[labels.Label]struct{}{l: {}})
-	require.Equal(t, sortedRefs(wantSet), expandPostings(t, mp.Postings(context.Background(), l.Name, l.Value)))
-
-	for _, ref := range []storage.SeriesRef{20_001, 20_011, 20_005} {
-		mp.Add(ref, lset)
-		wantSet[ref] = struct{}{}
-	}
-	require.Equal(t, sortedRefs(wantSet), expandPostings(t, mp.Postings(context.Background(), l.Name, l.Value)))
-}
-
-func sortedRefs(refs map[storage.SeriesRef]struct{}) []storage.SeriesRef {
-	result := make([]storage.SeriesRef, 0, len(refs))
-	for ref := range refs {
-		result = append(result, ref)
-	}
-	slices.Sort(result)
-	return result
-}
-
-func TestMemPostings_UnorderedStartupDoesNotCreateRuns(t *testing.T) {
-	mp := NewUnorderedMemPostings()
-	lset := labels.FromStrings("name", "value")
-	refs := []storage.SeriesRef{9, 1, 7, 3, 5}
-	for _, ref := range refs {
-		mp.Add(ref, lset)
-	}
-	require.Empty(t, mp.outOfOrder)
-
-	mp.EnsureOrder(1)
-	require.Equal(t, []storage.SeriesRef{1, 3, 5, 7, 9}, expandPostings(t, mp.Postings(context.Background(), "name", "value")))
-}
-
-// BenchmarkMemPostings_Add benchmarks ordered and out-of-order additions to large postings lists, see https://github.com/prometheus/prometheus/issues/15317.
-func BenchmarkMemPostings_Add(b *testing.B) {
-	const (
-		seeded = 200000
-		// Out of order refs go back this far at most, the order of magnitude observed for concurrent series creation in the head.
-		maxShift = 256
-	)
-
-	for _, bc := range []struct {
-		name string
-		// outOfOrderEvery is how often an added ref is lower than the previous one.
-		outOfOrderEvery int
-		// readEvery is how often a reader takes a reference to the postings list.
-		readEvery int
+	for _, tc := range []struct {
+		name        string
+		initialRefs []storage.SeriesRef
+		wantRefs    []storage.SeriesRef
 	}{
-		{name: "ordered", outOfOrderEvery: 0, readEvery: 0},
-		{name: "ordered_with_reads", outOfOrderEvery: 0, readEvery: 100},
-		{name: "out_of_order", outOfOrderEvery: 30, readEvery: 0},
-		{name: "out_of_order_with_reads", outOfOrderEvery: 30, readEvery: 100},
-		{name: "out_of_order_read_every_add", outOfOrderEvery: 30, readEvery: 1},
-		{name: "out_of_order_every_add_with_binary_carries", outOfOrderEvery: 1, readEvery: 0},
-		{name: "out_of_order_every_add_with_binary_carries_and_reads", outOfOrderEvery: 1, readEvery: 1},
+		{
+			name:        "capacity growth",
+			initialRefs: []storage.SeriesRef{2},
+			wantRefs:    []storage.SeriesRef{1, 2},
+		},
+		{
+			name:        "spare capacity",
+			initialRefs: []storage.SeriesRef{2, 4},
+			wantRefs:    []storage.SeriesRef{1, 2, 4},
+		},
 	} {
-		b.Run(bc.name, func(b *testing.B) {
+		t.Run(tc.name, func(t *testing.T) {
 			mp := NewMemPostings()
-			lbls := labels.FromStrings("job", "bench")
-			// The large step leaves room to encode the iteration in each out-of-order ref, keeping refs unique.
-			next := storage.SeriesRef(0)
-			step := storage.SeriesRef(1 << 32)
-			for range seeded {
-				next += step
-				mp.Add(next, lbls)
+			for _, ref := range tc.initialRefs {
+				mp.Add(ref, lset)
 			}
+			before := mp.Postings(context.Background(), labels.MetricName, "test")
 
-			rnd := rand.New(rand.NewSource(1))
-			i := 0
-			b.ReportAllocs()
-			b.ResetTimer()
-			for b.Loop() {
-				i++
-				next += step
-				ref := next
-				if bc.outOfOrderEvery > 0 && i%bc.outOfOrderEvery == 0 {
-					ref = next - storage.SeriesRef(rnd.Intn(maxShift)+1)*step - storage.SeriesRef(i)
-				}
-				mp.Add(ref, lbls)
-				if bc.readEvery > 0 && i%bc.readEvery == 0 {
-					// A query taking a reference to the postings list, which is what makes it unsafe to repair order violations in place afterwards.
-					mp.Postings(context.Background(), "job", "bench")
-				}
-			}
+			mp.Add(1, lset)
+
+			beforeRefs, err := ExpandPostings(before)
+			require.NoError(t, err)
+			require.Equal(t, tc.initialRefs, beforeRefs)
+
+			refs, err := ExpandPostings(mp.Postings(context.Background(), labels.MetricName, "test"))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantRefs, refs)
 		})
 	}
-}
 
-// BenchmarkMemPostings_Postings benchmarks complete reads of ordinary and out-of-order postings lists.
-func BenchmarkMemPostings_Postings(b *testing.B) {
-	for _, baseSize := range []int{1_024, 10_000} {
-		for _, tc := range []struct {
-			name       string
-			outOfOrder []storage.SeriesRef
-		}{
-			{name: "no_runs"},
-			{name: "narrow_window", outOfOrder: []storage.SeriesRef{storage.SeriesRef(baseSize*4 - 1)}},
-			{name: "narrow_window_multiple_runs", outOfOrder: []storage.SeriesRef{storage.SeriesRef(baseSize*4 - 1), storage.SeriesRef(baseSize*4 - 2), storage.SeriesRef(baseSize*4 - 3)}},
-			{name: "full_window", outOfOrder: []storage.SeriesRef{1, storage.SeriesRef(baseSize*4 - 1)}},
-			{name: "full_window_multiple_runs", outOfOrder: []storage.SeriesRef{1, 2, storage.SeriesRef(baseSize*4 - 1)}},
-		} {
-			b.Run(fmt.Sprintf("base=%d/%s", baseSize, tc.name), func(b *testing.B) {
-				mp := NewMemPostings()
-				lset := labels.FromStrings("job", "bench")
-				for i := range baseSize {
-					mp.Add(storage.SeriesRef((i+1)*4), lset)
-				}
-				for _, ref := range tc.outOfOrder {
-					mp.Add(ref, lset)
-				}
-				wantCount := baseSize + len(tc.outOfOrder)
+	t.Run("concurrent retained iterator", func(t *testing.T) {
+		for range 1000 {
+			mp := NewMemPostings()
+			mp.Add(2, lset)
+			mp.Add(4, lset)
+			before := mp.Postings(context.Background(), labels.MetricName, "test")
 
-				b.ReportAllocs()
-				b.ResetTimer()
-				for b.Loop() {
-					postings := mp.Postings(context.Background(), "job", "bench")
-					count := 0
-					for postings.Next() {
-						count++
-					}
-					if count != wantCount {
-						b.Fatalf("got %d refs, want %d", count, wantCount)
-					}
-				}
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			var beforeRefs []storage.SeriesRef
+			var readErr error
+			wg.Go(func() {
+				<-start
+				mp.Add(1, lset)
 			})
+			wg.Go(func() {
+				<-start
+				beforeRefs, readErr = ExpandPostings(before)
+			})
+			close(start)
+			wg.Wait()
+
+			require.NoError(t, readErr)
+			require.Equal(t, []storage.SeriesRef{2, 4}, beforeRefs)
 		}
-	}
+	})
 }

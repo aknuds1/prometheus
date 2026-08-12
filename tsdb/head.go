@@ -84,6 +84,8 @@ type Head struct {
 	lastWALTruncationTime    atomic.Int64
 	lastMemoryTruncationTime atomic.Int64
 	lastSeriesID             atomic.Uint64
+	// Series creation keeps automatically allocated refs ordered through postings publication.
+	seriesCreationMtx sync.Mutex
 	// All the ooo m-map chunks should be after this. This is used to truncate old ooo m-map chunks.
 	// This should be typecasted to chunks.ChunkDiskMapperRef after loading.
 	minOOOMmapRef atomic.Uint64
@@ -2080,20 +2082,41 @@ func (h *Head) getOrCreateWithOptionalID(id chunks.HeadSeriesRef, hash uint64, l
 	if preCreationErr := h.series.seriesLifecycleCallback.PreCreation(lset); preCreationErr != nil {
 		return nil, false, preCreationErr
 	}
-	if id == 0 {
-		// Note this id is wasted in the case where a concurrent operation creates the same series first.
-		id = chunks.HeadSeriesRef(h.lastSeriesID.Inc())
-	}
 
 	shardHash := uint64(0)
 	if h.opts.EnableSharding {
 		shardHash = labels.StableHash(lset)
 	}
+
+	var s *memSeries
+	var created bool
+	if id == 0 {
+		// Note this id is wasted in the case where a concurrent operation creates the same series first.
+		h.seriesCreationMtx.Lock()
+		id = chunks.HeadSeriesRef(h.lastSeriesID.Inc())
+		s, created = h.createSeries(id, hash, lset, shardHash, pendingCommit)
+		h.seriesCreationMtx.Unlock()
+	} else {
+		// Explicit refs are only used while replaying into unordered postings, which
+		// are sorted by EnsureOrder before queries are enabled.
+		s, created = h.createSeries(id, hash, lset, shardHash, pendingCommit)
+	}
+
+	if created {
+		// Adding the series in the postings marks the creation of series
+		// as any further calls to this and the read methods would return that series.
+		h.series.postCreation(lset)
+	}
+
+	return s, created, nil
+}
+
+func (h *Head) createSeries(id chunks.HeadSeriesRef, hash uint64, lset labels.Labels, shardHash uint64, pendingCommit bool) (*memSeries, bool) {
 	optimisticallyCreatedSeries := newMemSeries(lset, id, shardHash, h.opts.IsolationDisabled, pendingCommit)
 
 	s, created := h.series.setUnlessAlreadySet(hash, lset, optimisticallyCreatedSeries)
 	if !created {
-		return s, false, nil
+		return s, false
 	}
 
 	h.metrics.seriesCreated.Inc()
@@ -2101,11 +2124,7 @@ func (h *Head) getOrCreateWithOptionalID(id chunks.HeadSeriesRef, hash uint64, l
 
 	h.postings.Add(storage.SeriesRef(id), lset)
 
-	// Adding the series in the postings marks the creation of series
-	// as any further calls to this and the read methods would return that series.
-	h.series.postCreation(lset)
-
-	return s, true, nil
+	return s, true
 }
 
 // onChunkCreated bumps the head chunk metrics for any newly created chunk, in-order or OOO.

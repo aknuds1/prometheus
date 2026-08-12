@@ -53,16 +53,6 @@ var ensureOrderBatchPool = sync.Pool{
 	},
 }
 
-// Large postings lists keep out-of-order refs in immutable runs. Shorter lists are copied.
-const outOfOrderRunMinLen = 1024
-
-// Sorted runs contain refs not yet consolidated into the main postings list.
-// Run arrays are immutable once published; the run slice is mutated only while holding mtx for writing.
-type postingsListState struct {
-	runs  [][]storage.SeriesRef
-	count int
-}
-
 // MemPostings holds postings list for series ID per label pair. They may be written
 // to out of order.
 // EnsureOrder() must be called once before any reads are done. This allows for quick
@@ -73,7 +63,7 @@ type MemPostings struct {
 	// m holds the postings lists for each label-value pair, indexed first by label name, and then by label value.
 	//
 	// mtx must be held when interacting with m (the appropriate one for reading or writing).
-	// It is safe to retain a reference to a postings list after releasing the lock. Elements visible through a published slice are never modified.
+	// It is safe to retain a reference to a postings list after releasing the lock.
 	m map[string]map[string][]storage.SeriesRef
 
 	// lvs holds the label values for each label name.
@@ -81,14 +71,6 @@ type MemPostings struct {
 	// mtx must be held when interacting with lvs.
 	// Since it's append-only, it is safe to read the label values slice after releasing the lock.
 	lvs map[string][]string
-
-	// Immutable sorted runs are tracked for label pairs whose main postings list has not been copied to insert out-of-order refs.
-	// The mutex must be held when interacting with outOfOrder.
-	outOfOrder map[labels.Label]*postingsListState
-
-	// Entry counts by label name preserve the ordinary read path for unaffected label names.
-	// The mutex must be held when interacting with outOfOrderNames.
-	outOfOrderNames map[string]int
 
 	ordered bool
 }
@@ -215,13 +197,13 @@ func (p *MemPostings) Stats(label string, limit int, labelSizeFunc func(string, 
 	p.mtx.RLock()
 
 	metrics := &maxHeap{}
-	labelStats := &maxHeap{}
+	labels := &maxHeap{}
 	labelValueLength := &maxHeap{}
 	labelValuePairs := &maxHeap{}
 	numLabelPairs := 0
 
 	metrics.init(limit)
-	labelStats.init(limit)
+	labels.init(limit)
 	labelValueLength.init(limit)
 	labelValuePairs.init(limit)
 
@@ -229,17 +211,14 @@ func (p *MemPostings) Stats(label string, limit int, labelSizeFunc func(string, 
 		if n == "" {
 			continue
 		}
-		labelStats.push(Stat{Name: n, Count: uint64(len(e))})
+		labels.push(Stat{Name: n, Count: uint64(len(e))})
 		numLabelPairs += len(e)
 		size = 0
 		for name, values := range e {
-			seriesCnt := uint64(len(values))
-			if state := p.outOfOrder[labels.Label{Name: n, Value: name}]; state != nil {
-				seriesCnt += uint64(state.count)
-			}
 			if n == label {
-				metrics.push(Stat{Name: name, Count: seriesCnt})
+				metrics.push(Stat{Name: name, Count: uint64(len(values))})
 			}
+			seriesCnt := uint64(len(values))
 			labelValuePairs.push(Stat{Name: n + "=" + name, Count: seriesCnt})
 			size += labelSizeFunc(n, name, seriesCnt)
 		}
@@ -250,7 +229,7 @@ func (p *MemPostings) Stats(label string, limit int, labelSizeFunc func(string, 
 
 	return &PostingsStats{
 		CardinalityMetricsStats: metrics.get(),
-		CardinalityLabelStats:   labelStats.get(),
+		CardinalityLabelStats:   labels.get(),
 		LabelValueStats:         labelValueLength.get(),
 		LabelValuePairsStats:    labelValuePairs.get(),
 		NumLabelPairs:           numLabelPairs,
@@ -330,20 +309,12 @@ func (p *MemPostings) Delete(deleted map[storage.SeriesRef]struct{}, affected ma
 	affectedLabelNames := map[string]struct{}{}
 	process := func(l labels.Label) {
 		orig := p.m[l.Name][l.Value]
-		state := p.outOfOrder[l]
-		capacity := len(orig)
-		if state != nil {
-			capacity += state.count
-		}
-		repl := make([]storage.SeriesRef, 0, capacity)
-		postings := newPostingsWithRuns(context.Background(), orig, state)
-		for postings.Next() {
-			id := postings.At()
+		repl := make([]storage.SeriesRef, 0, len(orig))
+		for _, id := range orig {
 			if _, ok := deleted[id]; !ok {
 				repl = append(repl, id)
 			}
 		}
-		p.clearOutOfOrder(l)
 		if len(repl) > 0 {
 			p.m[l.Name][l.Value] = repl
 		} else {
@@ -415,10 +386,9 @@ func (p *MemPostings) Iter(f func(labels.Label, Postings) error) error {
 	p.mtx.RLock()
 	defer p.mtx.RUnlock()
 
-	for name, e := range p.m {
-		for value, refs := range e {
-			l := labels.Label{Name: name, Value: value}
-			if err := f(l, newPostingsWithRuns(context.Background(), refs, p.outOfOrder[l])); err != nil {
+	for n, e := range p.m {
+		for v, p := range e {
+			if err := f(labels.Label{Name: n, Value: v}, NewListPostings(p)); err != nil {
 				return err
 			}
 		}
@@ -458,43 +428,14 @@ func (p *MemPostings) addFor(id storage.SeriesRef, l labels.Label) {
 		p.lvs[l.Name] = appendWithExponentialGrowth(p.lvs[l.Name], l.Value)
 	}
 
-	if !p.ordered {
+	if !p.ordered || len(vm) == 0 || id >= vm[len(vm)-1] {
 		nm[l.Value] = appendWithExponentialGrowth(vm, id)
 		return
 	}
 
-	state := p.outOfOrder[l]
-	if state == nil && (len(vm) == 0 || id >= vm[len(vm)-1]) {
-		// Appending does not modify refs that an existing reader can see.
-		nm[l.Value] = appendWithExponentialGrowth(vm, id)
-		return
-	}
-
-	if state != nil {
-		if id >= vm[len(vm)-1] && len(vm) < cap(vm) {
-			// The main list remains sorted even though older refs are still in runs.
-			nm[l.Value] = append(vm, id)
-			return
-		}
-	}
-
-	if state == nil && len(vm) < outOfOrderRunMinLen {
-		// Copying is cheaper than adding permanent merge overhead for short lists.
-		nm[l.Value] = insertRefCopy(vm, id)
-		return
-	}
-
-	// A full main list already requires a new backing array, so consolidate any runs while growing it.
-	if len(vm) == cap(vm) {
-		if state == nil {
-			nm[l.Value] = insertRefCopy(vm, id)
-		} else {
-			nm[l.Value] = p.consolidatePostings(l, vm, id)
-		}
-		return
-	}
-
-	p.addOutOfOrderRun(l, id)
+	// Copy before inserting so readers retaining the old slice continue to see
+	// immutable, ordered postings.
+	nm[l.Value] = insertRefCopy(vm, id)
 }
 
 func insertRefCopy(list []storage.SeriesRef, id storage.SeriesRef) []storage.SeriesRef {
@@ -508,396 +449,6 @@ func insertRefCopy(list []storage.SeriesRef, id storage.SeriesRef) []storage.Ser
 	repl[at] = id
 	copy(repl[at+1:], list[at:])
 	return repl
-}
-
-func (p *MemPostings) addOutOfOrderRun(l labels.Label, id storage.SeriesRef) {
-	state := p.outOfOrder[l]
-	if state == nil {
-		if p.outOfOrder == nil {
-			p.outOfOrder = map[labels.Label]*postingsListState{}
-			p.outOfOrderNames = map[string]int{}
-		}
-		state = &postingsListState{}
-		p.outOfOrder[l] = state
-		p.outOfOrderNames[l.Name]++
-	}
-
-	state.count++
-	carry := []storage.SeriesRef{id}
-	for level := 0; ; level++ {
-		// An occupied level contains 2^level refs. Carry it into a fresh array at the next level.
-		if level == len(state.runs) {
-			state.runs = append(state.runs, carry)
-			return
-		}
-		if state.runs[level] == nil {
-			state.runs[level] = carry
-			return
-		}
-		carry = mergeSortedRefs(state.runs[level], carry)
-		state.runs[level] = nil
-	}
-}
-
-func mergeSortedRefs(a, b []storage.SeriesRef) []storage.SeriesRef {
-	merged := make([]storage.SeriesRef, 0, len(a)+len(b))
-	for len(a) > 0 && len(b) > 0 {
-		if a[0] <= b[0] {
-			merged = append(merged, a[0])
-			a = a[1:]
-		} else {
-			merged = append(merged, b[0])
-			b = b[1:]
-		}
-	}
-	merged = append(merged, a...)
-	return append(merged, b...)
-}
-
-func (p *MemPostings) consolidatePostings(l labels.Label, base []storage.SeriesRef, id storage.SeriesRef) []storage.SeriesRef {
-	state := p.outOfOrder[l]
-	streamCount := 2
-	total := len(base) + 1
-	if state != nil {
-		total += state.count
-		for _, run := range state.runs {
-			if run != nil {
-				streamCount++
-			}
-		}
-	}
-
-	lps := make([]listPostings, 0, streamCount)
-	lps = append(lps, listPostings{list: base}, listPostings{list: []storage.SeriesRef{id}})
-	if state != nil {
-		for _, run := range state.runs {
-			if run != nil {
-				lps = append(lps, listPostings{list: run})
-			}
-		}
-	}
-	its := make([]*listPostings, len(lps))
-	for i := range lps {
-		its[i] = &lps[i]
-	}
-
-	repl := make([]storage.SeriesRef, 0, total*exponentialSliceGrowthFactor+1)
-	merged := mergeListPostings(its)
-	for merged.Next() {
-		repl = append(repl, merged.At())
-	}
-	p.clearOutOfOrder(l)
-	return repl
-}
-
-func (p *MemPostings) clearOutOfOrder(l labels.Label) {
-	if _, ok := p.outOfOrder[l]; !ok {
-		return
-	}
-	delete(p.outOfOrder, l)
-	p.outOfOrderNames[l.Name]--
-	if p.outOfOrderNames[l.Name] == 0 {
-		delete(p.outOfOrderNames, l.Name)
-	}
-}
-
-// Merging one base list and one immutable run is the common case.
-type mergedTwoSlicePostings struct {
-	left, leftPrefix, right []storage.SeriesRef
-	valid                   bool
-	cur                     storage.SeriesRef
-}
-
-func (it *mergedTwoSlicePostings) Next() bool {
-	return it.selectNext()
-}
-
-func (it *mergedTwoSlicePostings) Seek(id storage.SeriesRef) bool {
-	if it.valid && it.cur >= id {
-		return true
-	}
-	it.leftPrefix = seekRefs(it.leftPrefix, id)
-	if len(it.leftPrefix) == 0 {
-		it.left = seekRefs(it.left, id)
-	}
-	it.right = seekRefs(it.right, id)
-	return it.selectNext()
-}
-
-func seekRefs(refs []storage.SeriesRef, id storage.SeriesRef) []storage.SeriesRef {
-	if len(refs) == 0 || refs[0] >= id {
-		return refs
-	}
-	at, _ := slices.BinarySearch(refs, id)
-	return refs[at:]
-}
-
-func (it *mergedTwoSlicePostings) selectNext() bool {
-	if len(it.leftPrefix) > 0 {
-		it.cur = it.leftPrefix[0]
-		it.leftPrefix = it.leftPrefix[1:]
-		it.valid = true
-		return true
-	}
-
-	switch {
-	case len(it.left) == 0 && len(it.right) == 0:
-		it.valid = false
-		return false
-	case len(it.right) == 0:
-		it.cur = it.left[0]
-		it.left = it.left[1:]
-	case len(it.left) == 0:
-		it.cur = it.right[0]
-		it.right = it.right[1:]
-	default:
-		at, _ := slices.BinarySearch(it.left, it.right[0])
-		if at > 0 {
-			it.leftPrefix = it.left[:at]
-			it.left = it.left[at:]
-			return it.selectNext()
-		}
-		it.cur = it.right[0]
-		for len(it.left) > 0 && it.left[0] == it.cur {
-			it.left = it.left[1:]
-		}
-		for len(it.right) > 0 && it.right[0] == it.cur {
-			it.right = it.right[1:]
-		}
-	}
-	it.valid = true
-	return true
-}
-
-func (it *mergedTwoSlicePostings) At() storage.SeriesRef {
-	return it.cur
-}
-
-func (*mergedTwoSlicePostings) Err() error {
-	return nil
-}
-
-func mergeListPostings(postings []*listPostings) Postings {
-	switch len(postings) {
-	case 0:
-		return EmptyPostings()
-	case 1:
-		return postings[0]
-	case 2:
-		return &mergedTwoSlicePostings{left: postings[0].list, right: postings[1].list}
-	default:
-		return Merge(context.Background(), postings...)
-	}
-}
-
-// Sparse merging advances the run merge only when the base reaches its next ref.
-type sparseMergedPostings struct {
-	base, basePrefix []storage.SeriesRef
-	delta            Postings
-	deltaOK          bool
-	initialized      bool
-	valid            bool
-	cur              storage.SeriesRef
-}
-
-func (it *sparseMergedPostings) Next() bool {
-	return it.selectNext()
-}
-
-func (it *sparseMergedPostings) Seek(id storage.SeriesRef) bool {
-	if it.valid && it.cur >= id {
-		return true
-	}
-	it.basePrefix = seekRefs(it.basePrefix, id)
-	if len(it.basePrefix) == 0 {
-		it.base = seekRefs(it.base, id)
-	}
-	if !it.initialized {
-		it.deltaOK = it.delta.Seek(id)
-		it.initialized = true
-	} else if it.deltaOK && it.delta.At() < id {
-		it.deltaOK = it.delta.Seek(id)
-	}
-	return it.selectNext()
-}
-
-func (it *sparseMergedPostings) selectNext() bool {
-	if len(it.basePrefix) > 0 {
-		it.cur = it.basePrefix[0]
-		it.basePrefix = it.basePrefix[1:]
-		it.valid = true
-		return true
-	}
-	if !it.initialized {
-		it.deltaOK = it.delta.Next()
-		it.initialized = true
-	}
-
-	switch {
-	case !it.deltaOK && len(it.base) == 0:
-		it.valid = false
-		return false
-	case !it.deltaOK:
-		it.cur = it.base[0]
-		it.base = it.base[1:]
-	case len(it.base) == 0:
-		it.cur = it.delta.At()
-		it.deltaOK = it.delta.Next()
-	default:
-		at, _ := slices.BinarySearch(it.base, it.delta.At())
-		if at > 0 {
-			it.basePrefix = it.base[:at]
-			it.base = it.base[at:]
-			return it.selectNext()
-		}
-		it.cur = it.delta.At()
-		for len(it.base) > 0 && it.base[0] == it.cur {
-			it.base = it.base[1:]
-		}
-		it.deltaOK = it.delta.Next()
-	}
-	it.valid = true
-	return true
-}
-
-func (it *sparseMergedPostings) At() storage.SeriesRef {
-	return it.cur
-}
-
-func (it *sparseMergedPostings) Err() error {
-	return it.delta.Err()
-}
-
-func newPostingsWithRuns(ctx context.Context, base []storage.SeriesRef, state *postingsListState) Postings {
-	if state == nil {
-		return NewListPostings(base)
-	}
-
-	runCount := 0
-	var onlyRun []storage.SeriesRef
-	for _, run := range state.runs {
-		if run != nil {
-			runCount++
-			onlyRun = run
-		}
-	}
-	if runCount == 1 {
-		return &mergedTwoSlicePostings{left: base, right: onlyRun}
-	}
-
-	lps := make([]listPostings, 0, runCount)
-	for _, run := range state.runs {
-		if run != nil {
-			// Only the slice header is copied. Published run arrays are immutable.
-			lps = append(lps, listPostings{list: run})
-		}
-	}
-	its := make([]*listPostings, len(lps))
-	for i := range lps {
-		its[i] = &lps[i]
-	}
-
-	return &sparseMergedPostings{base: base, delta: Merge(ctx, its...)}
-}
-
-type postingsWithRunsSnapshot struct {
-	base  []storage.SeriesRef
-	state *postingsListState
-}
-
-type memPostingsSnapshot struct {
-	plain    []*listPostings
-	withRuns []postingsWithRunsSnapshot
-}
-
-func clonePostingsListState(state *postingsListState) *postingsListState {
-	clone := *state
-	clone.runs = slices.Clone(state.runs)
-	return &clone
-}
-
-func (s memPostingsSnapshot) postings(ctx context.Context) Postings {
-	if len(s.withRuns) == 0 {
-		return Merge(ctx, s.plain...)
-	}
-
-	postings := make([]Postings, 0, len(s.withRuns)+1)
-	for _, snapshot := range s.withRuns {
-		postings = append(postings, newPostingsWithRuns(ctx, snapshot.base, snapshot.state))
-	}
-	if len(s.plain) > 0 {
-		postings = append(postings, Merge(ctx, s.plain...))
-	}
-	return Merge(ctx, postings...)
-}
-
-func (p *MemPostings) postingsForValuesLocked(name string, values []string) memPostingsSnapshot {
-	postingsMapForName := p.m[name]
-	lps := make([]listPostings, len(values))
-	plain := make([]*listPostings, 0, len(values))
-
-	if p.outOfOrderNames[name] == 0 {
-		for i, value := range values {
-			if refs := postingsMapForName[value]; refs != nil {
-				lps[i] = listPostings{list: refs}
-				plain = append(plain, &lps[i])
-			}
-		}
-		return memPostingsSnapshot{plain: plain}
-	}
-
-	withRuns := make([]postingsWithRunsSnapshot, 0, len(values))
-	for i, value := range values {
-		refs := postingsMapForName[value]
-		if refs == nil {
-			continue
-		}
-		l := labels.Label{Name: name, Value: value}
-		if state := p.outOfOrder[l]; state != nil {
-			withRuns = append(withRuns, postingsWithRunsSnapshot{base: refs, state: clonePostingsListState(state)})
-			continue
-		}
-		lps[i] = listPostings{list: refs}
-		plain = append(plain, &lps[i])
-	}
-
-	return memPostingsSnapshot{plain: plain, withRuns: withRuns}
-}
-
-func (p *MemPostings) postingsForAllLabelValuesLocked(name string) memPostingsSnapshot {
-	e := p.m[name]
-	lps := make([]listPostings, len(e))
-	plain := make([]*listPostings, 0, len(e))
-
-	if p.outOfOrderNames[name] == 0 {
-		i := 0
-		for _, refs := range e {
-			if len(refs) > 0 {
-				lps[i] = listPostings{list: refs}
-				plain = append(plain, &lps[i])
-			}
-			i++
-		}
-		return memPostingsSnapshot{plain: plain}
-	}
-
-	withRuns := make([]postingsWithRunsSnapshot, 0, len(e))
-	i := 0
-	for value, refs := range e {
-		if len(refs) == 0 {
-			i++
-			continue
-		}
-		l := labels.Label{Name: name, Value: value}
-		if state := p.outOfOrder[l]; state != nil {
-			withRuns = append(withRuns, postingsWithRunsSnapshot{base: refs, state: clonePostingsListState(state)})
-		} else {
-			lps[i] = listPostings{list: refs}
-			plain = append(plain, &lps[i])
-		}
-		i++
-	}
-	return memPostingsSnapshot{plain: plain, withRuns: withRuns}
 }
 
 func (p *MemPostings) PostingsForLabelMatching(ctx context.Context, name string, match func(string) bool) Postings {
@@ -930,42 +481,60 @@ func (p *MemPostings) PostingsForLabelMatching(ctx context.Context, name string,
 	}
 
 	// Now `vals` only contains the values that matched, get their postings.
+	its := make([]*listPostings, 0, len(vals))
+	lps := make([]listPostings, len(vals))
 	p.mtx.RLock()
-	snapshot := p.postingsForValuesLocked(name, vals)
+	e := p.m[name]
+	for i, v := range vals {
+		if refs, ok := e[v]; ok {
+			// Some of the values may have been garbage-collected in the meantime this is fine, we'll just skip them.
+			// If we didn't let the mutex go, we'd have these postings here, but they would be pointing nowhere
+			// because there would be a `MemPostings.Delete()` call waiting for the lock to delete these labels,
+			// because the series were deleted already.
+			lps[i] = listPostings{list: refs}
+			its = append(its, &lps[i])
+		}
+	}
 	// Let the mutex go before merging.
 	p.mtx.RUnlock()
 
-	return snapshot.postings(ctx)
+	return Merge(ctx, its...)
 }
 
 // Postings returns a postings iterator for the given label values.
 func (p *MemPostings) Postings(ctx context.Context, name string, values ...string) Postings {
-	if len(values) == 1 {
-		l := labels.Label{Name: name, Value: values[0]}
-		p.mtx.RLock()
-		refs := p.m[name][values[0]]
-		state := p.outOfOrder[l]
-		if state != nil {
-			state = clonePostingsListState(state)
-		}
-		p.mtx.RUnlock()
-		if refs == nil {
-			return EmptyPostings()
-		}
-		return newPostingsWithRuns(ctx, refs, state)
-	}
-
+	res := make([]*listPostings, 0, len(values))
+	lps := make([]listPostings, len(values))
 	p.mtx.RLock()
-	snapshot := p.postingsForValuesLocked(name, values)
+	postingsMapForName := p.m[name]
+	for i, value := range values {
+		if lp := postingsMapForName[value]; lp != nil {
+			lps[i] = listPostings{list: lp}
+			res = append(res, &lps[i])
+		}
+	}
 	p.mtx.RUnlock()
-	return snapshot.postings(ctx)
+	return Merge(ctx, res...)
 }
 
 func (p *MemPostings) PostingsForAllLabelValues(ctx context.Context, name string) Postings {
 	p.mtx.RLock()
-	snapshot := p.postingsForAllLabelValuesLocked(name)
+
+	e := p.m[name]
+	its := make([]*listPostings, 0, len(e))
+	lps := make([]listPostings, len(e))
+	i := 0
+	for _, refs := range e {
+		if len(refs) > 0 {
+			lps[i] = listPostings{list: refs}
+			its = append(its, &lps[i])
+		}
+		i++
+	}
+
+	// Let the mutex go before merging.
 	p.mtx.RUnlock()
-	return snapshot.postings(ctx)
+	return Merge(ctx, its...)
 }
 
 // ExpandPostings returns the postings expanded as a slice.
