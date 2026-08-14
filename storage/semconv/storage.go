@@ -229,21 +229,49 @@ func (q *awareQuerier) Select(ctx context.Context, sortSeries bool, hints *stora
 	}
 
 	seriesSets := make([]storage.SeriesSet, len(variants))
-	g, gctx := errgroup.WithContext(ctx)
+	// Deliberately not errgroup.WithContext: a Select is lazy, so its context must
+	// outlive g.Wait() here, and WithContext cancels its derived context as soon as
+	// Wait returns. The variants are read only after that, which with a streaming
+	// underlying querier would abort the read mid-stream. Nothing here returns an
+	// error, so cancellation propagation buys nothing anyway.
+	var g errgroup.Group
 	g.SetLimit(fanOutLimit)
+	resort := needsResort(qCtx)
 	for i, ms := range variants {
 		g.Go(func() error {
-			// We must sort for NewMergeSeriesSet to work.
-			seriesSets[i] = &awareSeriesSet{
-				SeriesSet: q.Querier.Select(gctx, true, hints, ms...),
+			set := storage.SeriesSet(&awareSeriesSet{
+				SeriesSet: q.Querier.Select(ctx, true, hints, ms...),
 				engine:    q.engine,
 				qCtx:      qCtx,
+			})
+			if resort {
+				// Left lazy on purpose, which means the drains happen one after
+				// another: NewMergeSeriesSet pre-advances every input when it is
+				// constructed, and advancing a buffering set drains it, so all of
+				// them drain on the caller's goroutine.
+				//
+				// Draining here instead, inside the group, would parallelise that
+				// but is not allowed. Only storage.Storage is goroutine-safe; a
+				// Querier is not, and tsdb's demonstrably is not — iterating a
+				// series set calls headIndexReader.Series, which writes to a scratch
+				// buffer shared by every set derived from the same querier. Two
+				// variants drained at once corrupt it. Selecting concurrently is
+				// fine, since the sets are only built there and not read.
+				//
+				// Parallelising the drain means one Querier per variant, which is a
+				// change to what a fan-out holds open, not just to where load runs.
+				set = newSortedSeriesSet(set)
 			}
+			seriesSets[i] = set
 			return nil
 		})
 	}
 	_ = g.Wait()
-	return storage.NewMergeSeriesSet(seriesSets, 0, storage.ChainedSeriesMerge)
+	merged := storage.NewMergeSeriesSet(seriesSets, 0, storage.ChainedSeriesMerge)
+	if len(qCtx.warnings) > 0 {
+		return annotateSeriesSet(merged, qCtx.warnings...)
+	}
+	return merged
 }
 
 func (q *awareQuerier) LabelNames(ctx context.Context, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
@@ -282,20 +310,32 @@ func (q *awareChunkQuerier) Select(ctx context.Context, sortSeries bool, hints *
 	}
 
 	chunkSeriesSets := make([]storage.ChunkSeriesSet, len(variants))
-	g, gctx := errgroup.WithContext(ctx)
+	// ctx rather than an errgroup-derived context, and re-sorted only where a
+	// rewrite can reorder a set, draining inside the group; see the Select above.
+	var g errgroup.Group
 	g.SetLimit(fanOutLimit)
+	resort := needsResort(qCtx)
 	for i, ms := range variants {
 		g.Go(func() error {
-			chunkSeriesSets[i] = &awareChunkSeriesSet{
-				ChunkSeriesSet: q.ChunkQuerier.Select(gctx, true, hints, ms...),
+			set := storage.ChunkSeriesSet(&awareChunkSeriesSet{
+				ChunkSeriesSet: q.ChunkQuerier.Select(ctx, true, hints, ms...),
 				engine:         q.engine,
 				qCtx:           qCtx,
+			})
+			if resort {
+				// Lazy, so the drains do not overlap; see the Select above.
+				set = newSortedChunkSeriesSet(set)
 			}
+			chunkSeriesSets[i] = set
 			return nil
 		})
 	}
 	_ = g.Wait()
-	return storage.NewMergeChunkSeriesSet(chunkSeriesSets, 0, storage.NewCompactingChunkSeriesMerger(storage.ChainedSeriesMerge))
+	merged := storage.NewMergeChunkSeriesSet(chunkSeriesSets, 0, storage.NewCompactingChunkSeriesMerger(storage.ChainedSeriesMerge))
+	if len(qCtx.warnings) > 0 {
+		return annotateChunkSeriesSet(merged, qCtx.warnings...)
+	}
+	return merged
 }
 
 func (q *awareChunkQuerier) LabelNames(ctx context.Context, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
@@ -360,6 +400,11 @@ func queryLabelNames(ctx context.Context, q labelQuerier, e *schemaEngine, hints
 		}
 		combinedAnns.Merge(p.anns)
 		for _, n := range p.names {
+			if isReservedLabel(n) {
+				// Select strips these from the series it returns, so reporting
+				// them as label names would advertise labels no series carries.
+				continue
+			}
 			canonical := reverseLabelName(qCtx, n)
 			if _, ok := seen[canonical]; ok {
 				continue
@@ -369,7 +414,7 @@ func queryLabelNames(ctx context.Context, q labelQuerier, e *schemaEngine, hints
 		}
 	}
 	slices.Sort(combined)
-	return combined, combinedAnns, errors.Join(errs...)
+	return combined, addWarnings(combinedAnns, qCtx), errors.Join(errs...)
 }
 
 func queryLabelValues(ctx context.Context, q labelQuerier, e *schemaEngine, name string, hints *storage.LabelHints, matchers []*labels.Matcher) ([]string, annotations.Annotations, error) {
@@ -397,7 +442,12 @@ func queryLabelValues(ctx context.Context, q labelQuerier, e *schemaEngine, name
 	// values; mismatched (variant, alias) pairs simply return nothing. For
 	// __name__ there are no attribute aliases (aliasesOf returns just the name),
 	// and its values are collapsed to the canonical metric below.
-	aliases := qCtx.labelMapping.aliasesOf(name)
+	//
+	// name is canonicalised first, so asking for a historical name of a renamed
+	// attribute fans out over the same alias set as asking for its anchor-version
+	// name; otherwise aliasesOf, which only expands a canonical name, would return
+	// the historical name alone and miss every other era.
+	aliases := qCtx.labelMapping.aliasesOf(reverseLabelName(qCtx, name))
 
 	type partial struct {
 		values []string
@@ -447,37 +497,189 @@ func queryLabelValues(ctx context.Context, q labelQuerier, e *schemaEngine, name
 		}
 	}
 	slices.Sort(combined)
-	return combined, combinedAnns, errors.Join(errs...)
+	return combined, addWarnings(combinedAnns, qCtx), errors.Join(errs...)
 }
 
 type annotatedSeriesSet struct {
 	storage.SeriesSet
 
-	warning string
+	warnings []string
 }
 
-func annotateSeriesSet(s storage.SeriesSet, warning string) storage.SeriesSet {
-	return &annotatedSeriesSet{warning: warning, SeriesSet: s}
+func annotateSeriesSet(s storage.SeriesSet, warnings ...string) storage.SeriesSet {
+	return &annotatedSeriesSet{warnings: warnings, SeriesSet: s}
 }
 
 func (s *annotatedSeriesSet) Warnings() annotations.Annotations {
 	got := s.SeriesSet.Warnings()
-	return got.Add(schemaWarning(s.warning))
+	for _, w := range s.warnings {
+		got = got.Add(schemaWarning(w))
+	}
+	return got
+}
+
+// addWarnings merges the query-resolution warnings collected in qCtx into anns.
+func addWarnings(anns annotations.Annotations, qCtx queryContext) annotations.Annotations {
+	for _, w := range qCtx.warnings {
+		anns = anns.Add(schemaWarning(w))
+	}
+	return anns
 }
 
 type annotatedChunkSeriesSet struct {
 	storage.ChunkSeriesSet
 
-	warning string
+	warnings []string
 }
 
-func annotateChunkSeriesSet(s storage.ChunkSeriesSet, warning string) storage.ChunkSeriesSet {
-	return &annotatedChunkSeriesSet{warning: warning, ChunkSeriesSet: s}
+func annotateChunkSeriesSet(s storage.ChunkSeriesSet, warnings ...string) storage.ChunkSeriesSet {
+	return &annotatedChunkSeriesSet{warnings: warnings, ChunkSeriesSet: s}
 }
 
 func (s *annotatedChunkSeriesSet) Warnings() annotations.Annotations {
 	got := s.ChunkSeriesSet.Warnings()
-	return got.Add(schemaWarning(s.warning))
+	for _, w := range s.warnings {
+		got = got.Add(schemaWarning(w))
+	}
+	return got
+}
+
+// needsResort reports whether rewriting a variant's labels can change the order
+// the underlying querier returned them in, which is what decides whether a variant
+// has to be buffered and sorted before the merge sees it.
+//
+// Only an attribute rename can. Every series in a variant matches the same equality
+// matcher on __name__, so rewriting the metric name replaces the same value in all
+// of them and leaves their relative order alone; renaming an attribute moves that
+// label within a series and so moves the series within the set. Two series can also
+// collide on the rewritten labels, but only by differing in a renamed attribute's
+// name, so the same condition covers it.
+//
+// This takes it that no stored series carries the reserved __semconv_url__ /
+// __schema_url__ labels, which transformSeries strips and whose removal could
+// likewise reorder a set. They are query-time matchers that nothing writes, and
+// __-prefixed labels are dropped from scraped samples.
+func needsResort(qCtx queryContext) bool {
+	return qCtx.labelMapping != nil && len(qCtx.labelMapping.translatedLabels) > 0
+}
+
+// sortAndChain returns in sorted by labels, with each run of series carrying
+// identical labels collapsed into one via merge.
+//
+// Both are needed because rewriting labels can reorder a set and can make two
+// series collide. A variant queries one naming era and its series come back sorted
+// by that era's names; rewriting an attribute to its anchor-version name moves it
+// in the ordering, and two series distinguished only by the era of an attribute
+// name rewrite to the very same labels. storage.NewMergeSeriesSet assumes each
+// input reports strictly increasing labels, so it would emit the reordered series
+// out of order and the collided ones twice.
+func sortAndChain[T interface{ Labels() labels.Labels }](in []T, merge func(...T) T) []T {
+	slices.SortStableFunc(in, func(a, b T) int {
+		return labels.Compare(a.Labels(), b.Labels())
+	})
+	// A fresh slice, deliberately not in[:0]: the merge functions retain the slice
+	// they are handed and read it only when the merged series is iterated, so
+	// compacting in place would write a merged series back into the very range its
+	// own chain still points at, and iterating it would recurse forever.
+	out := make([]T, 0, len(in))
+	for i := 0; i < len(in); {
+		j := i + 1
+		for j < len(in) && labels.Equal(in[j].Labels(), in[i].Labels()) {
+			j++
+		}
+		if j-i == 1 {
+			out = append(out, in[i])
+		} else {
+			out = append(out, merge(in[i:j]...))
+		}
+		i = j
+	}
+	return out
+}
+
+// sortedSeriesSet re-sorts a series set whose labels have been rewritten, so it
+// can be fed to storage.NewMergeSeriesSet.
+//
+// It buffers the whole set on first use, which the SeriesSet contract permits:
+// "Returned series should be iterable even after Next is called", so only the
+// series handles are held, not their samples. That is the price of rewriting labels
+// before merging rather than after — the sort order is not known until every label
+// has been rewritten.
+type sortedSeriesSet struct {
+	storage.SeriesSet
+
+	series []storage.Series
+	idx    int
+	loaded bool
+}
+
+func newSortedSeriesSet(s storage.SeriesSet) *sortedSeriesSet {
+	return &sortedSeriesSet{SeriesSet: s, idx: -1}
+}
+
+// load drains and sorts the underlying set, on the first Next. It must stay on the
+// reading goroutine: the underlying querier is not safe to iterate concurrently.
+func (s *sortedSeriesSet) load() {
+	if s.loaded {
+		return
+	}
+	s.loaded = true
+	for s.SeriesSet.Next() {
+		s.series = append(s.series, s.SeriesSet.At())
+	}
+	s.series = sortAndChain(s.series, storage.ChainedSeriesMerge)
+}
+
+func (s *sortedSeriesSet) Next() bool {
+	s.load()
+	if s.Err() != nil {
+		return false
+	}
+	s.idx++
+	return s.idx < len(s.series)
+}
+
+func (s *sortedSeriesSet) At() storage.Series {
+	return s.series[s.idx]
+}
+
+// sortedChunkSeriesSet is sortedSeriesSet for chunk series; see there.
+type sortedChunkSeriesSet struct {
+	storage.ChunkSeriesSet
+
+	series []storage.ChunkSeries
+	idx    int
+	loaded bool
+}
+
+func newSortedChunkSeriesSet(s storage.ChunkSeriesSet) *sortedChunkSeriesSet {
+	return &sortedChunkSeriesSet{ChunkSeriesSet: s, idx: -1}
+}
+
+// load drains and sorts the underlying set on the first Next; see
+// sortedSeriesSet.load.
+func (s *sortedChunkSeriesSet) load() {
+	if s.loaded {
+		return
+	}
+	s.loaded = true
+	for s.ChunkSeriesSet.Next() {
+		s.series = append(s.series, s.ChunkSeriesSet.At())
+	}
+	s.series = sortAndChain(s.series, storage.NewCompactingChunkSeriesMerger(storage.ChainedSeriesMerge))
+}
+
+func (s *sortedChunkSeriesSet) Next() bool {
+	s.load()
+	if s.Err() != nil {
+		return false
+	}
+	s.idx++
+	return s.idx < len(s.series)
+}
+
+func (s *sortedChunkSeriesSet) At() storage.ChunkSeries {
+	return s.series[s.idx]
 }
 
 type awareSeriesSet struct {

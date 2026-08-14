@@ -16,6 +16,7 @@ package semconv
 import (
 	"embed"
 	"fmt"
+	"maps"
 	"path"
 	"slices"
 	"strconv"
@@ -72,10 +73,46 @@ type semconv struct {
 
 	version string
 
-	// attributesPerMetric lists, per metric name, the attributes the metric
-	// declares at this semconv version (populated by loadSemconv). It seeds
-	// attribute-rename normalisation; see buildAttributeRenameMap.
-	attributesPerMetric map[string][]string
+	// metrics indexes this version's metric groups by their metric_name
+	// (populated by loadSemconv). It answers both "is this name a metric at this
+	// version" and "what does it declare", which is what validating a schema
+	// rename edge needs; see validateMetricRename.
+	metrics map[string]metricDef
+
+	// ambiguousMetrics lists metric names declared by more than one group at
+	// this version, sorted. Such a name has no single definition, so anything
+	// resolved through it is unreliable and is reported to the caller rather
+	// than silently resolved to whichever group happened to be parsed last.
+	ambiguousMetrics []string
+}
+
+// metricDef is the part of a semconv metric group that describes what the metric
+// *is*, as opposed to what it is currently called. unit and instrument are the
+// fields upstream semantic conventions forbid a stable metric from changing (see
+// policies/compatibility.rego in open-telemetry/semantic-conventions), which is
+// what makes them usable as a cross-version identity check.
+//
+// Note that a group's id is deliberately not part of this: upstream lints id to
+// be exactly "metric.<metric_name>" (policies/yaml_schema.rego), so it is a pure
+// function of the surface name and changes in lockstep with every rename. It
+// therefore carries no identity information a rename edge does not already have.
+type metricDef struct {
+	unit       string
+	instrument string
+	attributes []string
+}
+
+// sameMetricAs reports whether d and other are compatible enough to be the same
+// semantic metric across a rename. A differing unit or instrument means two
+// distinct metrics that merely share a surface name at different versions.
+func (d metricDef) sameMetricAs(other metricDef) bool {
+	return d.unit == other.unit && d.instrument == other.instrument
+}
+
+// attributesOf returns the attributes the named metric declares at this semconv
+// version, or nil if the name is not a metric here.
+func (s semconv) attributesOf(name string) []string {
+	return s.metrics[name].attributes
 }
 
 // otelSchema represents an OpenTelemetry schema file.
@@ -101,24 +138,124 @@ type otelSchema struct {
 	Versions   map[string]otelSchemaVersion `yaml:"versions"`
 
 	// versionRenames holds per-version renames for generating matcher variants
-	// (populated by loadOTelSchema).
+	// (populated by loadOTelSchema). Versions that rename nothing are omitted.
 	versionRenames []versionRenames
+
+	// allVersions lists every version the schema declares, in ascending semver
+	// order, including versions that rename nothing (populated by
+	// loadOTelSchema). Unlike versionRenames it is a complete history, which is
+	// what identifying the version a pre-rename name belongs to requires: a
+	// rename recorded under version V takes effect at V, so the old name is the
+	// current one at V's immediate predecessor here, which may well be a version
+	// that renames nothing.
+	allVersions []string
+}
+
+// predecessorOf returns the version immediately before v in the schema's version
+// history, and false if v is the earliest version or is not in the history.
+func (s *otelSchema) predecessorOf(v string) (string, bool) {
+	for i, have := range s.allVersions {
+		if have == v {
+			if i == 0 {
+				return "", false
+			}
+			return s.allVersions[i-1], true
+		}
+	}
+	return "", false
+}
+
+// eraVersionsOf returns the versions at which name is the metric's current name,
+// as far as the schema's rename edges say: the version that introduced the name,
+// and the version before the one that renamed it away. Both lie inside an era in
+// which the name is current, so either can be asked what the name meant then.
+//
+// More than one is returned only when the schema renames the name away and later
+// introduces it again — a retired name reused by another metric — in which case
+// which era a caller means is genuinely ambiguous and the callers here decline to
+// guess. Versions are returned in ascending order and are never repeated.
+func (s *otelSchema) eraVersionsOf(name string) []string {
+	var out []string
+	for _, v := range s.versionRenames {
+		older, newer, ok := v.renameDirection(name)
+		if !ok {
+			continue
+		}
+		var era string
+		switch name {
+		case older:
+			// Renamed away here, so current up to the version before this one.
+			predecessor, hasPredecessor := s.predecessorOf(v.version)
+			if !hasPredecessor {
+				continue
+			}
+			era = predecessor
+		case newer:
+			// Introduced here, so current from this version on.
+			era = v.version
+		}
+		if era != "" && !slices.Contains(out, era) {
+			out = append(out, era)
+		}
+	}
+	slices.SortFunc(out, compareSemver)
+	return out
 }
 
 // versionRenames holds bidirectional rename mappings from a single schema version.
 // When a version renames a→b, both directions are stored for lookup.
 type versionRenames struct {
-	version    string            // e.g., "1.1.0"
-	metrics    map[string]string // metric name → its variant (bidirectional)
-	attributes map[string]string // attribute name → its variant (bidirectional)
+	version string            // e.g., "1.1.0"
+	metrics map[string]string // metric name → its variant (bidirectional)
+
+	// attributes holds the attribute renames that apply to every metric: those
+	// declared in the "all" section, and metrics-section renames that name no
+	// apply_to_metrics. Bidirectional, like metrics.
+	attributes map[string]string
+
+	// attributesPerMetric holds attribute renames restricted by apply_to_metrics,
+	// keyed by each metric name the change is scoped to. A metric's effective
+	// renames are attributes plus the entries for the names it is known by; see
+	// scopedVersionRenames.
+	attributesPerMetric map[string]map[string]string
+
+	// metricsForward holds metric renames in the direction the schema declares
+	// them, old name → new name. metrics is deliberately bidirectional so a walk
+	// can traverse an edge from either end, but that loses which end is the older
+	// name, and validating an edge against the semconv files requires knowing
+	// which version each name belongs to.
+	metricsForward map[string]string
+
+	// metricsBackward holds the reverse direction as one-to-many, new name → every
+	// old name renamed onto it, sorted. A version may collapse several old names
+	// onto one, which the schema format allows and real schemas do (semconv 1.38.0
+	// merges two spellings of k8s.replicationcontroller.pod.available). Walking such
+	// an edge backward has more than one answer, so metrics can only hold one of
+	// them and the walk consults this to branch; see applyVersionRenames.
+	metricsBackward map[string][]string
+}
+
+// renameDirection reports the older and newer name of the metric rename edge
+// connecting from to its variant at this version, and false if from is not
+// renamed here.
+func (r versionRenames) renameDirection(from string) (older, newer string, ok bool) {
+	to, ok := r.metrics[from]
+	if !ok {
+		return "", "", false
+	}
+	if _, forward := r.metricsForward[from]; forward {
+		return from, to, true
+	}
+	return to, from, true
 }
 
 // collectVersionRenames extracts bidirectional rename mappings from a schema version.
 func collectVersionRenames(versionStr string, version otelSchemaVersion) *versionRenames {
 	renames := &versionRenames{
-		version:    versionStr,
-		metrics:    make(map[string]string),
-		attributes: make(map[string]string),
+		version:        versionStr,
+		metrics:        make(map[string]string),
+		attributes:     make(map[string]string),
+		metricsForward: make(map[string]string),
 	}
 
 	// Collect attribute renames from "all" section.
@@ -133,28 +270,140 @@ func collectVersionRenames(versionStr string, version otelSchemaVersion) *versio
 		}
 	}
 
-	// Collect metric and attribute renames from "metrics" section.
+	// Collect metric renames from the "metrics" section first, so that scoping an
+	// attribute rename below can also register it against the other name the
+	// metric is called at this version.
 	if version.Metrics != nil {
 		for _, change := range version.Metrics.Changes {
-			if change.RenameMetrics != nil {
-				for oldName, newName := range change.RenameMetrics.NameMap {
-					renames.metrics[oldName] = newName
-					renames.metrics[newName] = oldName
-				}
+			if change.RenameMetrics == nil {
+				continue
 			}
-			if change.RenameAttributes != nil {
+			for oldName, newName := range change.RenameMetrics {
+				renames.metrics[oldName] = newName
+				renames.metricsForward[oldName] = newName
+				if renames.metricsBackward == nil {
+					renames.metricsBackward = map[string][]string{}
+				}
+				renames.metricsBackward[newName] = append(renames.metricsBackward[newName], oldName)
+			}
+		}
+		// Sorted, and the reverse entries in metrics written from the sorted result,
+		// so a version collapsing several old names onto one resolves the same way
+		// in every process. Reading them straight out of the YAML map left which old
+		// name metrics reported dependent on Go's map iteration order, so a query
+		// could return a different set of historical names after a restart.
+		for newName, oldNames := range renames.metricsBackward {
+			slices.Sort(oldNames)
+			renames.metricsBackward[newName] = slices.Compact(oldNames)
+			renames.metrics[newName] = renames.metricsBackward[newName][0]
+		}
+
+		// Collect attribute renames from the "metrics" section, restricted to the
+		// metrics named by apply_to_metrics where it is given.
+		for _, change := range version.Metrics.Changes {
+			if change.RenameAttributes == nil {
+				continue
+			}
+			if len(change.RenameAttributes.ApplyToMetrics) == 0 {
 				for oldName, newName := range change.RenameAttributes.AttributeMap {
 					renames.attributes[oldName] = newName
 					renames.attributes[newName] = oldName
+				}
+				continue
+			}
+			for _, metric := range change.RenameAttributes.ApplyToMetrics {
+				// apply_to_metrics names the metric as of this version. The same
+				// metric is known by its pre-rename name on the other side of a
+				// rename recorded here, so scope the change to both.
+				for _, name := range []string{metric, renames.metrics[metric]} {
+					if name == "" {
+						continue
+					}
+					if renames.attributesPerMetric == nil {
+						renames.attributesPerMetric = map[string]map[string]string{}
+					}
+					scoped := renames.attributesPerMetric[name]
+					if scoped == nil {
+						scoped = map[string]string{}
+						renames.attributesPerMetric[name] = scoped
+					}
+					for oldName, newName := range change.RenameAttributes.AttributeMap {
+						scoped[oldName] = newName
+						scoped[newName] = oldName
+					}
 				}
 			}
 		}
 	}
 
-	if len(renames.metrics) == 0 && len(renames.attributes) == 0 {
+	if len(renames.metrics) == 0 && len(renames.attributes) == 0 && len(renames.attributesPerMetric) == 0 {
 		return nil
 	}
 	return renames
+}
+
+// scopedVersionRenames returns versions with each version's attribute renames
+// narrowed to those that apply to a metric known by any of names: the version's
+// unscoped renames plus the entries apply_to_metrics scoped to it. Positions are
+// preserved so version indices remain comparable.
+//
+// Narrowing up front means the walk and the attribute-rename map can keep
+// treating a version's attribute map as flat, with no scoping logic of their own.
+func scopedVersionRenames(versions []versionRenames, names map[string]struct{}) []versionRenames {
+	anyScoped := false
+	for _, v := range versions {
+		if len(v.attributesPerMetric) > 0 {
+			anyScoped = true
+			break
+		}
+	}
+	if !anyScoped {
+		// No version restricts an attribute rename, so every version's map
+		// already is the effective one.
+		return versions
+	}
+
+	out := make([]versionRenames, len(versions))
+	for i, v := range versions {
+		out[i] = v
+		if len(v.attributesPerMetric) == 0 {
+			continue
+		}
+		effective := maps.Clone(v.attributes)
+		if effective == nil {
+			effective = map[string]string{}
+		}
+		for name := range names {
+			maps.Copy(effective, v.attributesPerMetric[name])
+		}
+		out[i].attributes = effective
+	}
+	return out
+}
+
+// metricNameAliases returns every name the metric called name is known by at some
+// version of the schema, following metric rename edges from name in both
+// directions. It is what scoping needs, because apply_to_metrics names a metric
+// as of one version while the walk visits it under all of its names.
+func metricNameAliases(versions []versionRenames, name string) map[string]struct{} {
+	aliases := map[string]struct{}{name: {}}
+	for grew := true; grew; {
+		grew = false
+		for _, v := range versions {
+			for from := range aliases {
+				to, ok := v.metrics[from]
+				if !ok {
+					continue
+				}
+				if _, have := aliases[to]; have {
+					continue
+				}
+				aliases[to] = struct{}{}
+				grew = true
+			}
+		}
+	}
+	return aliases
 }
 
 // semconvGroup represents a semantic conventions group definition.
@@ -162,6 +411,8 @@ type semconvGroup struct {
 	ID         string             `yaml:"id"`
 	Type       string             `yaml:"type"`        // "metric", "attribute", "span", etc.
 	MetricName string             `yaml:"metric_name"` // Only for type="metric"
+	Unit       string             `yaml:"unit"`        // Only for type="metric", e.g. "s", "By"
+	Instrument string             `yaml:"instrument"`  // Only for type="metric", e.g. "histogram", "counter"
 	Attributes []semconvAttribute `yaml:"attributes,omitempty"`
 }
 
@@ -181,16 +432,24 @@ type otelSchemaSection struct {
 
 type otelSchemaChange struct {
 	RenameAttributes *otelRenameAttributes `yaml:"rename_attributes,omitempty"`
-	RenameMetrics    *otelRenameMetrics    `yaml:"rename_metrics,omitempty"`
+
+	// RenameMetrics maps each old metric name to its new name directly, with no
+	// intervening key. This is asymmetric with RenameAttributes, which nests its
+	// mapping under attribute_map, but it is what the file format specifies:
+	//
+	//	metrics:
+	//	  changes:
+	//	    - rename_metrics:
+	//	        http.server.duration: http.server.request.duration
+	//
+	// See the rename_metrics transformation in
+	// https://opentelemetry.io/docs/specs/otel/schemas/file_format_v1.1.0/.
+	RenameMetrics map[string]string `yaml:"rename_metrics,omitempty"`
 }
 
 type otelRenameAttributes struct {
 	AttributeMap   map[string]string `yaml:"attribute_map,omitempty"`
 	ApplyToMetrics []string          `yaml:"apply_to_metrics,omitempty"`
-}
-
-type otelRenameMetrics struct {
-	NameMap map[string]string `yaml:"name_map,omitempty"`
 }
 
 // staticCache is a generic, goroutine-safe cache keyed by URL for static
@@ -249,11 +508,13 @@ func loadOTelSchema(b []byte) (otelSchema, error) {
 	}
 
 	s.versionRenames = make([]versionRenames, 0, len(s.Versions))
+	s.allVersions = make([]string, 0, len(s.Versions))
 
 	for versionStr, version := range s.Versions {
 		if err := validateSemver(versionStr); err != nil {
 			return otelSchema{}, err
 		}
+		s.allVersions = append(s.allVersions, versionStr)
 		if renames := collectVersionRenames(versionStr, version); renames != nil {
 			s.versionRenames = append(s.versionRenames, *renames)
 		}
@@ -262,6 +523,7 @@ func loadOTelSchema(b []byte) (otelSchema, error) {
 	slices.SortFunc(s.versionRenames, func(a, b versionRenames) int {
 		return compareSemver(a.version, b.version)
 	})
+	slices.SortFunc(s.allVersions, compareSemver)
 
 	return s, nil
 }
@@ -313,16 +575,38 @@ func loadSemconv(b []byte, version string) (semconv, error) {
 		return semconv{}, fmt.Errorf("unmarshal: %w", err)
 	}
 	s.version = version
-	s.attributesPerMetric = make(map[string][]string)
+	s.metrics = make(map[string]metricDef)
+	// A metric name declared by two groups has no single definition. Keeping the
+	// first declaration rather than the last makes the outcome depend on file
+	// order in one direction only, but either choice is arbitrary, so the name is
+	// also recorded as ambiguous and reported to the querier as a warning.
+	var ambiguous map[string]struct{}
 	for _, group := range s.Groups {
-		if group.Type != "metric" || group.MetricName == "" || len(group.Attributes) == 0 {
+		if group.Type != "metric" || group.MetricName == "" {
 			continue
 		}
-		attrs := make([]string, 0, len(group.Attributes))
-		for _, attr := range group.Attributes {
-			attrs = append(attrs, attr.Ref)
+		if _, dup := s.metrics[group.MetricName]; dup {
+			if ambiguous == nil {
+				ambiguous = map[string]struct{}{}
+			}
+			ambiguous[group.MetricName] = struct{}{}
+			continue
 		}
-		s.attributesPerMetric[group.MetricName] = attrs
+		var attrs []string
+		if len(group.Attributes) > 0 {
+			attrs = make([]string, 0, len(group.Attributes))
+			for _, attr := range group.Attributes {
+				attrs = append(attrs, attr.Ref)
+			}
+		}
+		s.metrics[group.MetricName] = metricDef{
+			unit:       group.Unit,
+			instrument: group.Instrument,
+			attributes: attrs,
+		}
+	}
+	if len(ambiguous) > 0 {
+		s.ambiguousMetrics = slices.Sorted(maps.Keys(ambiguous))
 	}
 	return s, nil
 }

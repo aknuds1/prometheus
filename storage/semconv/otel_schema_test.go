@@ -55,13 +55,18 @@ func TestLoadOTelSchema(t *testing.T) {
 	t.Run("collects renames from the all section", func(t *testing.T) {
 		schema := loadOTelSchemaFile(t, "./testdata/otel_with_all_section.yaml")
 		require.Len(t, schema.versionRenames, 1)
-		attrs := schema.versionRenames[0].attributes
-		// Global ("all" section) renames are collected bidirectionally...
-		require.Equal(t, "global.new", attrs["global.old"])
-		require.Equal(t, "global.old", attrs["global.new"])
-		// ...alongside the metric-section renames.
-		require.Equal(t, "metric.new", attrs["metric.old"])
-		require.Equal(t, "metric.old", attrs["metric.new"])
+		renames := schema.versionRenames[0]
+		// Global ("all" section) renames apply to every metric and are collected
+		// bidirectionally.
+		require.Equal(t, "global.new", renames.attributes["global.old"])
+		require.Equal(t, "global.old", renames.attributes["global.new"])
+		// The metric-section rename names apply_to_metrics, so it is scoped to
+		// that metric rather than added to the global map.
+		require.NotContains(t, renames.attributes, "metric.old")
+		require.Equal(t, map[string]string{
+			"metric.old": "metric.new",
+			"metric.new": "metric.old",
+		}, renames.attributesPerMetric["my.metric"])
 	})
 
 	t.Run("collects per-version metric renames", func(t *testing.T) {
@@ -75,12 +80,41 @@ func TestLoadOTelSchema(t *testing.T) {
 		require.Equal(t, "another.old.metric", renames.metrics["another.new.metric"])
 	})
 
-	t.Run("collects per-version attribute renames", func(t *testing.T) {
+	t.Run("scopes per-version attribute renames to apply_to_metrics", func(t *testing.T) {
 		schema := loadOTelSchemaFile(t, "./testdata/otel.yaml")
 		require.Len(t, schema.versionRenames, 1)
 		renames := schema.versionRenames[0]
-		require.Equal(t, "http.request.method", renames.attributes["http.method"])
-		require.Equal(t, "http.method", renames.attributes["http.request.method"])
+
+		// This fixture declares two disjoint scopes: HTTP attribute renames for
+		// the two HTTP metrics, and process.cpu.state for process.cpu.time.
+		// Neither may leak into the other, nor into the global map.
+		require.Empty(t, renames.attributes)
+		for _, metric := range []string{"http.server.duration", "http.server.request.count"} {
+			scoped := renames.attributesPerMetric[metric]
+			require.Equal(t, "http.request.method", scoped["http.method"])
+			require.Equal(t, "http.method", scoped["http.request.method"])
+			require.NotContains(t, scoped, "process.cpu.state")
+		}
+		cpu := renames.attributesPerMetric["process.cpu.time"]
+		require.Equal(t, "cpu.mode", cpu["process.cpu.state"])
+		require.NotContains(t, cpu, "http.method")
+	})
+
+	t.Run("scoping narrows a version's renames per metric", func(t *testing.T) {
+		schema := loadOTelSchemaFile(t, "./testdata/otel.yaml")
+
+		// Resolving process.cpu.time must not pick up the HTTP metrics' renames.
+		scoped := scopedVersionRenames(schema.versionRenames,
+			metricNameAliases(schema.versionRenames, "process.cpu.time"))
+		require.Equal(t, "cpu.mode", scoped[0].attributes["process.cpu.state"])
+		require.NotContains(t, scoped[0].attributes, "http.method",
+			"a rename scoped to the HTTP metrics must not apply to process.cpu.time")
+
+		// ...and vice versa.
+		scoped = scopedVersionRenames(schema.versionRenames,
+			metricNameAliases(schema.versionRenames, "http.server.duration"))
+		require.Equal(t, "http.request.method", scoped[0].attributes["http.method"])
+		require.NotContains(t, scoped[0].attributes, "process.cpu.state")
 	})
 
 	t.Run("collects renames from multiple versions", func(t *testing.T) {
@@ -169,6 +203,97 @@ func TestFetchSemconv(t *testing.T) {
 	})
 }
 
+func TestPredecessorOf(t *testing.T) {
+	// A version that renames nothing is dropped from versionRenames but must
+	// still count as a predecessor, since a pre-rename metric name can perfectly
+	// well belong to a version that renamed nothing itself.
+	schema := loadOTelSchemaFile(t, "./testdata/otel_with_chained_renames.yaml")
+	require.Equal(t, []string{"1.0.0", "1.1.0"}, schema.allVersions)
+
+	tests := []struct {
+		version  string
+		expected string
+		found    bool
+	}{
+		{"1.1.0", "1.0.0", true},
+		{"1.0.0", "", false}, // Earliest version has no predecessor.
+		{"9.9.9", "", false}, // Not in the schema's history.
+		{"", "", false},
+	}
+	for _, tc := range tests {
+		got, found := schema.predecessorOf(tc.version)
+		require.Equal(t, tc.found, found, "predecessorOf(%q)", tc.version)
+		require.Equal(t, tc.expected, got, "predecessorOf(%q)", tc.version)
+	}
+}
+
+func TestLoadSemconv(t *testing.T) {
+	t.Run("indexes metric groups with unit and instrument", func(t *testing.T) {
+		sc, err := loadSemconv([]byte(`
+groups:
+  - id: metric.http.server.request.duration
+    type: metric
+    metric_name: http.server.request.duration
+    unit: s
+    instrument: histogram
+    attributes:
+      - ref: http.request.method
+`), "1.0.0")
+		require.NoError(t, err)
+		require.Equal(t, metricDef{
+			unit:       "s",
+			instrument: "histogram",
+			attributes: []string{"http.request.method"},
+		}, sc.metrics["http.server.request.duration"])
+		require.Empty(t, sc.ambiguousMetrics)
+	})
+
+	t.Run("indexes a metric group that declares no attributes", func(t *testing.T) {
+		// Such a group is still a metric, so it must be visible to the
+		// existence check that validates rename edges, even though it
+		// contributes nothing to attribute-rename normalisation.
+		sc, err := loadSemconv([]byte(`
+groups:
+  - id: metric.queue.depth
+    type: metric
+    metric_name: queue.depth
+    unit: "{item}"
+    instrument: updowncounter
+`), "1.0.0")
+		require.NoError(t, err)
+		require.Contains(t, sc.metrics, "queue.depth")
+		require.Empty(t, sc.attributesOf("queue.depth"))
+	})
+
+	t.Run("reports a metric name declared by more than one group", func(t *testing.T) {
+		// Two groups, same surface name, different semantics. Previously the
+		// second silently overwrote the first, so the queue.depth attributes
+		// were dropped and its unit was reported as the HTTP metric's.
+		sc, err := loadSemconv([]byte(`
+groups:
+  - id: metric.shared.name
+    type: metric
+    metric_name: shared.name
+    unit: s
+    instrument: histogram
+    attributes:
+      - ref: http.request.method
+  - id: metric.shared.name.other
+    type: metric
+    metric_name: shared.name
+    unit: "{item}"
+    instrument: updowncounter
+    attributes:
+      - ref: queue.name
+`), "1.0.0")
+		require.NoError(t, err)
+		require.Equal(t, []string{"shared.name"}, sc.ambiguousMetrics)
+		// Resolution is deterministic (first declaration wins) rather than
+		// dependent on which group happened to be parsed last.
+		require.Equal(t, []string{"http.request.method"}, sc.attributesOf("shared.name"))
+	})
+}
+
 func TestTransformOTelSchemaLabels(t *testing.T) {
 	t.Run("transforms metric and label names", func(t *testing.T) {
 		lbls := labels.FromStrings(
@@ -236,4 +361,65 @@ func TestReadRegistryFile(t *testing.T) {
 			require.Errorf(t, err, "expected %q to be rejected", url)
 		}
 	})
+}
+
+func TestEraVersionsOf(t *testing.T) {
+	// old.name is current up to 1.0.0, new.name from 1.1.0 on, and 1.2.0 hands
+	// old.name to an unrelated metric, giving that name a second era.
+	schema, err := loadOTelSchema([]byte(`file_format: 1.1.0
+schema_url: https://example.com/schemas/1.1.0
+versions:
+  1.0.0:
+  1.1.0:
+    metrics:
+      changes:
+        - rename_metrics:
+            old.name: new.name
+  1.2.0:
+    metrics:
+      changes:
+        - rename_metrics:
+            other.name: old.name
+`))
+	require.NoError(t, err)
+
+	// Retired at 1.1.0, so current up to 1.0.0; reintroduced at 1.2.0.
+	require.Equal(t, []string{"1.0.0", "1.2.0"}, schema.eraVersionsOf("old.name"))
+	// Introduced at 1.1.0 and never renamed away.
+	require.Equal(t, []string{"1.1.0"}, schema.eraVersionsOf("new.name"))
+	// Renamed away at 1.2.0, so current up to 1.1.0.
+	require.Equal(t, []string{"1.1.0"}, schema.eraVersionsOf("other.name"))
+	// Not mentioned by any rename, so the schema says nothing about its era.
+	require.Empty(t, schema.eraVersionsOf("unrelated.name"))
+}
+
+// TestUpstreamSemconvAttributes pins how the real semconv files' metric attributes
+// parse, against the unmodified v1.44.0 artefact for semconv 1.22.0.
+//
+// It records a gap as much as a guarantee. Most real metric groups declare their
+// attributes with extends, naming an attribute_group to inherit from, and
+// semconvGroup has no such field: those groups parse with no attributes at all, so
+// nothing canonicalises their attribute names across a rename and no
+// apply_to_metrics scoping applies to them either. Only groups that list attributes
+// inline are seen. If extends is resolved later, the second assertion here is the
+// one that should change.
+func TestUpstreamSemconvAttributes(t *testing.T) {
+	b, err := os.ReadFile("./testdata/upstream/semconv-1.22.0.yaml")
+	require.NoError(t, err)
+	sc, err := loadSemconv(b, "1.22.0")
+	require.NoError(t, err)
+
+	// Declared inline, so they are parsed.
+	require.Contains(t, sc.attributesOf("http.server.active_requests"), "http.request.method",
+		"inline attributes of a real metric group must be parsed")
+
+	// Declared via "extends: metric_attributes.http.server", so they are not.
+	require.Empty(t, sc.attributesOf("http.server.request.duration"),
+		"extends is not resolved, so this group has no attributes; if that changes, so must this")
+
+	// Either way the group is indexed as a metric, which is what rename
+	// corroboration needs from it.
+	require.Contains(t, sc.metrics, "http.server.request.duration")
+	require.Equal(t, "s", sc.metrics["http.server.request.duration"].unit)
+	require.Equal(t, "histogram", sc.metrics["http.server.request.duration"].instrument)
 }
