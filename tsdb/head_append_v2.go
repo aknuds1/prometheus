@@ -136,6 +136,9 @@ func (a *headAppenderV2) Append(ref storage.SeriesRef, ls labels.Labels, st, t i
 	}
 
 	s := a.head.series.getByID(chunks.HeadSeriesRef(ref))
+	if hook := a.testAfterSeriesLookup; hook != nil {
+		hook(s)
+	}
 	if s == nil {
 		var err error
 		s, _, err = a.getOrCreate(ls)

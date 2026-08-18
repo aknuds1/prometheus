@@ -424,6 +424,7 @@ type headAppenderBase struct {
 	storeST                         bool // Whether start-timestamp storage is enabled for this append.
 	useXOR2                         bool // Whether XOR2 encoding is used for float chunks in this append.
 	useHistogramST                  bool // Whether ST-capable histogram chunk encoding is used in this append.
+	testAfterSeriesLookup           func(*memSeries)
 }
 type headAppender struct {
 	headAppenderBase
@@ -443,6 +444,9 @@ func (a *headAppender) Append(ref storage.SeriesRef, lset labels.Labels, t int64
 	}
 
 	s := a.head.series.getByID(chunks.HeadSeriesRef(ref))
+	if hook := a.testAfterSeriesLookup; hook != nil {
+		hook(s)
+	}
 	if s == nil {
 		var err error
 		s, _, err = a.getOrCreate(lset)
