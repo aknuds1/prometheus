@@ -51,6 +51,22 @@ func TestLoadOTelSchema(t *testing.T) {
 		require.Contains(t, err.Error(), "unsupported OTel schema file format")
 	})
 
+	t.Run("rejects unsupported metric splits", func(t *testing.T) {
+		_, err := loadOTelSchema([]byte(`file_format: 1.1.0
+schema_url: https://example.com/schemas/1.1.0
+versions:
+  1.1.0:
+    metrics:
+      changes:
+        - split:
+            apply_to_metric: http.server.duration
+            by_attribute: http.request.method
+            metrics_from_attributes:
+              http.server.get.duration: GET
+`))
+		require.EqualError(t, err, `schema version "1.1.0" contains unsupported metric split transformation`)
+	})
+
 	t.Run("collects renames from the all section", func(t *testing.T) {
 		schema := loadOTelSchemaFile(t, "./testdata/otel_with_all_section.yaml")
 		require.Len(t, schema.revisions, 1)
