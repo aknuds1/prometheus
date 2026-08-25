@@ -328,6 +328,146 @@ groups:
 		require.Empty(t, sc.ambiguousMetrics)
 	})
 
+	t.Run("resolves transitive inheritance and inline prefixes", func(t *testing.T) {
+		sc, err := loadSemconv([]byte(`
+groups:
+  - id: metric.queue.depth
+    type: metric
+    metric_name: queue.depth
+    unit: "{item}"
+    instrument: updowncounter
+    extends: attributes.queue
+    attributes:
+      - id: local
+      - ref: queue.name
+      - ref: queue.name
+  - id: metric.service.info
+    type: metric
+    metric_name: service.info
+    extends: attributes.common
+  - id: attributes.common
+    type: attribute_group
+    prefix: service
+    attributes:
+      - id: name
+  - id: attributes.queue
+    type: attribute_group
+    extends: attributes.queue.base
+    attributes:
+      - id: capacity
+      - ref: queue.name
+  - id: attributes.queue.base
+    type: attribute_group
+    extends: attributes.common
+    prefix: queue
+    attributes:
+      - id: priority
+`), "1.0.0")
+		require.NoError(t, err)
+		require.Equal(t,
+			[]string{"service.name", "queue.priority", "queue.capacity", "queue.name", "queue.local"},
+			sc.attributesOf("queue.depth"),
+		)
+		require.Equal(t, []string{"service.name"}, sc.attributesOf("service.info"),
+			"resolving a child must not mutate its memoized parent")
+	})
+
+	t.Run("an explicit empty prefix clears an inherited prefix", func(t *testing.T) {
+		sc, err := loadSemconv([]byte(`
+groups:
+  - id: attributes.parent
+    type: attribute_group
+    prefix: parent
+    attributes:
+      - id: inherited
+  - id: metric.child
+    type: metric
+    metric_name: child
+    extends: attributes.parent
+    prefix: ""
+    attributes:
+      - id: local
+`), "1.0.0")
+		require.NoError(t, err)
+		require.Equal(t, []string{"parent.inherited", "local"}, sc.attributesOf("child"))
+	})
+
+	for _, tc := range []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "missing parent",
+			yaml: `
+groups:
+  - id: metric.queue.depth
+    type: metric
+    metric_name: queue.depth
+    extends: attributes.missing
+`,
+			wantErr: `semconv group "metric.queue.depth" extends unknown group "attributes.missing"`,
+		},
+		{
+			name: "inheritance cycle",
+			yaml: `
+groups:
+  - id: attributes.a
+    type: attribute_group
+    extends: attributes.b
+  - id: metric.queue.depth
+    type: metric
+    metric_name: queue.depth
+    extends: attributes.a
+  - id: attributes.b
+    type: attribute_group
+    extends: attributes.a
+`,
+			wantErr: "attributes.a -> attributes.b -> attributes.a",
+		},
+		{
+			name: "duplicate group id",
+			yaml: `
+groups:
+  - id: attributes.queue
+    type: attribute_group
+  - id: attributes.queue
+    type: attribute_group
+`,
+			wantErr: `duplicate semconv group id "attributes.queue"`,
+		},
+		{
+			name: "attribute has id and ref",
+			yaml: `
+groups:
+  - id: metric.queue.depth
+    type: metric
+    metric_name: queue.depth
+    attributes:
+      - id: queue.name
+        ref: queue.name
+`,
+			wantErr: "declares both id",
+		},
+		{
+			name: "attribute has neither id nor ref",
+			yaml: `
+groups:
+  - id: metric.queue.depth
+    type: metric
+    metric_name: queue.depth
+    attributes:
+      - requirement_level: recommended
+`,
+			wantErr: "declares neither id nor ref",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadSemconv([]byte(tc.yaml), "1.0.0")
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+
 	t.Run("indexes a metric group that declares no attributes", func(t *testing.T) {
 		// Such a group is still a metric, so it must be visible to the
 		// existence check that validates rename edges, even though it
@@ -528,33 +668,42 @@ func TestReadRegistryFile(t *testing.T) {
 	})
 }
 
-// TestUpstreamSemconvAttributes pins how the real semconv files' metric attributes
-// parse, against the unmodified v1.44.0 artefact for semconv 1.22.0.
-//
-// It records a gap as much as a guarantee. Most real metric groups declare their
-// attributes with extends, naming an attribute_group to inherit from, and
-// semconvGroup has no such field: those groups parse with no attributes at all, so
-// nothing canonicalises their attribute names across a rename and no
-// apply_to_metrics scoping applies to them either. Only groups that list attributes
-// inline are seen. If extends is resolved later, the second assertion here is the
-// one that should change.
+// TestUpstreamSemconvAttributes pins inherited metric attributes from the real
+// v1.21.0 and v1.22.0 HTTP semantic-convention groups.
 func TestUpstreamSemconvAttributes(t *testing.T) {
-	b, err := os.ReadFile("./testdata/upstream/semconv-1.22.0.yaml")
-	require.NoError(t, err)
-	sc, err := loadSemconv(b, "1.22.0")
-	require.NoError(t, err)
+	for _, tc := range []struct {
+		version    string
+		metric     string
+		attributes []string
+	}{
+		{
+			version: "1.21.0",
+			metric:  "http.server.duration",
+			attributes: []string{
+				"http.route", "server.address", "server.port", "url.scheme",
+				"http.request.method", "http.response.status_code",
+				"network.protocol.name", "network.protocol.version",
+			},
+		},
+		{
+			version: "1.22.0",
+			metric:  "http.server.request.duration",
+			attributes: []string{
+				"http.request.method", "http.response.status_code", "error.type",
+				"network.protocol.name", "network.protocol.version", "http.route",
+				"server.address", "server.port", "url.scheme",
+			},
+		},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			b, err := os.ReadFile("./testdata/upstream/semconv-" + tc.version + ".yaml")
+			require.NoError(t, err)
+			sc, err := loadSemconv(b, tc.version)
+			require.NoError(t, err)
 
-	// Declared inline, so they are parsed.
-	require.Contains(t, sc.attributesOf("http.server.active_requests"), "http.request.method",
-		"inline attributes of a real metric group must be parsed")
-
-	// Declared via "extends: metric_attributes.http.server", so they are not.
-	require.Empty(t, sc.attributesOf("http.server.request.duration"),
-		"extends is not resolved, so this group has no attributes; if that changes, so must this")
-
-	// Either way the group is indexed as a metric, which is what rename
-	// corroboration needs from it.
-	require.Contains(t, sc.metrics, "http.server.request.duration")
-	require.Equal(t, "s", sc.metrics["http.server.request.duration"].unit)
-	require.Equal(t, "histogram", sc.metrics["http.server.request.duration"].instrument)
+			require.Equal(t, tc.attributes, sc.attributesOf(tc.metric))
+			require.Equal(t, "s", sc.metrics[tc.metric].unit)
+			require.Equal(t, "histogram", sc.metrics[tc.metric].instrument)
+		})
+	}
 }
