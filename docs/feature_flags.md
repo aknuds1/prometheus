@@ -393,6 +393,11 @@ special matchers in PromQL queries:
   matching the metric's historical names and rendering the merged results under
   the queried version's name.
 
+A schema-aware selector must also contain a non-empty equality matcher on
+`__name__`. Other `__name__` constraints may accompany it, but a selector with
+only a regular-expression or negative name matcher is rejected because it has no
+single metric identity from which to resolve renames.
+
 Both matchers may only reference paths inside the active registry under the
 `registry/` namespace; they are matcher values, not locations, so arbitrary HTTP
 URLs and local file paths are rejected regardless of the registry source.
@@ -441,6 +446,16 @@ test{__semconv_url__="registry/1.1.0", __schema_url__="registry/registry.yaml"}
 For `test` in semconv 1.1.0, this matches the metric's earlier names (e.g.
 `test.counter` in 1.0.0) declared by the schema's `versions` section and merges
 the results under the queried name `test`.
+
+Schema fan-out runs serially through the query's single underlying querier so
+all variants share one storage snapshot. Canonicalized series are sorted before
+merging; conflicting label rewrites fail the query instead of returning invalid
+labels. Schema resolution, fan-out reads, and canonical-series materialization
+are bounded, and query limits are applied after canonicalization. A query that
+would exceed a resolution, fan-out, or materialization bound fails instead of
+falling back to an incomplete direct read. Schema-aware series and chunk reads
+also fail if stored data contains either control label, since those labels are
+reserved for query-time schema selection.
 
 This feature is experimental: the matcher names, the registry layout, and the
 `semconv` configuration block are subject to change.

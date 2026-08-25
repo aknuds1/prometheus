@@ -14,6 +14,7 @@
 package semconv
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -33,6 +34,67 @@ func TestFindMatcherVariants_RequiresSemconvURL(t *testing.T) {
 	require.Contains(t, err.Error(), "semconvURL is required")
 }
 
+func TestNormalizeMetricMatchers(t *testing.T) {
+	t.Run("normalizes compatible constraints around an equality", func(t *testing.T) {
+		matchers := []*labels.Matcher{
+			labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, `metric\.(current|old)`),
+			labels.MustNewMatcher(labels.MatchEqual, "attribute", "value"),
+			labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "metric.current"),
+			labels.MustNewMatcher(labels.MatchNotEqual, labels.MetricName, "metric.old"),
+		}
+
+		name, got, satisfiable, err := normalizeMetricMatchers(matchers)
+		require.NoError(t, err)
+		require.True(t, satisfiable)
+		require.Equal(t, "metric.current", name)
+		require.Len(t, got, 2)
+		require.Equal(t, labels.MatchEqual, got[0].Type)
+		require.Equal(t, labels.MetricName, got[0].Name)
+		require.Equal(t, "metric.current", got[0].Value)
+		require.Same(t, matchers[1], got[1])
+	})
+
+	t.Run("keeps contradictory constraints for direct evaluation", func(t *testing.T) {
+		matchers := []*labels.Matcher{
+			labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "metric.current"),
+			labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, "metric.old"),
+		}
+
+		name, got, satisfiable, err := normalizeMetricMatchers(matchers)
+		require.NoError(t, err)
+		require.False(t, satisfiable)
+		require.Equal(t, "metric.current", name)
+		require.Same(t, matchers[0], got[0])
+		require.Same(t, matchers[1], got[1])
+	})
+
+	t.Run("finds a non-empty equality independent of matcher order", func(t *testing.T) {
+		matchers := []*labels.Matcher{
+			labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, ""),
+			labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "metric.current"),
+		}
+
+		name, got, satisfiable, err := normalizeMetricMatchers(matchers)
+		require.NoError(t, err)
+		require.False(t, satisfiable)
+		require.Equal(t, "metric.current", name)
+		require.Same(t, matchers[0], got[0])
+		require.Same(t, matchers[1], got[1])
+	})
+
+	t.Run("requires a non-empty exact anchor", func(t *testing.T) {
+		for _, matcher := range []*labels.Matcher{
+			labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, "metric.*"),
+			labels.MustNewMatcher(labels.MatchNotEqual, labels.MetricName, "metric.old"),
+			labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, ""),
+		} {
+			_, _, _, err := normalizeMetricMatchers([]*labels.Matcher{matcher})
+			require.ErrorIs(t, err, errMetricNameAnchor)
+			require.ErrorContains(t, err, "non-empty equality matcher")
+		}
+	})
+}
+
 func TestGenerateMatcherVariants(t *testing.T) {
 	t.Run("applies per-version renames", func(t *testing.T) {
 		schema := &otelSchema{
@@ -48,7 +110,8 @@ func TestGenerateMatcherVariants(t *testing.T) {
 			labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "metric.v2"),
 		}
 
-		result := generateMatcherVariants("1.0.0", schema, matchers)
+		result, err := generateMatcherVariants("1.0.0", schema, matchers)
+		require.NoError(t, err)
 
 		// Should have original + 1 version variant.
 		require.Len(t, result, 2)
@@ -72,7 +135,8 @@ func TestGenerateMatcherVariants(t *testing.T) {
 			labels.MustNewMatcher(labels.MatchEqual, "attr.new", "value"),
 		}
 
-		result := generateMatcherVariants("1.0.0", schema, matchers)
+		result, err := generateMatcherVariants("1.0.0", schema, matchers)
+		require.NoError(t, err)
 
 		// Should have original + 1 version variant (both metric AND attr renamed together).
 		require.Len(t, result, 2)
@@ -120,7 +184,8 @@ func TestGenerateMatcherVariants(t *testing.T) {
 			labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "metric.v3"),
 		}
 
-		result := generateMatcherVariants("1.1.0", schema, matchers)
+		result, err := generateMatcherVariants("1.1.0", schema, matchers)
+		require.NoError(t, err)
 
 		// Anchored at 1.1.0, backward walk resolves: v3 → v2 (via 1.1.0) → v1 (via 1.0.0).
 		require.Len(t, result, 3)
@@ -150,7 +215,8 @@ func TestGenerateMatcherVariants(t *testing.T) {
 			labels.MustNewMatcher(labels.MatchEqual, "attr.v3", "value"),
 		}
 
-		result := generateMatcherVariants("1.1.0", schema, matchers)
+		result, err := generateMatcherVariants("1.1.0", schema, matchers)
+		require.NoError(t, err)
 
 		// Anchored at 1.1.0, should have 3 variants with metric+attr paired correctly.
 		require.Len(t, result, 3)
@@ -188,7 +254,8 @@ func TestGenerateMatcherVariants(t *testing.T) {
 			labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "my.metric"),
 		}
 
-		result := generateMatcherVariants("1.0.0", schema, matchers)
+		result, err := generateMatcherVariants("1.0.0", schema, matchers)
+		require.NoError(t, err)
 
 		require.Len(t, result, 1)
 		require.Equal(t, matchers, result[0])
@@ -254,7 +321,8 @@ func TestGenerateMatcherVariants_AnchoredTraversal(t *testing.T) {
 		}
 
 		// Anchored at 1.1.0: backward walks [1.0.0, 1.1.0], forward walks [1.1.0, 1.2.0].
-		result := generateMatcherVariants("1.1.0", schema, matchers)
+		result, err := generateMatcherVariants("1.1.0", schema, matchers)
+		require.NoError(t, err)
 
 		require.Len(t, result, 4) // v1, v2, v3, v4
 		names := extractMetricNames(result)
@@ -276,7 +344,8 @@ func TestGenerateMatcherVariants_AnchoredTraversal(t *testing.T) {
 		}
 
 		// Anchored at 1.0.0: backward walks [1.0.0], forward walks [1.0.0, 1.1.0].
-		result := generateMatcherVariants("1.0.0", schema, matchers)
+		result, err := generateMatcherVariants("1.0.0", schema, matchers)
+		require.NoError(t, err)
 
 		names := extractMetricNames(result)
 		require.Contains(t, names, "metric.v1") // backward from anchor
@@ -294,7 +363,8 @@ func TestGenerateMatcherVariants_AnchoredTraversal(t *testing.T) {
 			labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "metric.new"),
 		}
 
-		result := generateMatcherVariants("v1.0.0", schema, matchers)
+		result, err := generateMatcherVariants("v1.0.0", schema, matchers)
+		require.NoError(t, err)
 
 		require.Len(t, result, 2)
 		names := extractMetricNames(result)
@@ -310,7 +380,8 @@ func TestBuildAttributeRenameMap(t *testing.T) {
 				{version: "1.1.0", attributes: map[string]string{"user": "tenant", "tenant": "user"}},
 			},
 		}
-		got := buildAttributeRenameMap("1.1.0", schema, []string{"tenant"})
+		got, err := buildAttributeRenameMap("1.1.0", schema, []string{"tenant"})
+		require.NoError(t, err)
 		require.Equal(t, map[string]string{"user": "tenant"}, got)
 	})
 
@@ -323,12 +394,15 @@ func TestBuildAttributeRenameMap(t *testing.T) {
 				{version: "1.1.0", attributes: map[string]string{"attr.v2": "attr.v3", "attr.v3": "attr.v2"}},
 			},
 		}
-		got := buildAttributeRenameMap("1.1.0", schema, []string{"attr.v3"})
+		got, err := buildAttributeRenameMap("1.1.0", schema, []string{"attr.v3"})
+		require.NoError(t, err)
 		require.Equal(t, map[string]string{"attr.v2": "attr.v3", "attr.v1": "attr.v3"}, got)
 	})
 
 	t.Run("no schema renames returns nil", func(t *testing.T) {
-		require.Nil(t, buildAttributeRenameMap("1.1.0", &otelSchema{}, []string{"tenant"}))
+		got, err := buildAttributeRenameMap("1.1.0", &otelSchema{}, []string{"tenant"})
+		require.NoError(t, err)
+		require.Nil(t, got)
 	})
 
 	t.Run("no canonical attributes returns nil", func(t *testing.T) {
@@ -337,6 +411,148 @@ func TestBuildAttributeRenameMap(t *testing.T) {
 				{version: "1.1.0", attributes: map[string]string{"user": "tenant", "tenant": "user"}},
 			},
 		}
-		require.Nil(t, buildAttributeRenameMap("1.1.0", schema, nil))
+		got, err := buildAttributeRenameMap("1.1.0", schema, nil)
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+}
+
+func TestSchemaExpansionBudget(t *testing.T) {
+	matchers := []*labels.Matcher{
+		labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "metric.current"),
+	}
+
+	t.Run("find variants returns no partial result", func(t *testing.T) {
+		for name, limits := range map[string]schemaExpansionLimits{
+			"work":      {work: 1, keyBytes: 1_000},
+			"key bytes": {work: 1_000, keyBytes: 1},
+		} {
+			t.Run(name, func(t *testing.T) {
+				e := newSchemaEngine(embeddedRegistry)
+				e.limits = limits
+				variants, _, err := e.findMatcherVariants(
+					"registry/1.1.0",
+					"registry/registry.yaml",
+					[]*labels.Matcher{
+						labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "test"),
+					},
+				)
+				require.ErrorIs(t, err, errSchemaExpansion)
+				require.ErrorContains(t, err, name)
+				require.Nil(t, variants)
+			})
+		}
+	})
+
+	t.Run("preflights keys before allocation", func(t *testing.T) {
+		keyBytes := uint64(len(matcherKey(matchers)))
+		require.Positive(t, keyBytes)
+
+		budget := newSchemaExpansionBudget(schemaExpansionLimits{work: 10, keyBytes: keyBytes - 1})
+		key, err := matcherKeyWithBudget(matchers, budget)
+		require.ErrorIs(t, err, errSchemaExpansion)
+		require.ErrorContains(t, err, "deduplication key bytes")
+		require.Empty(t, key)
+		require.Zero(t, budget.keyBytes)
+	})
+
+	t.Run("charges duplicate candidate attempts", func(t *testing.T) {
+		schema := &otelSchema{versionRenames: []versionRenames{{
+			version: "1.0.0",
+			metrics: map[string]string{
+				"metric.current": "metric.old",
+				"metric.old":     "metric.current",
+			},
+		}}}
+		probe := newSchemaExpansionBudget(schemaExpansionLimits{work: 100, keyBytes: 10_000})
+		variants, err := generateMatcherVariantsWithBudget("1.0.0", schema, matchers, probe)
+		require.NoError(t, err)
+		require.Len(t, variants, 2)
+		require.Positive(t, probe.work)
+
+		budget := newSchemaExpansionBudget(schemaExpansionLimits{work: probe.work - 1, keyBytes: 10_000})
+		variants, err = generateMatcherVariantsWithBudget("1.0.0", schema, matchers, budget)
+		require.ErrorIs(t, err, errSchemaExpansion)
+		require.ErrorContains(t, err, "resolver work")
+		require.Nil(t, variants)
+	})
+
+	t.Run("shares work across traversal directions", func(t *testing.T) {
+		backward := &otelSchema{versionRenames: []versionRenames{
+			{version: "1.0.0", metrics: map[string]string{"metric.middle": "metric.old", "metric.old": "metric.middle"}},
+			{version: "1.1.0", metrics: map[string]string{"metric.current": "metric.middle", "metric.middle": "metric.current"}},
+		}}
+		forward := &otelSchema{versionRenames: []versionRenames{
+			{version: "1.1.0"},
+			{version: "1.2.0", metrics: map[string]string{"metric.current": "metric.new", "metric.new": "metric.current"}},
+		}}
+		combined := &otelSchema{versionRenames: append(slices.Clone(backward.versionRenames), forward.versionRenames[1:]...)}
+
+		measure := func(t *testing.T, schema *otelSchema) uint64 {
+			t.Helper()
+			budget := newSchemaExpansionBudget(schemaExpansionLimits{work: 1_000, keyBytes: 100_000})
+			_, err := generateMatcherVariantsWithBudget("1.1.0", schema, matchers, budget)
+			require.NoError(t, err)
+			return budget.work
+		}
+		limit := max(measure(t, backward), measure(t, forward))
+		require.Greater(t, measure(t, combined), limit)
+
+		for name, schema := range map[string]*otelSchema{"backward": backward, "forward": forward} {
+			t.Run(name+" fits independently", func(t *testing.T) {
+				budget := newSchemaExpansionBudget(schemaExpansionLimits{work: limit, keyBytes: 100_000})
+				_, err := generateMatcherVariantsWithBudget("1.1.0", schema, matchers, budget)
+				require.NoError(t, err)
+			})
+		}
+
+		budget := newSchemaExpansionBudget(schemaExpansionLimits{work: limit, keyBytes: 100_000})
+		variants, err := generateMatcherVariantsWithBudget("1.1.0", combined, matchers, budget)
+		require.ErrorIs(t, err, errSchemaExpansion)
+		require.Nil(t, variants)
+	})
+
+	t.Run("shares work with attribute mapping", func(t *testing.T) {
+		schema := &otelSchema{versionRenames: []versionRenames{{
+			version:    "1.0.0",
+			metrics:    map[string]string{"metric.current": "metric.old", "metric.old": "metric.current"},
+			attributes: map[string]string{"tenant": "user", "user": "tenant"},
+		}}}
+		measureVariants := newSchemaExpansionBudget(schemaExpansionLimits{work: 100, keyBytes: 10_000})
+		_, err := generateMatcherVariantsWithBudget("1.0.0", schema, matchers, measureVariants)
+		require.NoError(t, err)
+		measureAttributes := newSchemaExpansionBudget(schemaExpansionLimits{work: 100, keyBytes: 10_000})
+		_, err = buildAttributeRenameMapWithBudget("1.0.0", schema, []string{"tenant"}, measureAttributes)
+		require.NoError(t, err)
+
+		budget := newSchemaExpansionBudget(schemaExpansionLimits{
+			work:     measureVariants.work + measureAttributes.work - 1,
+			keyBytes: 10_000,
+		})
+		_, err = generateMatcherVariantsWithBudget("1.0.0", schema, matchers, budget)
+		require.NoError(t, err)
+		mapping, err := buildAttributeRenameMapWithBudget("1.0.0", schema, []string{"tenant"}, budget)
+		require.ErrorIs(t, err, errSchemaExpansion)
+		require.Nil(t, mapping)
+	})
+
+	t.Run("bounds resolver collections", func(t *testing.T) {
+		schema := &otelSchema{versionRenames: []versionRenames{{
+			version:    "1.0.0",
+			metrics:    map[string]string{"metric.current": "metric.old"},
+			attributes: map[string]string{"tenant": "user"},
+		}}}
+		budget := newSchemaExpansionBudget(schemaExpansionLimits{work: 100, keyBytes: 10_000})
+		key, err := matcherKeyWithBudget(matchers, budget)
+		require.NoError(t, err)
+		result := make([][]*labels.Matcher, maxSchemaExpansion)
+		variants, err := walkVersionsWithBudget(schema.versionRenames, matchers, map[string]struct{}{key: {}}, result, false, budget)
+		require.ErrorIs(t, err, errSchemaExpansion)
+		require.Nil(t, variants)
+
+		canonicalAttrs := make([]string, maxSchemaExpansion+1)
+		mapping, err := buildAttributeRenameMapWithBudget("1.0.0", schema, canonicalAttrs, budget)
+		require.ErrorIs(t, err, errSchemaExpansion)
+		require.Nil(t, mapping)
 	})
 }

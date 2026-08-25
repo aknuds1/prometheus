@@ -16,6 +16,7 @@ package semconv_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -395,6 +396,76 @@ func TestAwareStorage(t *testing.T) {
 			require.ElementsMatch(t, []string{"legacy", "current"}, values)
 		})
 	})
+}
+
+func TestMetricNameConstraintsKeepPromQLSemantics(t *testing.T) {
+	wrapper, _ := newAwareStorage(t)
+	appendSeries(t, wrapper, "test.counter", 1, 1, "era", "old")
+	appendSeries(t, wrapper, "test", 1, 2, "era", "current")
+
+	tests := []struct {
+		name          string
+		nameMatchers  []*labels.Matcher
+		wantSeries    int
+		wantLabelName bool
+		wantValues    []string
+	}{
+		{
+			name: "compatible constraints apply to the canonical name",
+			nameMatchers: []*labels.Matcher{
+				labels.MustNewMatcher(labels.MatchRegexp, model.MetricNameLabel, `test(?:\.counter)?`),
+				labels.MustNewMatcher(labels.MatchNotEqual, model.MetricNameLabel, "test.counter"),
+				labels.MustNewMatcher(labels.MatchEqual, model.MetricNameLabel, "test"),
+			},
+			wantSeries:    2,
+			wantLabelName: true,
+			wantValues:    []string{"current", "old"},
+		},
+		{
+			name: "contradictory constraints remain unsatisfiable",
+			nameMatchers: []*labels.Matcher{
+				labels.MustNewMatcher(labels.MatchEqual, model.MetricNameLabel, "test"),
+				labels.MustNewMatcher(labels.MatchRegexp, model.MetricNameLabel, `test\.counter`),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			matchers := append(slices.Clone(tc.nameMatchers),
+				labels.MustNewMatcher(labels.MatchEqual, "__semconv_url__", "registry/1.1.0"),
+				labels.MustNewMatcher(labels.MatchEqual, "__schema_url__", "registry/registry.yaml"),
+			)
+
+			q, err := wrapper.Querier(0, 10)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, q.Close()) })
+
+			got := collectSeries(t, q.Select(t.Context(), false, nil, matchers...))
+			require.Len(t, got, tc.wantSeries)
+			for key := range got {
+				require.Contains(t, key, `__name__="test"`)
+			}
+
+			names, _, err := q.LabelNames(t.Context(), nil, matchers...)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantLabelName, slices.Contains(names, "era"))
+
+			values, _, err := q.LabelValues(t.Context(), "era", nil, matchers...)
+			require.NoError(t, err)
+			if len(tc.wantValues) == 0 {
+				require.Empty(t, values)
+			} else {
+				require.Equal(t, tc.wantValues, values)
+			}
+
+			cq, err := wrapper.ChunkQuerier(0, 10)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, cq.Close()) })
+			chunks := storage.NewSeriesSetFromChunkSeriesSet(cq.Select(t.Context(), false, nil, matchers...))
+			require.Len(t, collectSeries(t, chunks), tc.wantSeries)
+		})
+	}
 }
 
 func TestSchemaWarning_ClassifiedAsWarning(t *testing.T) {

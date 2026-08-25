@@ -186,7 +186,8 @@ func TestTransformOTelSchemaLabels(t *testing.T) {
 			},
 		}
 
-		result := transformOTelSchemaLabels(lbls, mapping)
+		result, err := transformOTelSchemaLabels(lbls, mapping)
+		require.NoError(t, err)
 
 		require.Equal(t, "http.server.duration", result.Get(model.MetricNameLabel))
 		require.Equal(t, "GET", result.Get("http.method"))
@@ -208,7 +209,8 @@ func TestTransformOTelSchemaLabels(t *testing.T) {
 			translatedLabels: map[string]string{},
 		}
 
-		result := transformOTelSchemaLabels(lbls, mapping)
+		result, err := transformOTelSchemaLabels(lbls, mapping)
+		require.NoError(t, err)
 
 		require.Empty(t, result.Get(schemaURLLabel))
 		require.Equal(t, "http.server.duration", result.Get(model.MetricNameLabel))
