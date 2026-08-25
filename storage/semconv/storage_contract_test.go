@@ -541,7 +541,7 @@ versions:
 	require.Equal(t, &resolverBudgetCallCounts{}, calls)
 }
 
-func TestForwardMetricConvergenceFailsBeforeStorage(t *testing.T) {
+func TestForwardMetricConvergenceFansOutToStorage(t *testing.T) {
 	registry := map[string][]byte{
 		"registry.yaml": []byte(`file_format: 1.1.0
 schema_url: https://example.com/schemas/1.1.0
@@ -576,7 +576,7 @@ versions:
 	}
 	series := querier.Select(t.Context(), true, nil, matchers...)
 	require.False(t, series.Next())
-	require.ErrorIs(t, series.Err(), errAmbiguousSchemaRename)
+	require.NoError(t, series.Err())
 
 	chunkQuerier := &awareChunkQuerier{
 		ChunkQuerier:         &resolverBudgetChunkQuerier{ChunkQuerier: storage.NoopChunkedQuerier(), calls: calls},
@@ -585,16 +585,19 @@ versions:
 	}
 	chunks := chunkQuerier.Select(t.Context(), true, nil, matchers...)
 	require.False(t, chunks.Next())
-	require.ErrorIs(t, chunks.Err(), errAmbiguousSchemaRename)
+	require.NoError(t, chunks.Err())
 
 	_, _, err := querier.LabelNames(t.Context(), nil, matchers...)
-	require.ErrorIs(t, err, errAmbiguousSchemaRename)
+	require.NoError(t, err)
 	_, _, err = querier.LabelValues(t.Context(), model.MetricNameLabel, nil, matchers...)
-	require.ErrorIs(t, err, errAmbiguousSchemaRename)
-	require.Equal(t, &resolverBudgetCallCounts{}, calls)
+	require.NoError(t, err)
+	require.Positive(t, calls.series)
+	require.Positive(t, calls.chunk)
+	require.Positive(t, calls.labelNames)
+	require.Positive(t, calls.labelValues)
 }
 
-func TestAmbiguousSchemaRenameFailsBeforeStorage(t *testing.T) {
+func TestSchemaConvergenceFansOutToStorage(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		metric    string
@@ -730,7 +733,7 @@ versions:
 			}
 			series := querier.Select(t.Context(), true, nil, matchers...)
 			require.False(t, series.Next())
-			require.ErrorIs(t, series.Err(), errAmbiguousSchemaRename)
+			require.NoError(t, series.Err())
 
 			chunkQuerier := &awareChunkQuerier{
 				ChunkQuerier:         &resolverBudgetChunkQuerier{ChunkQuerier: storage.NoopChunkedQuerier(), calls: calls},
@@ -739,17 +742,20 @@ versions:
 			}
 			chunks := chunkQuerier.Select(t.Context(), true, nil, matchers...)
 			require.False(t, chunks.Next())
-			require.ErrorIs(t, chunks.Err(), errAmbiguousSchemaRename)
+			require.NoError(t, chunks.Err())
 
 			_, _, err := querier.LabelNames(t.Context(), nil, matchers...)
-			require.ErrorIs(t, err, errAmbiguousSchemaRename)
+			require.NoError(t, err)
 			labelName := tc.attribute
 			if labelName == "" {
 				labelName = model.MetricNameLabel
 			}
 			_, _, err = querier.LabelValues(t.Context(), labelName, nil, matchers...)
-			require.ErrorIs(t, err, errAmbiguousSchemaRename)
-			require.Equal(t, &resolverBudgetCallCounts{}, calls)
+			require.NoError(t, err)
+			require.Positive(t, calls.series)
+			require.Positive(t, calls.chunk)
+			require.Positive(t, calls.labelNames)
+			require.Positive(t, calls.labelValues)
 		})
 	}
 }
