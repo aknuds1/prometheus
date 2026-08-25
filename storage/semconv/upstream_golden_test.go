@@ -93,4 +93,36 @@ func TestUpstreamSchemaMetricRenames(t *testing.T) {
 	for k := range got {
 		require.Contains(t, k, `__name__="http.server.request.duration"`)
 	}
+
+	// Both versions declare the metric as s/histogram, so the metric rename is
+	// corroborated. Later schema revisions may independently report ambiguous
+	// attribute histories, but none of the warnings may concern metric lineage.
+	for _, warning := range warningStrings(set.Warnings()) {
+		require.Contains(t, warning, "attribute name",
+			"a rename corroborated by the real semconv files must not raise a metric warning")
+	}
+}
+
+func TestUpstreamExperimentalMetricRenameMayChangeUnit(t *testing.T) {
+	underlying := teststorage.New(t)
+	wrapped, err := semconv.AwareStorageWithRegistry(underlying, upstreamRegistry(t))
+	require.NoError(t, err)
+
+	appendSeries(t, wrapped, "process.runtime.jvm.system.cpu.load_1m", 1, 7.0)
+
+	q, err := wrapped.Querier(0, 10)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = q.Close() })
+
+	set := q.Select(context.Background(), false, nil,
+		labels.MustNewMatcher(labels.MatchEqual, model.MetricNameLabel, "jvm.system.cpu.load_1m"),
+		labels.MustNewMatcher(labels.MatchEqual, "__semconv_url__", "registry/1.22.0"),
+		labels.MustNewMatcher(labels.MatchEqual, "__schema_url__", "registry/registry.yaml"),
+	)
+	got := collectSeries(t, set)
+	require.Len(t, got, 1, "the upstream experimental rename must retain its historical series: %v", got)
+	for key := range got {
+		require.Contains(t, key, `__name__="jvm.system.cpu.load_1m"`)
+	}
+	requireWarningsContain(t, warningStrings(set.Warnings()), "following the explicit schema rename")
 }

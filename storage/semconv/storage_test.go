@@ -46,18 +46,6 @@ func requireWarningsContain(t *testing.T, warnings []string, substr string) {
 	t.Fatalf("expected a warning containing %q, got %v", substr, warnings)
 }
 
-func metricSemconv(metricName, unit, instrument string) []byte {
-	return fmt.Appendf(nil, `groups:
-  - id: metric.%s
-    type: metric
-    metric_name: %s
-    unit: %q
-    instrument: %s
-    attributes:
-      - ref: http.response.status_code
-`, metricName, metricName, unit, instrument)
-}
-
 // newAwareStorage builds a TestStorage and wraps it with AwareStorage. It
 // returns both so tests can append directly into the underlying storage.
 func newAwareStorage(t *testing.T) (storage.Storage, *teststorage.TestStorage) {
