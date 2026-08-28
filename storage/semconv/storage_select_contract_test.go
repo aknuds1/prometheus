@@ -28,6 +28,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/semconv"
+	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/util/annotations"
 	"github.com/prometheus/prometheus/util/teststorage"
 )
@@ -94,6 +95,8 @@ type contractHintStorage struct {
 	mu               sync.Mutex
 	seriesHints      []*storage.SelectHints
 	chunkHints       []*storage.SelectHints
+	seriesSort       []bool
+	chunkSort        []bool
 	labelNamesHints  []*storage.LabelHints
 	labelValuesHints []*storage.LabelHints
 	seriesNextCalls  int
@@ -130,15 +133,17 @@ func copyRecordedLabelHints(hints *storage.LabelHints) *storage.LabelHints {
 	return &cloned
 }
 
-func (s *contractHintStorage) recordSeries(hints *storage.SelectHints) {
+func (s *contractHintStorage) recordSeries(sortSeries bool, hints *storage.SelectHints) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.seriesSort = append(s.seriesSort, sortSeries)
 	s.seriesHints = append(s.seriesHints, copyRecordedHints(hints))
 }
 
-func (s *contractHintStorage) recordChunk(hints *storage.SelectHints) {
+func (s *contractHintStorage) recordChunk(sortSeries bool, hints *storage.SelectHints) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.chunkSort = append(s.chunkSort, sortSeries)
 	s.chunkHints = append(s.chunkHints, copyRecordedHints(hints))
 }
 
@@ -146,6 +151,12 @@ func (s *contractHintStorage) recordedHints() (series, chunks []*storage.SelectH
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.seriesHints), slices.Clone(s.chunkHints)
+}
+
+func (s *contractHintStorage) recordedSort() (series, chunks []bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.seriesSort), slices.Clone(s.chunkSort)
 }
 
 func (s *contractHintStorage) recordedLabelHints() (names, values []*storage.LabelHints) {
@@ -196,7 +207,7 @@ type contractHintQuerier struct {
 }
 
 func (q *contractHintQuerier) Select(ctx context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-	q.storage.recordSeries(hints)
+	q.storage.recordSeries(sortSeries, hints)
 	return &contractHintSeriesSet{
 		SeriesSet: q.Querier.Select(ctx, sortSeries, hints, matchers...),
 		hints:     copyRecordedHints(hints),
@@ -232,7 +243,7 @@ type contractHintChunkQuerier struct {
 }
 
 func (q *contractHintChunkQuerier) Select(ctx context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.ChunkSeriesSet {
-	q.storage.recordChunk(hints)
+	q.storage.recordChunk(sortSeries, hints)
 	return &contractHintChunkSeriesSet{
 		ChunkSeriesSet: q.ChunkQuerier.Select(ctx, sortSeries, hints, matchers...),
 		hints:          copyRecordedHints(hints),
@@ -745,11 +756,15 @@ func TestSchemaAwareStorageFanOutLimitFailsClosed(t *testing.T) {
 }
 
 func appendContractSeries(t testing.TB, s storage.Storage, count int) {
+	appendContractSeriesForMetric(t, s, "metric.old.00", count)
+}
+
+func appendContractSeriesForMetric(t testing.TB, s storage.Storage, metric string, count int) {
 	t.Helper()
 	app := s.Appender(t.Context())
 	for i := range count {
 		_, err := app.Append(0, labels.FromStrings(
-			model.MetricNameLabel, "metric.old.00",
+			model.MetricNameLabel, metric,
 			"instance", fmt.Sprintf("instance-%05d", i),
 		), 1, float64(i))
 		require.NoError(t, err)
@@ -840,33 +855,170 @@ func TestSchemaAwareSelectRejectsStoredControlLabels(t *testing.T) {
 	}
 }
 
-func BenchmarkSchemaAwareMetricOnlySelect10000(b *testing.B) {
-	underlying := teststorage.New(b)
-	appendContractSeries(b, underlying, 10000)
-	wrapper, err := semconv.AwareStorageWithRegistry(underlying, contractFanOutRegistry(2))
-	require.NoError(b, err)
-	matchers := contractFanOutMatchers(2)
+func TestSchemaAwareIdentitySelectRejectsStoredControlLabels(t *testing.T) {
+	for _, labelName := range []string{"__semconv_url__", "__schema_url__"} {
+		for _, query := range []string{"series", "chunks"} {
+			t.Run(labelName+"/"+query, func(t *testing.T) {
+				underlying := &contractHintStorage{Storage: teststorage.New(t)}
+				appendSeries(t, underlying, "metric.current", 1, 1, "instance", "a", labelName, "stored")
+				wrapper, err := semconv.AwareStorageWithRegistry(underlying, contractFanOutRegistry(1))
+				require.NoError(t, err)
+				matchers := contractFanOutMatchers(1)
+				hints := &storage.SelectHints{
+					Start:             0,
+					End:               10,
+					ProjectionLabels:  []string{"instance"},
+					ProjectionInclude: true,
+				}
+				wantHints := copyRecordedHints(hints)
 
-	b.ReportAllocs()
-	b.ResetTimer()
-	for b.Loop() {
-		q, err := wrapper.Querier(0, 10)
-		if err != nil {
-			b.Fatal(err)
+				if query == "series" {
+					querier, err := wrapper.Querier(0, 10)
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, querier.Close()) })
+					set := querier.Select(t.Context(), false, hints, matchers...)
+					require.False(t, set.Next())
+					require.ErrorContains(t, set.Err(), "encountered stored control label "+labelName)
+					seriesHints, _ := underlying.recordedHints()
+					require.Len(t, seriesHints, 1)
+					require.Nil(t, seriesHints[0].ProjectionLabels)
+					require.False(t, seriesHints[0].ProjectionInclude)
+					require.Equal(t, wantHints, hints)
+					return
+				}
+
+				querier, err := wrapper.ChunkQuerier(0, 10)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, querier.Close()) })
+				set := querier.Select(t.Context(), false, hints, matchers...)
+				require.False(t, set.Next())
+				require.ErrorContains(t, set.Err(), "encountered stored control label "+labelName)
+				_, chunkHints := underlying.recordedHints()
+				require.Len(t, chunkHints, 1)
+				require.Nil(t, chunkHints[0].ProjectionLabels)
+				require.False(t, chunkHints[0].ProjectionInclude)
+				require.Equal(t, wantHints, hints)
+			})
 		}
-		set := q.Select(b.Context(), false, nil, matchers...)
-		count := 0
-		for set.Next() {
-			count++
+	}
+}
+
+func TestSchemaAwareIdentitySelectSanitizesUnsafeHints(t *testing.T) {
+	for _, funcCase := range []struct {
+		name     string
+		function string
+		wantFunc string
+	}{
+		{name: "aggregation", function: "sum"},
+		{name: "metadata only", function: "series", wantFunc: "series"},
+	} {
+		for _, query := range []string{"series", "chunks"} {
+			t.Run(funcCase.name+"/"+query, func(t *testing.T) {
+				underlying := &contractHintStorage{Storage: teststorage.New(t, func(opts *tsdb.Options) {
+					opts.EnableSharding = true
+				})}
+				appendSeries(t, underlying, "metric.current", 1, 1, "instance", "a")
+				appendSeries(t, underlying, "metric.current", 2, 2, "instance", "b")
+				wrapper, err := semconv.AwareStorageWithRegistry(underlying, contractFanOutRegistry(1))
+				require.NoError(t, err)
+				hints := &storage.SelectHints{
+					Start:             1,
+					End:               2,
+					Limit:             1,
+					Step:              3,
+					Func:              funcCase.function,
+					Grouping:          []string{"instance"},
+					By:                true,
+					Range:             4,
+					ShardCount:        1,
+					ShardIndex:        0,
+					DisableTrimming:   true,
+					ProjectionLabels:  []string{"instance"},
+					ProjectionInclude: true,
+				}
+				originalHints := copyRecordedHints(hints)
+				wantHints := copyRecordedHints(hints)
+				wantHints.Func = funcCase.wantFunc
+				wantHints.Grouping = nil
+				wantHints.By = false
+				wantHints.ProjectionLabels = nil
+				wantHints.ProjectionInclude = false
+
+				if query == "series" {
+					querier, err := wrapper.Querier(0, 10)
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, querier.Close()) })
+					set := querier.Select(t.Context(), false, hints, contractFanOutMatchers(1)...)
+					require.True(t, set.Next())
+					require.True(t, set.At().Labels().Has(model.MetricNameLabel))
+					require.False(t, set.At().Labels().Has("__series_hash__"))
+					require.False(t, set.Next())
+					require.NoError(t, set.Err())
+					seriesHints, _ := underlying.recordedHints()
+					require.Equal(t, []*storage.SelectHints{wantHints}, seriesHints)
+					seriesSort, _ := underlying.recordedSort()
+					require.Equal(t, []bool{false}, seriesSort)
+					require.Equal(t, originalHints, hints)
+					return
+				}
+
+				querier, err := wrapper.ChunkQuerier(0, 10)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, querier.Close()) })
+				set := querier.Select(t.Context(), false, hints, contractFanOutMatchers(1)...)
+				require.True(t, set.Next())
+				require.True(t, set.At().Labels().Has(model.MetricNameLabel))
+				require.False(t, set.At().Labels().Has("__series_hash__"))
+				require.False(t, set.Next())
+				require.NoError(t, set.Err())
+				_, chunkHints := underlying.recordedHints()
+				require.Equal(t, []*storage.SelectHints{wantHints}, chunkHints)
+				_, chunkSort := underlying.recordedSort()
+				require.Equal(t, []bool{false}, chunkSort)
+				require.Equal(t, originalHints, hints)
+			})
 		}
-		if err := set.Err(); err != nil {
-			b.Fatal(err)
-		}
-		if err := q.Close(); err != nil {
-			b.Fatal(err)
-		}
-		if count != 10000 {
-			b.Fatalf("got %d series, want 10000", count)
-		}
+	}
+}
+
+func BenchmarkSchemaAwareMetricOnlySelect10000(b *testing.B) {
+	for _, tc := range []struct {
+		name     string
+		variants int
+		metric   string
+	}{
+		{name: "identity", variants: 1, metric: "metric.current"},
+		{name: "rewrite", variants: 2, metric: "metric.old.00"},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			underlying := teststorage.New(b)
+			appendContractSeriesForMetric(b, underlying, tc.metric, 10000)
+			wrapper, err := semconv.AwareStorageWithRegistry(underlying, contractFanOutRegistry(tc.variants))
+			require.NoError(b, err)
+			matchers := contractFanOutMatchers(tc.variants)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				q, err := wrapper.Querier(0, 10)
+				if err != nil {
+					b.Fatal(err)
+				}
+				set := q.Select(b.Context(), false, nil, matchers...)
+				count := 0
+				for set.Next() {
+					count++
+				}
+				if err := set.Err(); err != nil {
+					b.Fatal(err)
+				}
+				if err := q.Close(); err != nil {
+					b.Fatal(err)
+				}
+				if count != 10000 {
+					b.Fatalf("got %d series, want 10000", count)
+				}
+			}
+		})
 	}
 }

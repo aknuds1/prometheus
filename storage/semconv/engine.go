@@ -37,8 +37,10 @@ const (
 )
 
 var (
-	errSchemaExpansion  = errors.New("semconv schema expansion limit exceeded")
-	errMetricNameAnchor = errors.New("schema-aware query requires a non-empty equality matcher on __name__")
+	errSchemaExpansion       = errors.New("semconv schema expansion limit exceeded")
+	errMetricNameAnchor      = errors.New("schema-aware query requires a non-empty equality matcher on __name__")
+	errAmbiguousSchemaRename = errors.New("semconv schema rename is ambiguous")
+	errUnsafeSchemaMatcher   = errors.New("semconv schema matcher cannot be expanded safely")
 )
 
 func schemaExpansionError(kind string) error {
@@ -390,6 +392,651 @@ func walkAttributeRenamesWithBudget(versions []versionRenames, canon string, rev
 	return nil
 }
 
+type orderedTraversalDirection uint8
+
+const (
+	orderedBackward orderedTraversalDirection = iota
+	orderedForward
+)
+
+func (d orderedTraversalDirection) String() string {
+	if d == orderedForward {
+		return "forward"
+	}
+	return "backward"
+}
+
+type orderedRenameState struct {
+	matchers         []*labels.Matcher
+	metric           string
+	translatedLabels map[string]string
+	// Predecessor choices span revisions so unsupported convergence fails closed.
+	pendingMetricPredecessors    map[string]string
+	pendingAttributePredecessors map[string]map[int]string
+}
+
+type orderedVariantAccumulator struct {
+	anchorMetric       string
+	variants           []matcherVariant
+	byMatchers         map[string]int
+	lineageMetricNames map[string]struct{}
+	attributeSlots     int
+	budget             *schemaExpansionBudget
+}
+
+func newOrderedVariantAccumulator(anchorMetric string, budget *schemaExpansionBudget) *orderedVariantAccumulator {
+	return &orderedVariantAccumulator{
+		anchorMetric:       anchorMetric,
+		byMatchers:         map[string]int{},
+		lineageMetricNames: map[string]struct{}{anchorMetric: {}},
+		budget:             budget,
+	}
+}
+
+func (a *orderedVariantAccumulator) observeMetric(metric string) error {
+	if _, exists := a.lineageMetricNames[metric]; exists {
+		return nil
+	}
+	if len(a.lineageMetricNames) >= maxSchemaExpansion {
+		return schemaExpansionError("metric lineage names")
+	}
+	if err := a.budget.reserveWork(1); err != nil {
+		return err
+	}
+	a.lineageMetricNames[metric] = struct{}{}
+	return nil
+}
+
+func (a *orderedVariantAccumulator) add(state orderedRenameState) error {
+	key, err := matcherKeyWithBudget(state.matchers, a.budget)
+	if err != nil {
+		return err
+	}
+	idx, exists := a.byMatchers[key]
+	if !exists {
+		if len(a.variants) >= maxSchemaExpansion {
+			return schemaExpansionError("matcher variants")
+		}
+		translated, err := cloneTranslatedLabelsWithBudget(state.translatedLabels, a.budget)
+		if err != nil {
+			return err
+		}
+		if len(translated) > maxSchemaExpansion-a.attributeSlots {
+			return schemaExpansionError("attribute mappings")
+		}
+		a.attributeSlots += len(translated)
+		a.byMatchers[key] = len(a.variants)
+		a.variants = append(a.variants, matcherVariant{
+			matchers: state.matchers,
+			mapping:  buildLabelMapping(a.anchorMetric, translated),
+		})
+		return nil
+	}
+
+	mapping := a.variants[idx].mapping
+	keys, err := sortedRenameKeysWithBudget(state.translatedLabels, a.budget, "attribute mappings")
+	if err != nil {
+		return err
+	}
+	for _, alias := range keys {
+		canonical := state.translatedLabels[alias]
+		if existing, ok := mapping.translatedLabels[alias]; ok {
+			if existing != canonical {
+				return ambiguousAttributeRenameError(alias, existing, canonical)
+			}
+			continue
+		}
+		if a.attributeSlots >= maxSchemaExpansion {
+			return schemaExpansionError("attribute mappings")
+		}
+		if mapping.translatedLabels == nil {
+			mapping.translatedLabels = map[string]string{}
+		}
+		mapping.translatedLabels[alias] = canonical
+		a.attributeSlots++
+	}
+	return nil
+}
+
+func ambiguousAttributeRenameError(alias, first, second string) error {
+	return fmt.Errorf("%w: attribute %q resolves to both %q and %q", errAmbiguousSchemaRename, alias, first, second)
+}
+
+func sortedRenameKeysWithBudget[V any](m map[string]V, budget *schemaExpansionBudget, kind string) ([]string, error) {
+	if len(m) == 0 {
+		return nil, nil
+	}
+	if len(m) > maxSchemaExpansion {
+		return nil, schemaExpansionError(kind)
+	}
+	if err := budget.reserveWork(uint64(len(m))); err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys, nil
+}
+
+func cloneTranslatedLabelsWithBudget(in map[string]string, budget *schemaExpansionBudget) (map[string]string, error) {
+	keys, err := sortedRenameKeysWithBudget(in, budget, "attribute mappings")
+	if err != nil || len(keys) == 0 {
+		return nil, err
+	}
+	out := make(map[string]string, len(keys))
+	for _, key := range keys {
+		out[key] = in[key]
+	}
+	return out, nil
+}
+
+func addTranslatedLabel(out map[string]string, alias, canonical string) error {
+	if existing, ok := out[alias]; ok {
+		if existing != canonical {
+			return ambiguousAttributeRenameError(alias, existing, canonical)
+		}
+		return nil
+	}
+	if alias == canonical {
+		return nil
+	}
+	if len(out) >= maxSchemaExpansion {
+		return schemaExpansionError("attribute mappings")
+	}
+	out[alias] = canonical
+	return nil
+}
+
+func canonicalLabelName(mapping map[string]string, name string) string {
+	if canonical, ok := mapping[name]; ok {
+		return canonical
+	}
+	return name
+}
+
+func orderedRevisionPartitionWithBudget(revisions []versionRenames, version string, budget *schemaExpansionBudget) (int, error) {
+	target := strings.TrimPrefix(version, "v")
+	for i, revision := range revisions {
+		if err := budget.reserveWork(1); err != nil {
+			return 0, err
+		}
+		if compareSemver(revision.version, target) > 0 {
+			return i, nil
+		}
+	}
+	return len(revisions), nil
+}
+
+// Ordered matcher generation resolves the scoped subset of schema
+// transformations supported by this fan-out layer. Transformations that would
+// require branching fail closed; the later lineage resolver adds that support.
+func generateOrderedMatcherVariantsWithBudget(version string, schema *otelSchema, matchers []*labels.Matcher, metricName string, budget *schemaExpansionBudget) ([]matcherVariant, error) {
+	anchor := orderedRenameState{matchers: matchers, metric: metricName}
+	acc := newOrderedVariantAccumulator(metricName, budget)
+	if err := acc.add(anchor); err != nil {
+		return nil, err
+	}
+	if len(schema.versionRenames) == 0 {
+		return acc.variants, nil
+	}
+
+	partition, err := orderedRevisionPartitionWithBudget(schema.versionRenames, version, budget)
+	if err != nil {
+		return nil, err
+	}
+	if err := walkOrderedRenamesWithBudget(schema.versionRenames[:partition], anchor, orderedBackward, acc, budget); err != nil {
+		return nil, err
+	}
+	if err := walkOrderedRenamesWithBudget(schema.versionRenames[partition:], anchor, orderedForward, acc, budget); err != nil {
+		return nil, err
+	}
+	if err := validateOrderedMetricConvergenceWithBudget(schema.versionRenames, acc.lineageMetricNames, budget); err != nil {
+		return nil, err
+	}
+	return expandOrderedMatcherVariantsWithBudget(acc.variants, matchers, metricName, budget)
+}
+
+func walkOrderedRenamesWithBudget(revisions []versionRenames, anchor orderedRenameState, direction orderedTraversalDirection, acc *orderedVariantAccumulator, budget *schemaExpansionBudget) error {
+	state := anchor
+	for step := range revisions {
+		if err := budget.reserveWork(1); err != nil {
+			return err
+		}
+		revisionIndex := step
+		if direction == orderedBackward {
+			revisionIndex = len(revisions) - 1 - step
+		}
+		revision := revisions[revisionIndex]
+		for changeStep := range revision.changes {
+			if err := budget.reserveWork(1); err != nil {
+				return err
+			}
+			changeIndex := changeStep
+			if direction == orderedBackward {
+				changeIndex = len(revision.changes) - 1 - changeStep
+			}
+			change := revision.changes[changeIndex]
+			var err error
+			switch {
+			case change.metrics != nil:
+				state, err = applyOrderedMetricRenamesWithBudget(state, change.metrics, direction, revision.version, budget)
+				if err == nil {
+					err = acc.observeMetric(state.metric)
+				}
+			case change.attributes != nil:
+				state, err = applyOrderedAttributeRenamesWithBudget(state, change.attributes, direction, revision.version, budget)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if err := acc.add(state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *directedRenames) targets(name string, direction orderedTraversalDirection) (targets []string, renamed, wrongSide bool) {
+	if direction == orderedForward {
+		if target, ok := r.forward[name]; ok {
+			return []string{target}, true, false
+		}
+		_, wrongSide = r.reverse[name]
+		return nil, false, wrongSide
+	}
+	if targets, ok := r.reverse[name]; ok {
+		return targets, true, false
+	}
+	_, wrongSide = r.forward[name]
+	return nil, false, wrongSide
+}
+
+func applyOrderedMetricRenamesWithBudget(state orderedRenameState, renames *directedRenames, direction orderedTraversalDirection, revision string, budget *schemaExpansionBudget) (orderedRenameState, error) {
+	if err := budget.reserveWork(1); err != nil {
+		return orderedRenameState{}, err
+	}
+	targets, renamed, wrongSide := renames.targets(state.metric, direction)
+	if !renamed {
+		if wrongSide {
+			if repeatedOrderedMetricEdge(state, renames, direction) {
+				return state, nil
+			}
+			return orderedRenameState{}, fmt.Errorf("%w: metric %q is on the wrong side of a %s traversal at schema version %s", errAmbiguousSchemaRename, state.metric, direction, revision)
+		}
+		return state, nil
+	}
+	if len(targets) != 1 {
+		return orderedRenameState{}, fmt.Errorf("%w: metric %q has %d predecessors at schema version %s", errAmbiguousSchemaRename, state.metric, len(targets), revision)
+	}
+	target := targets[0]
+	predecessor, destination := state.metric, target
+	if direction == orderedBackward {
+		predecessor, destination = target, state.metric
+	}
+	if err := rememberOrderedMetricPredecessorWithBudget(&state, destination, predecessor, budget); err != nil {
+		return orderedRenameState{}, err
+	}
+	matchers := slices.Clone(state.matchers)
+	for i, matcher := range matchers {
+		if err := budget.reserveWork(1); err != nil {
+			return orderedRenameState{}, err
+		}
+		if matcher.Name == model.MetricNameLabel && matcher.Type == labels.MatchEqual && matcher.Value == state.metric {
+			matchers[i] = labels.MustNewMatcher(matcher.Type, matcher.Name, target)
+		}
+	}
+	state.matchers = matchers
+	state.metric = target
+	return state, nil
+}
+
+func repeatedOrderedMetricEdge(state orderedRenameState, renames *directedRenames, direction orderedTraversalDirection) bool {
+	if direction == orderedBackward {
+		target, ok := renames.forward[state.metric]
+		return ok && state.pendingMetricPredecessors[target] == state.metric
+	}
+	predecessor := state.pendingMetricPredecessors[state.metric]
+	return predecessor != "" && slices.Contains(renames.reverse[state.metric], predecessor)
+}
+
+func rememberOrderedMetricPredecessorWithBudget(state *orderedRenameState, target, predecessor string, budget *schemaExpansionBudget) error {
+	if err := budget.reserveWork(1); err != nil {
+		return err
+	}
+	if state.pendingMetricPredecessors == nil {
+		state.pendingMetricPredecessors = map[string]string{}
+	}
+	if existing, ok := state.pendingMetricPredecessors[target]; ok && existing != predecessor {
+		return fmt.Errorf("%w: metric %q has conflicting ordered predecessors", errAmbiguousSchemaRename, target)
+	}
+	state.pendingMetricPredecessors[target] = predecessor
+	return nil
+}
+
+func validateOrderedMetricConvergenceWithBudget(revisions []versionRenames, lineageMetricNames map[string]struct{}, budget *schemaExpansionBudget) error {
+	predecessors := map[string]map[string]struct{}{}
+	predecessorEntries := 0
+	for _, revision := range revisions {
+		for _, change := range revision.changes {
+			if change.metrics == nil {
+				continue
+			}
+			sources, err := sortedRenameKeysWithBudget(change.metrics.forward, budget, "metric rename mappings")
+			if err != nil {
+				return err
+			}
+			for _, source := range sources {
+				target := change.metrics.forward[source]
+				if _, selected := lineageMetricNames[target]; !selected {
+					continue
+				}
+				byTarget := predecessors[target]
+				if byTarget == nil {
+					byTarget = map[string]struct{}{}
+					predecessors[target] = byTarget
+				}
+				if _, exists := byTarget[source]; exists {
+					continue
+				}
+				if predecessorEntries >= maxSchemaExpansion {
+					return schemaExpansionError("metric predecessor mappings")
+				}
+				byTarget[source] = struct{}{}
+				predecessorEntries++
+				if len(byTarget) > 1 {
+					return fmt.Errorf("%w: metric %q has multiple ordered predecessors at schema version %s", errAmbiguousSchemaRename, target, revision.version)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+type orderedMatcherGroup struct {
+	canonicalName string
+	indexes       []int
+	aliases       []string
+}
+
+func expandOrderedMatcherVariantsWithBudget(observed []matcherVariant, anchorMatchers []*labels.Matcher, anchorMetric string, budget *schemaExpansionBudget) ([]matcherVariant, error) {
+	metricNames := make([]string, 0, len(observed))
+	seenMetrics := map[string]struct{}{}
+	translatedLabels := map[string]string{}
+	for _, variant := range observed {
+		metric, err := extractMetricName(variant.matchers)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seenMetrics[metric]; !exists {
+			if len(metricNames) >= maxSchemaExpansion {
+				return nil, schemaExpansionError("physical metric names")
+			}
+			seenMetrics[metric] = struct{}{}
+			metricNames = append(metricNames, metric)
+		}
+		if variant.mapping == nil {
+			continue
+		}
+		aliases, err := sortedRenameKeysWithBudget(variant.mapping.translatedLabels, budget, "attribute mappings")
+		if err != nil {
+			return nil, err
+		}
+		for _, alias := range aliases {
+			if err := addTranslatedLabel(translatedLabels, alias, variant.mapping.translatedLabels[alias]); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(translatedLabels) == 0 {
+		return observed, nil
+	}
+	if len(anchorMatchers) > maxSchemaExpansion {
+		return nil, schemaExpansionError("canonical matchers")
+	}
+
+	canonicalMatchers := slices.Clone(anchorMatchers)
+	groupsByName := map[string]int{}
+	groups := make([]orderedMatcherGroup, 0, len(anchorMatchers))
+	for i, matcher := range anchorMatchers {
+		if matcher.Name == model.MetricNameLabel {
+			continue
+		}
+		canonical := canonicalLabelName(translatedLabels, matcher.Name)
+		if canonical != matcher.Name {
+			canonicalMatchers[i] = labels.MustNewMatcher(matcher.Type, canonical, matcher.Value)
+		}
+		groupIndex, exists := groupsByName[canonical]
+		if !exists {
+			if len(groups) >= maxSchemaExpansion {
+				return nil, schemaExpansionError("attribute matcher groups")
+			}
+			groupIndex = len(groups)
+			groupsByName[canonical] = groupIndex
+			groups = append(groups, orderedMatcherGroup{canonicalName: canonical})
+		}
+		if len(groups[groupIndex].indexes) >= maxSchemaExpansion {
+			return nil, schemaExpansionError("attribute matcher group")
+		}
+		groups[groupIndex].indexes = append(groups[groupIndex].indexes, i)
+	}
+
+	for groupIndex := range groups {
+		group := &groups[groupIndex]
+		seenAliases := map[string]struct{}{group.canonicalName: {}}
+		group.aliases = append(group.aliases, group.canonicalName)
+		for _, variant := range observed {
+			for _, index := range group.indexes {
+				alias := variant.matchers[index].Name
+				if _, exists := seenAliases[alias]; exists {
+					continue
+				}
+				if len(group.aliases) >= maxSchemaExpansion {
+					return nil, schemaExpansionError("attribute matcher aliases")
+				}
+				seenAliases[alias] = struct{}{}
+				group.aliases = append(group.aliases, alias)
+			}
+		}
+		if len(group.aliases) == 1 {
+			continue
+		}
+		slices.Sort(group.aliases[1:])
+		matchesEmpty := true
+		for _, index := range group.indexes {
+			if !canonicalMatchers[index].Matches("") {
+				matchesEmpty = false
+				break
+			}
+		}
+		if matchesEmpty {
+			return nil, fmt.Errorf("%w: renamed attribute %q matcher conjunction matches an absent label", errUnsafeSchemaMatcher, group.canonicalName)
+		}
+	}
+
+	matcherSets := [][]*labels.Matcher{canonicalMatchers}
+	for _, group := range groups {
+		if len(group.aliases) == 1 {
+			continue
+		}
+		if len(matcherSets) > maxSchemaExpansion/len(group.aliases) {
+			return nil, schemaExpansionError("matcher variants")
+		}
+		next := make([][]*labels.Matcher, 0, len(matcherSets)*len(group.aliases))
+		for _, matcherSet := range matcherSets {
+			for _, alias := range group.aliases {
+				if err := budget.reserveWork(uint64(len(group.indexes))); err != nil {
+					return nil, err
+				}
+				candidate := slices.Clone(matcherSet)
+				for _, index := range group.indexes {
+					matcher := candidate[index]
+					candidate[index] = labels.MustNewMatcher(matcher.Type, alias, matcher.Value)
+				}
+				next = append(next, candidate)
+			}
+		}
+		matcherSets = next
+	}
+
+	if len(metricNames) > maxSchemaExpansion/len(matcherSets) {
+		return nil, schemaExpansionError("matcher variants")
+	}
+	mapping := buildLabelMapping(anchorMetric, translatedLabels)
+	variants := make([]matcherVariant, 0, len(metricNames)*len(matcherSets))
+	seenMatchers := map[string]struct{}{}
+	for _, metric := range metricNames {
+		for _, matcherSet := range matcherSets {
+			if err := budget.reserveWork(uint64(len(matcherSet))); err != nil {
+				return nil, err
+			}
+			candidate := slices.Clone(matcherSet)
+			for i, matcher := range candidate {
+				if matcher.Name == model.MetricNameLabel {
+					candidate[i] = labels.MustNewMatcher(matcher.Type, matcher.Name, metric)
+				}
+			}
+			key, err := matcherKeyWithBudget(candidate, budget)
+			if err != nil {
+				return nil, err
+			}
+			if _, exists := seenMatchers[key]; exists {
+				continue
+			}
+			if len(variants) >= maxSchemaExpansion {
+				return nil, schemaExpansionError("matcher variants")
+			}
+			seenMatchers[key] = struct{}{}
+			variants = append(variants, matcherVariant{
+				matchers:          candidate,
+				mapping:           mapping,
+				canonicalMatchers: canonicalMatchers,
+			})
+		}
+	}
+	return variants, nil
+}
+
+func applyOrderedAttributeRenamesWithBudget(state orderedRenameState, step *attributeRenameStep, direction orderedTraversalDirection, revision string, budget *schemaExpansionBudget) (orderedRenameState, error) {
+	if !step.appliesTo(state.metric) {
+		return state, nil
+	}
+	before := state.translatedLabels
+	out, err := cloneTranslatedLabelsWithBudget(before, budget)
+	if err != nil {
+		return orderedRenameState{}, err
+	}
+	if out == nil {
+		out = map[string]string{}
+	}
+
+	if direction == orderedForward {
+		sources, err := sortedRenameKeysWithBudget(step.renames.forward, budget, "attribute rename mappings")
+		if err != nil {
+			return orderedRenameState{}, err
+		}
+		for _, source := range sources {
+			if err := addTranslatedLabel(out, step.renames.forward[source], canonicalLabelName(before, source)); err != nil {
+				return orderedRenameState{}, err
+			}
+		}
+	} else {
+		targets, err := sortedRenameKeysWithBudget(step.renames.reverse, budget, "attribute rename mappings")
+		if err != nil {
+			return orderedRenameState{}, err
+		}
+		for _, target := range targets {
+			if err := rejectOrderedAttributeConvergenceWithBudget(state, target, step.renames.reverse[target], revision, budget); err != nil {
+				return orderedRenameState{}, err
+			}
+			canonical := canonicalLabelName(before, target)
+			for _, source := range step.renames.reverse[target] {
+				if err := budget.reserveWork(1); err != nil {
+					return orderedRenameState{}, err
+				}
+				if err := addTranslatedLabel(out, source, canonical); err != nil {
+					return orderedRenameState{}, err
+				}
+			}
+		}
+	}
+
+	matchers := state.matchers
+	matchersCloned := false
+	for i, matcher := range state.matchers {
+		if err := budget.reserveWork(1); err != nil {
+			return orderedRenameState{}, err
+		}
+		if matcher.Name == model.MetricNameLabel {
+			continue
+		}
+		targets, renamed, _ := step.renames.targets(matcher.Name, direction)
+		if !renamed {
+			continue
+		}
+		if len(targets) != 1 {
+			return orderedRenameState{}, fmt.Errorf("%w: attribute matcher %q has %d predecessors", errAmbiguousSchemaRename, matcher.Name, len(targets))
+		}
+		if direction == orderedBackward {
+			if err := rememberOrderedAttributePredecessorWithBudget(&state, matcher.Name, targets[0], i, budget); err != nil {
+				return orderedRenameState{}, err
+			}
+		}
+		if !matchersCloned {
+			matchers = slices.Clone(state.matchers)
+			matchersCloned = true
+		}
+		matchers[i] = labels.MustNewMatcher(matcher.Type, targets[0], matcher.Value)
+	}
+	state.matchers = matchers
+	state.translatedLabels = out
+	return state, nil
+}
+
+func rejectOrderedAttributeConvergenceWithBudget(state orderedRenameState, target string, sources []string, revision string, budget *schemaExpansionBudget) error {
+	predecessors := state.pendingAttributePredecessors[target]
+	if len(predecessors) == 0 {
+		return nil
+	}
+	if err := budget.reserveWork(uint64(len(predecessors))); err != nil {
+		return err
+	}
+	if len(sources) == 1 {
+		samePredecessor := true
+		for _, predecessor := range predecessors {
+			if predecessor != sources[0] {
+				samePredecessor = false
+				break
+			}
+		}
+		if samePredecessor {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: attribute matcher %q has multiple ordered predecessors at schema version %s", errAmbiguousSchemaRename, target, revision)
+}
+
+func rememberOrderedAttributePredecessorWithBudget(state *orderedRenameState, target, predecessor string, index int, budget *schemaExpansionBudget) error {
+	if err := budget.reserveWork(1); err != nil {
+		return err
+	}
+	if state.pendingAttributePredecessors == nil {
+		state.pendingAttributePredecessors = map[string]map[int]string{}
+	}
+	predecessors := state.pendingAttributePredecessors[target]
+	if predecessors == nil {
+		predecessors = map[int]string{}
+		state.pendingAttributePredecessors[target] = predecessors
+	}
+	if existing, ok := predecessors[index]; ok && existing != predecessor {
+		return fmt.Errorf("%w: attribute matcher %q has conflicting ordered predecessors", errAmbiguousSchemaRename, target)
+	}
+	predecessors[index] = predecessor
+	return nil
+}
+
 // matcherKey generates a string key for a matcher set to detect duplicates.
 func matcherKey(matchers []*labels.Matcher) string {
 	key, _ := matcherKeyWithBudget(matchers, nil)
@@ -477,6 +1124,8 @@ func applyVersionRenames(matchers []*labels.Matcher, renames versionRenames) []*
 type matcherVariant struct {
 	matchers []*labels.Matcher
 	mapping  *labelMapping
+	// canonicalMatchers revalidates transformed series after alias fan-out.
+	canonicalMatchers []*labels.Matcher
 }
 
 type queryContext struct {
@@ -549,51 +1198,19 @@ func (e *schemaEngine) findMatcherVariants(semconvURL, schemaURL string, origina
 	// Generate schema-version rename variants. In production schemaURL is always
 	// set (classifyMatchers gates fan-out on it); the empty case is reached only
 	// by direct unit tests and falls through to the unmodified matchers.
-	allVariants := [][]*labels.Matcher{matchers}
-	var attrRenames map[string]string
+	variants := []matcherVariant{{matchers: matchers, mapping: buildLabelMapping(metricName, nil)}}
 	if schemaURL != "" {
 		schema, err := e.getOTelSchema(schemaURL)
 		if err != nil {
 			return nil, queryContext{}, err
 		}
 		budget := newSchemaExpansionBudget(e.limits)
-		allVariants, err = generateMatcherVariantsWithBudget(sc.version, &schema, matchers, budget)
+		variants, err = generateOrderedMatcherVariantsWithBudget(sc.version, &schema, matchers, metricName, budget)
 		if err != nil {
 			return nil, queryContext{}, err
 		}
-		// Map each historical attribute alias back to its anchor-version name so
-		// results from older or newer eras merge under the queried version's
-		// labels instead of splitting on the renamed attribute. Recomputed per
-		// query on purpose: it is a pure function of the cached schema/semconv and
-		// costs only a few map ops, far less than the fan-out it feeds.
-		attrRenames, err = buildAttributeRenameMapWithBudget(sc.version, &schema, sc.attributesPerMetric[metricName], budget)
-		if err != nil {
-			return nil, queryContext{}, err
-		}
-	}
-
-	mapping := buildLabelMapping(metricName, attrRenames)
-	variants := make([]matcherVariant, 0, len(allVariants))
-	for _, variant := range allVariants {
-		variants = append(variants, matcherVariant{matchers: variant, mapping: mapping})
 	}
 	return variants, queryContext{}, nil
-}
-
-// transformSeries returns the series labels rewritten to the canonical OTel
-// semantic convention names recorded in q.labelMapping. When no mapping
-// applies, any stray __schema_url__ label is stripped and the labels are
-// returned otherwise unchanged.
-func (*schemaEngine) transformSeries(mapping *labelMapping, originalLabels labels.Labels) (labels.Labels, error) {
-	if mapping != nil {
-		return transformOTelSchemaLabels(originalLabels, mapping)
-	}
-	if originalLabels.Get(schemaURLLabel) == "" {
-		return originalLabels, nil
-	}
-	builder := labels.NewBuilder(originalLabels)
-	builder.Del(schemaURLLabel)
-	return builder.Labels(), nil
 }
 
 // labelMapping rewrites a returned series' names to the queried semantic-
@@ -633,6 +1250,13 @@ func (m *labelMapping) aliasesOf(name string) []string {
 // transformOTelSchemaLabels transforms series labels to the current semantic
 // conventions version using the label mapping.
 func transformOTelSchemaLabels(originalLabels labels.Labels, mapping *labelMapping) (labels.Labels, error) {
+	if !labelMappingChangesLabels(originalLabels, mapping) {
+		return originalLabels, nil
+	}
+	return transformChangedOTelSchemaLabels(originalLabels, mapping)
+}
+
+func transformChangedOTelSchemaLabels(originalLabels labels.Labels, mapping *labelMapping) (labels.Labels, error) {
 	type mappedLabel struct {
 		source string
 		value  string
@@ -673,4 +1297,26 @@ func transformOTelSchemaLabels(originalLabels labels.Labels, mapping *labelMappi
 	}
 	builder.Sort()
 	return builder.Labels(), nil
+}
+
+func labelMappingChangesLabels(lbls labels.Labels, mapping *labelMapping) bool {
+	changed := false
+	lbls.Range(func(label labels.Label) {
+		if changed {
+			return
+		}
+		if isReservedLabel(label.Name) {
+			changed = true
+			return
+		}
+		if mapping == nil {
+			return
+		}
+		if label.Name == model.MetricNameLabel {
+			changed = label.Value != mapping.translatedMetric
+			return
+		}
+		_, changed = mapping.translatedLabels[label.Name]
+	})
+	return changed
 }

@@ -45,7 +45,10 @@ const (
 // can recognise the warning class via errors.Is(err, ErrSchemaWarning).
 var ErrSchemaWarning = fmt.Errorf("%w: semconv", annotations.PromQLWarning)
 
-var errCanonicalSeriesMaterialization = errors.New("semconv canonical series materialization limit exceeded")
+var (
+	errCanonicalSeriesMaterialization = errors.New("semconv canonical series materialization limit exceeded")
+	errSchemaAwareSearchUnsupported   = errors.New("schema-aware search does not support __semconv_url__ or __schema_url__ matchers")
+)
 
 // schemaWarning wraps msg in the ErrSchemaWarning sentinel so the resulting error
 // is classified as a PromQL warning when surfaced through Annotations.
@@ -97,7 +100,11 @@ func (s *awareStorage) Querier(mint, maxt int64) (storage.Querier, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &awareQuerier{Querier: q, engine: s.engine, canonicalSeriesLimit: s.canonicalSeriesLimit}, nil
+	aware := &awareQuerier{Querier: q, engine: s.engine, canonicalSeriesLimit: s.canonicalSeriesLimit}
+	if searcher, ok := q.(storage.Searcher); ok {
+		return &awareSearchQuerier{awareQuerier: aware, searcher: searcher}, nil
+	}
+	return aware, nil
 }
 
 func (s *awareStorage) ChunkQuerier(mint, maxt int64) (storage.ChunkQuerier, error) {
@@ -105,7 +112,60 @@ func (s *awareStorage) ChunkQuerier(mint, maxt int64) (storage.ChunkQuerier, err
 	if err != nil {
 		return nil, err
 	}
-	return &awareChunkQuerier{ChunkQuerier: q, engine: s.engine, canonicalSeriesLimit: s.canonicalSeriesLimit}, nil
+	aware := &awareChunkQuerier{ChunkQuerier: q, engine: s.engine, canonicalSeriesLimit: s.canonicalSeriesLimit}
+	if searcher, ok := q.(storage.Searcher); ok {
+		return &awareSearchChunkQuerier{awareChunkQuerier: aware, searcher: searcher}, nil
+	}
+	return aware, nil
+}
+
+type awareSearchQuerier struct {
+	*awareQuerier
+	searcher storage.Searcher
+}
+
+type awareSearchChunkQuerier struct {
+	*awareChunkQuerier
+	searcher storage.Searcher
+}
+
+func (q *awareSearchQuerier) SearchLabelNames(ctx context.Context, hints *storage.SearchHints, matchers ...*labels.Matcher) storage.SearchResultSet {
+	return searchLabelNames(ctx, q.searcher, hints, matchers)
+}
+
+func (q *awareSearchQuerier) SearchLabelValues(ctx context.Context, name string, hints *storage.SearchHints, matchers ...*labels.Matcher) storage.SearchResultSet {
+	return searchLabelValues(ctx, q.searcher, name, hints, matchers)
+}
+
+func (q *awareSearchChunkQuerier) SearchLabelNames(ctx context.Context, hints *storage.SearchHints, matchers ...*labels.Matcher) storage.SearchResultSet {
+	return searchLabelNames(ctx, q.searcher, hints, matchers)
+}
+
+func (q *awareSearchChunkQuerier) SearchLabelValues(ctx context.Context, name string, hints *storage.SearchHints, matchers ...*labels.Matcher) storage.SearchResultSet {
+	return searchLabelValues(ctx, q.searcher, name, hints, matchers)
+}
+
+func searchLabelNames(ctx context.Context, searcher storage.Searcher, hints *storage.SearchHints, matchers []*labels.Matcher) storage.SearchResultSet {
+	if hasReservedMatcher(matchers) {
+		return storage.ErrSearchResultSet(errSchemaAwareSearchUnsupported)
+	}
+	return searcher.SearchLabelNames(ctx, hints, matchers...)
+}
+
+func searchLabelValues(ctx context.Context, searcher storage.Searcher, name string, hints *storage.SearchHints, matchers []*labels.Matcher) storage.SearchResultSet {
+	if hasReservedMatcher(matchers) {
+		return storage.ErrSearchResultSet(errSchemaAwareSearchUnsupported)
+	}
+	return searcher.SearchLabelValues(ctx, name, hints, matchers...)
+}
+
+func hasReservedMatcher(matchers []*labels.Matcher) bool {
+	for _, matcher := range matchers {
+		if isReservedLabel(matcher.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyMatchers inspects matchers for the reserved __semconv_url__ and
@@ -165,7 +225,7 @@ func variantErrorWarning(matchers []*labels.Matcher, err error) string {
 }
 
 func isHardVariantError(err error) bool {
-	return errors.Is(err, errMetricNameAnchor) || errors.Is(err, errSchemaExpansion)
+	return errors.Is(err, errMetricNameAnchor) || errors.Is(err, errSchemaExpansion) || errors.Is(err, errAmbiguousSchemaRename) || errors.Is(err, errUnsafeSchemaMatcher)
 }
 
 func storageFanOutError(kind string, jobs int) error {
@@ -256,14 +316,15 @@ func cloneSelectHints(hints *storage.SelectHints) *storage.SelectHints {
 	return &cloned
 }
 
-func variantSelectHints(hints *storage.SelectHints, resort, sharded bool) *storage.SelectHints {
+func variantSelectHints(hints *storage.SelectHints, resort, sharded, postFilter bool) *storage.SelectHints {
 	cloned := cloneSelectHints(hints)
 	if cloned == nil {
 		return nil
 	}
 
-	// A physical projection cannot preserve canonical label aliases or a
-	// canonical __series_hash__, so transformed reads must fetch full labels.
+	// A physical projection cannot preserve canonical label aliases, a
+	// canonical __series_hash__, or reserved-label validation, so schema-aware
+	// reads that inspect labels must fetch the full label set.
 	cloned.ProjectionLabels = nil
 	cloned.ProjectionInclude = false
 	// Aggregation hints refer to canonical label names and cannot be applied to
@@ -274,7 +335,7 @@ func variantSelectHints(hints *storage.SelectHints, resort, sharded bool) *stora
 	}
 	cloned.Grouping = nil
 	cloned.By = false
-	if resort || sharded {
+	if resort || sharded || postFilter {
 		cloned.Limit = 0
 	}
 	if sharded {
@@ -347,6 +408,19 @@ func (q *awareQuerier) Select(ctx context.Context, sortSeries bool, hints *stora
 	if err := ctx.Err(); err != nil {
 		return annotateSeriesSet(storage.ErrSeriesSet(err), qCtx.warnings...)
 	}
+	if len(variants) == 1 && identityMatcherVariant(variants[0]) {
+		variant := variants[0]
+		variantHints := variantSelectHints(hints, false, false, len(variant.canonicalMatchers) > 0)
+		set := storage.SeriesSet(&awareSeriesSet{
+			SeriesSet:         q.Querier.Select(ctx, sortSeries, variantHints, slices.Clone(variant.matchers)...),
+			mapping:           variant.mapping,
+			canonicalMatchers: variant.canonicalMatchers,
+		})
+		if len(qCtx.warnings) > 0 {
+			set = annotateSeriesSet(set, qCtx.warnings...)
+		}
+		return set
+	}
 	if len(variants) > maxStorageFanOut {
 		err := storageFanOutError("series fan-out", len(variants))
 		return annotateSeriesSet(storage.ErrSeriesSet(err), qCtx.warnings...)
@@ -371,11 +445,16 @@ func (q *awareQuerier) Select(ctx context.Context, sortSeries bool, hints *stora
 		}
 		matchersCopy := slices.Clone(variant.matchers)
 		resort := mappingNeedsResort(variant.mapping)
-		variantHints := variantSelectHints(hints, resort, shardCount > 0)
+		postFilter := len(variant.canonicalMatchers) > 0
+		variantHints := variantSelectHints(hints, resort, shardCount > 0, postFilter)
 		awareSet := &awareSeriesSet{
-			SeriesSet: q.Querier.Select(ctx, true, variantHints, matchersCopy...),
-			engine:    q.engine,
-			mapping:   variant.mapping,
+			SeriesSet:         q.Querier.Select(ctx, true, variantHints, matchersCopy...),
+			mapping:           variant.mapping,
+			canonicalMatchers: variant.canonicalMatchers,
+			alwaysTransform:   metricMappingChanges(variant),
+		}
+		if postFilter {
+			awareSet.budget = budget
 		}
 		if !resort {
 			seriesSets[i] = awareSet
@@ -454,6 +533,19 @@ func (q *awareChunkQuerier) Select(ctx context.Context, sortSeries bool, hints *
 	if err := ctx.Err(); err != nil {
 		return annotateChunkSeriesSet(storage.ErrChunkSeriesSet(err), qCtx.warnings...)
 	}
+	if len(variants) == 1 && identityMatcherVariant(variants[0]) {
+		variant := variants[0]
+		variantHints := variantSelectHints(hints, false, false, len(variant.canonicalMatchers) > 0)
+		set := storage.ChunkSeriesSet(&awareChunkSeriesSet{
+			ChunkSeriesSet:    q.ChunkQuerier.Select(ctx, sortSeries, variantHints, slices.Clone(variant.matchers)...),
+			mapping:           variant.mapping,
+			canonicalMatchers: variant.canonicalMatchers,
+		})
+		if len(qCtx.warnings) > 0 {
+			set = annotateChunkSeriesSet(set, qCtx.warnings...)
+		}
+		return set
+	}
 	if len(variants) > maxStorageFanOut {
 		err := storageFanOutError("chunk series fan-out", len(variants))
 		return annotateChunkSeriesSet(storage.ErrChunkSeriesSet(err), qCtx.warnings...)
@@ -477,11 +569,16 @@ func (q *awareChunkQuerier) Select(ctx context.Context, sortSeries bool, hints *
 		}
 		matchersCopy := slices.Clone(variant.matchers)
 		resort := mappingNeedsResort(variant.mapping)
-		variantHints := variantSelectHints(hints, resort, shardCount > 0)
+		postFilter := len(variant.canonicalMatchers) > 0
+		variantHints := variantSelectHints(hints, resort, shardCount > 0, postFilter)
 		awareSet := &awareChunkSeriesSet{
-			ChunkSeriesSet: q.ChunkQuerier.Select(ctx, true, variantHints, matchersCopy...),
-			engine:         q.engine,
-			mapping:        variant.mapping,
+			ChunkSeriesSet:    q.ChunkQuerier.Select(ctx, true, variantHints, matchersCopy...),
+			mapping:           variant.mapping,
+			canonicalMatchers: variant.canonicalMatchers,
+			alwaysTransform:   metricMappingChanges(variant),
+		}
+		if postFilter {
+			awareSet.budget = budget
 		}
 		if !resort {
 			chunkSeriesSets[i] = awareSet
@@ -947,6 +1044,21 @@ func mappingNeedsResort(mapping *labelMapping) bool {
 	return mapping != nil && len(mapping.translatedLabels) > 0
 }
 
+func identityMatcherVariant(variant matcherVariant) bool {
+	if variant.mapping == nil || len(variant.mapping.translatedLabels) > 0 || len(variant.canonicalMatchers) > 0 {
+		return false
+	}
+	return !metricMappingChanges(variant)
+}
+
+func metricMappingChanges(variant matcherVariant) bool {
+	if variant.mapping == nil {
+		return false
+	}
+	metricName, err := extractMetricName(variant.matchers)
+	return err != nil || metricName != variant.mapping.translatedMetric
+}
+
 // sortAndChain returns in sorted by labels, with each run of series carrying
 // identical labels collapsed into one via merge.
 //
@@ -1178,12 +1290,22 @@ func (s *sortedChunkSeriesSet) At() storage.ChunkSeries {
 	return s.series[s.idx]
 }
 
+func matchesCanonicalMatchers(lbls labels.Labels, matchers []*labels.Matcher) bool {
+	for _, matcher := range matchers {
+		if !matcher.Matches(lbls.Get(matcher.Name)) {
+			return false
+		}
+	}
+	return true
+}
+
 type awareSeriesSet struct {
 	storage.SeriesSet
 
-	mapping *labelMapping
-	engine  *schemaEngine
-	budget  *canonicalSeriesBudget
+	mapping           *labelMapping
+	canonicalMatchers []*labels.Matcher
+	alwaysTransform   bool
+	budget            *canonicalSeriesBudget
 
 	at  storage.Series
 	err error
@@ -1197,27 +1319,36 @@ func (s *awareSeriesSet) Next() bool {
 	if s.Err() != nil {
 		return false
 	}
-	if !s.SeriesSet.Next() {
-		return false
-	}
-	if s.budget != nil {
-		if err := s.budget.take(); err != nil {
-			s.err = err
+	for s.SeriesSet.Next() {
+		if s.budget != nil {
+			if err := s.budget.take(); err != nil {
+				s.err = err
+				return false
+			}
+		}
+		at := s.SeriesSet.At()
+		if name, ok := storedReservedLabel(at.Labels()); ok {
+			s.err = fmt.Errorf("schema-aware query encountered stored control label %s", name)
 			return false
 		}
+		result := at
+		lbls := at.Labels()
+		if s.alwaysTransform || labelMappingChangesLabels(lbls, s.mapping) {
+			transformed, err := transformChangedOTelSchemaLabels(lbls, s.mapping)
+			if err != nil {
+				s.err = err
+				return false
+			}
+			lbls = transformed
+			result = &awareSeries{Series: at, lbls: lbls}
+		}
+		if !matchesCanonicalMatchers(lbls, s.canonicalMatchers) {
+			continue
+		}
+		s.at = result
+		return true
 	}
-	at := s.SeriesSet.At()
-	if name, ok := storedReservedLabel(at.Labels()); ok {
-		s.err = fmt.Errorf("schema-aware query encountered stored control label %s", name)
-		return false
-	}
-	lbls, err := s.engine.transformSeries(s.mapping, at.Labels())
-	if err != nil {
-		s.err = err
-		return false
-	}
-	s.at = &awareSeries{Series: at, lbls: lbls}
-	return true
+	return false
 }
 
 func (s *awareSeriesSet) Err() error {
@@ -1237,9 +1368,10 @@ func (s *awareSeries) Labels() labels.Labels {
 type awareChunkSeriesSet struct {
 	storage.ChunkSeriesSet
 
-	mapping *labelMapping
-	engine  *schemaEngine
-	budget  *canonicalSeriesBudget
+	mapping           *labelMapping
+	canonicalMatchers []*labels.Matcher
+	alwaysTransform   bool
+	budget            *canonicalSeriesBudget
 
 	at  storage.ChunkSeries
 	err error
@@ -1253,27 +1385,36 @@ func (s *awareChunkSeriesSet) Next() bool {
 	if s.Err() != nil {
 		return false
 	}
-	if !s.ChunkSeriesSet.Next() {
-		return false
-	}
-	if s.budget != nil {
-		if err := s.budget.take(); err != nil {
-			s.err = err
+	for s.ChunkSeriesSet.Next() {
+		if s.budget != nil {
+			if err := s.budget.take(); err != nil {
+				s.err = err
+				return false
+			}
+		}
+		at := s.ChunkSeriesSet.At()
+		if name, ok := storedReservedLabel(at.Labels()); ok {
+			s.err = fmt.Errorf("schema-aware query encountered stored control label %s", name)
 			return false
 		}
+		result := at
+		lbls := at.Labels()
+		if s.alwaysTransform || labelMappingChangesLabels(lbls, s.mapping) {
+			transformed, err := transformChangedOTelSchemaLabels(lbls, s.mapping)
+			if err != nil {
+				s.err = err
+				return false
+			}
+			lbls = transformed
+			result = &awareChunkSeries{ChunkSeries: at, lbls: lbls}
+		}
+		if !matchesCanonicalMatchers(lbls, s.canonicalMatchers) {
+			continue
+		}
+		s.at = result
+		return true
 	}
-	at := s.ChunkSeriesSet.At()
-	if name, ok := storedReservedLabel(at.Labels()); ok {
-		s.err = fmt.Errorf("schema-aware query encountered stored control label %s", name)
-		return false
-	}
-	lbls, err := s.engine.transformSeries(s.mapping, at.Labels())
-	if err != nil {
-		s.err = err
-		return false
-	}
-	s.at = &awareChunkSeries{ChunkSeries: at, lbls: lbls}
-	return true
+	return false
 }
 
 func (s *awareChunkSeriesSet) Err() error {
