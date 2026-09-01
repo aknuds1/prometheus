@@ -455,6 +455,19 @@ metrics at that transformation's position. Fan-out emits schema revision
 boundaries rather than inventing combinations between changes in one revision;
 valid converging histories branch deterministically within the resolver bounds.
 
+### Errors
+
+The query fails before issuing a storage read when ordered transformations prove
+that a physical name cannot be selected safely across the full query time range:
+
+- **A metric name is reused by a disconnected lineage.** A name renamed away is
+  later claimed by another metric without a rename path connecting their
+  identities. Prometheus cannot separate the two eras in storage, so neither the
+  reused name nor a lineage that uses it as a historical alias is selected.
+- **An attribute alias is also a distinct attribute identity.** Rewriting that
+  physical label would merge values from two attributes that used the same name
+  in different schema eras.
+
 ### Warnings
 
 The query returns a safe partial or direct result in each case below, with a
@@ -462,7 +475,8 @@ warning attached:
 
 - **The schema crosses a metric lifecycle boundary.** Ordered transformations
   encounter a name only on the side where it cannot belong to the queried metric,
-  usually because a retired name was reused. That branch is not followed.
+  without enough transformation evidence to prove that another identity claimed
+  it. That branch is not followed.
 - **An attribute alias has conflicting destinations.** The same historical label
   name resolves to more than one anchor-version name. Prometheus leaves that label
   unmodified instead of merging distinct attributes.

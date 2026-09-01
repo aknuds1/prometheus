@@ -224,7 +224,7 @@ func variantErrorWarning(matchers []*labels.Matcher, err error) string {
 }
 
 func isHardVariantError(err error) bool {
-	return errors.Is(err, errMetricNameAnchor) || errors.Is(err, errSchemaExpansion) || errors.Is(err, errUnsafeSchemaMatcher)
+	return errors.Is(err, errMetricNameAnchor) || errors.Is(err, errSchemaExpansion) || errors.Is(err, errAmbiguousSchemaRename) || errors.Is(err, errUnsafeSchemaMatcher)
 }
 
 func storageFanOutError(kind string, jobs int) error {

@@ -37,8 +37,9 @@ const (
 )
 
 var (
-	errSchemaExpansion     = errors.New("semconv schema expansion limit exceeded")
-	errUnsafeSchemaMatcher = errors.New("semconv schema matcher cannot be expanded safely")
+	errSchemaExpansion       = errors.New("semconv schema expansion limit exceeded")
+	errAmbiguousSchemaRename = errors.New("semconv schema rename is ambiguous")
+	errUnsafeSchemaMatcher   = errors.New("semconv schema matcher cannot be expanded safely")
 )
 
 func schemaExpansionError(kind string) error {
@@ -105,6 +106,269 @@ func (b *schemaExpansionBudget) remainingKeyBytes() uint64 {
 	return b.limits.keyBytes - b.keyBytes
 }
 
+// metricOwnershipTracker follows metric identities through schema-version
+// boundaries. Identity unions model explicit convergence, while reused records
+// a disconnected identity claiming a previously occupied surface name.
+type metricOwnershipTracker struct {
+	budget *schemaExpansionBudget
+
+	parent     []int
+	size       []uint32
+	occupied   map[string]int
+	firstOwner map[string]int
+	reused     map[string]struct{}
+}
+
+func newMetricOwnershipTracker(budget *schemaExpansionBudget) *metricOwnershipTracker {
+	return &metricOwnershipTracker{
+		budget:     budget,
+		occupied:   map[string]int{},
+		firstOwner: map[string]int{},
+		reused:     map[string]struct{}{},
+	}
+}
+
+func (t *metricOwnershipTracker) newIdentity() (int, error) {
+	if err := t.budget.reserveWork(1); err != nil {
+		return 0, err
+	}
+	id := len(t.parent)
+	t.parent = append(t.parent, id)
+	t.size = append(t.size, 1)
+	return id, nil
+}
+
+func (t *metricOwnershipTracker) root(id int) (int, error) {
+	for t.parent[id] != id {
+		if err := t.budget.reserveWork(1); err != nil {
+			return 0, err
+		}
+		id = t.parent[id]
+	}
+	return id, nil
+}
+
+func (t *metricOwnershipTracker) merge(a, b int) (int, error) {
+	a, err := t.root(a)
+	if err != nil {
+		return 0, err
+	}
+	b, err = t.root(b)
+	if err != nil {
+		return 0, err
+	}
+	if a == b {
+		return a, nil
+	}
+	if t.size[a] < t.size[b] || (t.size[a] == t.size[b] && b < a) {
+		a, b = b, a
+	}
+	t.parent[b] = a
+	t.size[a] += t.size[b]
+	return a, nil
+}
+
+func (t *metricOwnershipTracker) recordBoundary(name string, identity int) error {
+	identity, err := t.root(identity)
+	if err != nil {
+		return err
+	}
+	first, exists := t.firstOwner[name]
+	if !exists {
+		t.firstOwner[name] = identity
+		return nil
+	}
+	first, err = t.root(first)
+	if err != nil {
+		return err
+	}
+	if first != identity {
+		t.reused[name] = struct{}{}
+	}
+	return nil
+}
+
+func sortedMapKeysWithBudget[V any](m map[string]V, budget *schemaExpansionBudget) ([]string, error) {
+	if err := budget.reserveWork(uint64(len(m))); err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys, nil
+}
+
+// reusedMetricNamesWithBudget reports surface names that distinct metric
+// identities occupy at schema-version boundaries. Changes within one revision
+// remain ordered, but each individual rename map is applied atomically.
+func reusedMetricNamesWithBudget(revisions []schemaRevision, budget *schemaExpansionBudget) (map[string]struct{}, error) {
+	tracker := newMetricOwnershipTracker(budget)
+	for _, revision := range revisions {
+		if err := budget.reserveWork(1); err != nil {
+			return nil, err
+		}
+		targets, err := metricTargetsByFirstChangeWithBudget(revision, budget)
+		if err != nil {
+			return nil, err
+		}
+
+		seeded := map[string]int{}
+		for changeIndex, change := range revision.changes {
+			if change.metricRenames == nil {
+				continue
+			}
+			sources, err := sortedMapKeysWithBudget(change.metricRenames.forward, budget)
+			if err != nil {
+				return nil, err
+			}
+			for _, source := range sources {
+				if _, exists := tracker.occupied[source]; exists {
+					continue
+				}
+				if producedByEarlierChange(targets, changeIndex, source) {
+					continue
+				}
+				// Schemas may repeat a retired spelling as a compatibility input in a
+				// later convergence. Reuse its known identity rather than inventing one.
+				identity, known := tracker.firstOwner[source]
+				if known {
+					identity, err = tracker.root(identity)
+					if err != nil {
+						return nil, err
+					}
+				} else {
+					identity, err = tracker.newIdentity()
+					if err != nil {
+						return nil, err
+					}
+				}
+				tracker.occupied[source] = identity
+				seeded[source] = identity
+			}
+		}
+		seededNames, err := sortedMapKeysWithBudget(seeded, budget)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range seededNames {
+			if err := tracker.recordBoundary(name, seeded[name]); err != nil {
+				return nil, err
+			}
+		}
+
+		touched := map[string]struct{}{}
+		for _, change := range revision.changes {
+			if change.metricRenames == nil {
+				continue
+			}
+			if err := tracker.applyRenameMap(change.metricRenames, touched); err != nil {
+				return nil, err
+			}
+		}
+		touchedNames, err := sortedMapKeysWithBudget(touched, budget)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range touchedNames {
+			identity, exists := tracker.occupied[name]
+			if !exists {
+				continue
+			}
+			if err := tracker.recordBoundary(name, identity); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return tracker.reused, nil
+}
+
+func metricTargetsByFirstChangeWithBudget(revision schemaRevision, budget *schemaExpansionBudget) (map[string]int, error) {
+	targets := map[string]int{}
+	for i, change := range revision.changes {
+		if err := budget.reserveWork(1); err != nil {
+			return nil, err
+		}
+		if change.metricRenames == nil {
+			continue
+		}
+		names, err := sortedMapKeysWithBudget(change.metricRenames.reverse, budget)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range names {
+			if _, exists := targets[name]; !exists {
+				targets[name] = i
+			}
+		}
+	}
+	return targets, nil
+}
+
+func schemaHasAttributeRenamesWithBudget(revisions []schemaRevision, budget *schemaExpansionBudget) (bool, error) {
+	for _, revision := range revisions {
+		for _, change := range revision.changes {
+			if err := budget.reserveWork(1); err != nil {
+				return false, err
+			}
+			if change.attributeRenames != nil {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (t *metricOwnershipTracker) applyRenameMap(renames *directedRenames, touched map[string]struct{}) error {
+	sources, err := sortedMapKeysWithBudget(renames.forward, t.budget)
+	if err != nil {
+		return err
+	}
+	incoming := map[string][]int{}
+	stationaryTargets := map[string]int{}
+	for _, source := range sources {
+		target := renames.forward[source]
+		touched[source] = struct{}{}
+		touched[target] = struct{}{}
+		identity, exists := t.occupied[source]
+		if exists {
+			incoming[target] = append(incoming[target], identity)
+		}
+		if _, targetMoves := renames.forward[target]; targetMoves {
+			continue
+		}
+		if identity, occupied := t.occupied[target]; occupied {
+			stationaryTargets[target] = identity
+		}
+	}
+	for _, source := range sources {
+		delete(t.occupied, source)
+	}
+	targetNames, err := sortedMapKeysWithBudget(incoming, t.budget)
+	if err != nil {
+		return err
+	}
+	for _, target := range targetNames {
+		identities := incoming[target]
+		identity := identities[0]
+		for _, other := range identities[1:] {
+			identity, err = t.merge(identity, other)
+			if err != nil {
+				return err
+			}
+		}
+		if stationary, exists := stationaryTargets[target]; exists {
+			identity, err = t.merge(identity, stationary)
+			if err != nil {
+				return err
+			}
+		}
+		t.occupied[target] = identity
+	}
+	return nil
+}
+
 // registrySource provides the raw bytes of registry files addressed by their
 // registry/<name> path. The embedded registry (embed.FS) satisfies it directly;
 // an operator-provided registry is adapted to it via newRegistrySource.
@@ -116,17 +380,48 @@ type schemaEngine struct {
 	registry registrySource
 	limits   schemaExpansionLimits
 
-	otelSchemaCache *staticCache[otelSchema]
-	semconvCache    *staticCache[semconv]
+	otelSchemaCache   *staticCache[otelSchema]
+	semconvCache      *staticCache[semconv]
+	schemaSafetyCache *staticCache[schemaSafetyAnalysis]
 }
 
 func newSchemaEngine(registry registrySource) *schemaEngine {
 	return &schemaEngine{
-		registry:        registry,
-		limits:          productionSchemaExpansionLimits(),
-		otelSchemaCache: newStaticCache[otelSchema](),
-		semconvCache:    newStaticCache[semconv](),
+		registry:          registry,
+		limits:            productionSchemaExpansionLimits(),
+		otelSchemaCache:   newStaticCache[otelSchema](),
+		semconvCache:      newStaticCache[semconv](),
+		schemaSafetyCache: newStaticCache[schemaSafetyAnalysis](),
 	}
+}
+
+type schemaSafetyAnalysis struct {
+	reused              map[string]struct{}
+	hasAttributeRenames bool
+	work                uint64
+	err                 error
+}
+
+// schemaSafetyAnalysis returns immutable lifecycle metadata for one cached
+// schema. The work remains charged to every query even when the scan is cached.
+func (e *schemaEngine) schemaSafetyAnalysis(url string, schema *otelSchema) schemaSafetyAnalysis {
+	if analysis, ok := e.schemaSafetyCache.get(url); ok {
+		return analysis
+	}
+	budget := newSchemaExpansionBudget(productionSchemaExpansionLimits())
+	reused, err := reusedMetricNamesWithBudget(schema.revisions, budget)
+	hasAttributeRenames := false
+	if err == nil {
+		hasAttributeRenames, err = schemaHasAttributeRenamesWithBudget(schema.revisions, budget)
+	}
+	analysis := schemaSafetyAnalysis{
+		reused:              reused,
+		hasAttributeRenames: hasAttributeRenames,
+		work:                budget.work,
+		err:                 err,
+	}
+	e.schemaSafetyCache.set(url, analysis)
+	return analysis
 }
 
 // renameValidator carries traversal diagnostics. Semconv-backed consistency
@@ -328,17 +623,34 @@ type attributeAlias struct {
 }
 
 type variantAccumulator struct {
-	anchorMetric   string
-	canonicalAttrs map[string]struct{}
-	variants       []matcherVariant
-	byMatchers     map[string]int
-	conflicts      []map[string]struct{}
-	validator      *renameValidator
+	anchorMetric string
+	variants     []matcherVariant
+	byMatchers   map[string]int
+
+	attributeIdentities map[string]map[string]struct{}
+	attributeAliases    map[string]map[string]string
+	attributeParents    map[string]map[string]string
+	attributeSizes      map[string]map[string]uint32
+	trackAttrIdentities bool
+	ambiguousMetrics    map[string]struct{}
+	conflicts           []map[string]struct{}
+	validator           *renameValidator
+
 	budget         *schemaExpansionBudget
 	attributeSlots int
 }
 
-func newVariantAccumulatorWithBudget(anchorMetric string, canonicalAttrs []string, rv *renameValidator, budget *schemaExpansionBudget) (*variantAccumulator, error) {
+func newVariantAccumulatorWithBudget(anchorMetric string, canonicalAttrs []string, rv *renameValidator, trackAttrIdentities bool, budget *schemaExpansionBudget) (*variantAccumulator, error) {
+	acc := &variantAccumulator{
+		anchorMetric:        anchorMetric,
+		byMatchers:          map[string]int{},
+		trackAttrIdentities: trackAttrIdentities,
+		validator:           rv,
+		budget:              budget,
+	}
+	if !trackAttrIdentities {
+		return acc, nil
+	}
 	canonical := make(map[string]struct{}, min(len(canonicalAttrs), maxSchemaExpansion))
 	for _, name := range canonicalAttrs {
 		if err := budget.reserveWork(1); err != nil {
@@ -346,19 +658,24 @@ func newVariantAccumulatorWithBudget(anchorMetric string, canonicalAttrs []strin
 		}
 		canonical[name] = struct{}{}
 	}
-	return &variantAccumulator{
-		anchorMetric:   anchorMetric,
-		canonicalAttrs: canonical,
-		byMatchers:     map[string]int{},
-		validator:      rv,
-		budget:         budget,
-	}, nil
+	acc.attributeIdentities = map[string]map[string]struct{}{anchorMetric: canonical}
+	acc.attributeAliases = map[string]map[string]string{}
+	acc.attributeParents = map[string]map[string]string{anchorMetric: {}}
+	acc.attributeSizes = map[string]map[string]uint32{anchorMetric: {}}
+	for name := range canonical {
+		acc.attributeParents[anchorMetric][name] = name
+		acc.attributeSizes[anchorMetric][name] = 1
+	}
+	return acc, nil
 }
 
 // add folds states with identical underlying matcher queries together. Their
-// non-conflicting label aliases can be normalised by one query; a conflicting
-// alias is left untouched and reported rather than mapped arbitrarily.
+// compatible label aliases can be normalised by one query. A physical metric
+// or attribute name owned by distinct identities makes the whole query unsafe.
 func (a *variantAccumulator) add(state lineageState) error {
+	if _, ambiguous := a.ambiguousMetrics[state.metric]; ambiguous {
+		return fmt.Errorf("%w: metric name %q belongs to distinct schema lineages", errAmbiguousSchemaRename, state.metric)
+	}
 	key, err := matcherKeyWithBudget(state.matchers, a.budget)
 	if err != nil {
 		return err
@@ -376,17 +693,109 @@ func (a *variantAccumulator) add(state lineageState) error {
 		})
 		a.conflicts = append(a.conflicts, map[string]struct{}{})
 	}
-	return a.mergeAttributeAliases(idx, state.attrs)
+	return a.mergeAttributeAliases(idx, state.metric, state.attrs)
 }
 
-func (a *variantAccumulator) mergeAttributeAliases(idx int, lineage attributeLineage) error {
-	mapping := a.variants[idx].mapping
-	if mapping.translatedLabels == nil {
-		mapping.translatedLabels = map[string]string{}
-	}
+func (a *variantAccumulator) mergeAttributeAliases(idx int, metric string, lineage attributeLineage) error {
 	aliases, err := attributeAliasesWithBudget(lineage, a.budget)
 	if err != nil {
 		return err
+	}
+
+	if a.trackAttrIdentities {
+		owners, err := resolvedAttributeOwnersWithBudget(lineage, a.budget)
+		if err != nil {
+			return err
+		}
+
+		knownIdentities := a.attributeIdentities[metric]
+		knownAliases := a.attributeAliases[metric]
+		stagedIdentities := make(map[string]struct{}, len(owners))
+		currentOwners := make(map[string][]string, len(owners))
+		for _, owner := range owners {
+			if err := a.ensureAttributeIdentity(metric, owner.canonical); err != nil {
+				return err
+			}
+			stagedIdentities[owner.canonical] = struct{}{}
+			currentOwners[owner.current] = append(currentOwners[owner.current], owner.canonical)
+		}
+
+		// Co-occupancy at one schema boundary is an explicit convergence, not name
+		// reuse. Merge those identities before comparing the boundary with history.
+		currentNames, err := sortedMapKeysWithBudget(currentOwners, a.budget)
+		if err != nil {
+			return err
+		}
+		for _, current := range currentNames {
+			identities := currentOwners[current]
+			for _, identity := range identities[1:] {
+				if err := a.mergeAttributeIdentities(metric, identities[0], identity); err != nil {
+					return err
+				}
+			}
+		}
+
+		stagedNames, err := sortedMapKeysWithBudget(stagedIdentities, a.budget)
+		if err != nil {
+			return err
+		}
+		for _, identity := range stagedNames {
+			if canonical, exists := knownAliases[identity]; exists {
+				same, err := a.sameAttributeIdentity(metric, identity, canonical)
+				if err != nil {
+					return err
+				}
+				if same {
+					continue
+				}
+				return ambiguousAttributeRenameError(metric, identity, identity, canonical)
+			}
+		}
+		for _, pair := range aliases {
+			if err := a.budget.reserveWork(1); err != nil {
+				return err
+			}
+			if _, identity := knownIdentities[pair.alias]; identity {
+				same, err := a.sameAttributeIdentity(metric, pair.alias, pair.canonical)
+				if err != nil {
+					return err
+				}
+				if !same {
+					return ambiguousAttributeRenameError(metric, pair.alias, pair.alias, pair.canonical)
+				}
+			}
+			if _, identity := stagedIdentities[pair.alias]; identity {
+				same, err := a.sameAttributeIdentity(metric, pair.alias, pair.canonical)
+				if err != nil {
+					return err
+				}
+				if !same {
+					return ambiguousAttributeRenameError(metric, pair.alias, pair.alias, pair.canonical)
+				}
+			}
+		}
+
+		if knownIdentities == nil {
+			knownIdentities = map[string]struct{}{}
+			a.attributeIdentities[metric] = knownIdentities
+		}
+		for identity := range stagedIdentities {
+			knownIdentities[identity] = struct{}{}
+		}
+		if knownAliases == nil {
+			knownAliases = map[string]string{}
+			a.attributeAliases[metric] = knownAliases
+		}
+		for _, pair := range aliases {
+			if _, exists := knownAliases[pair.alias]; !exists {
+				knownAliases[pair.alias] = pair.canonical
+			}
+		}
+	}
+
+	mapping := a.variants[idx].mapping
+	if len(aliases) > 0 && mapping.translatedLabels == nil {
+		mapping.translatedLabels = map[string]string{}
 	}
 	for _, pair := range aliases {
 		if err := a.budget.reserveWork(1); err != nil {
@@ -395,13 +804,7 @@ func (a *variantAccumulator) mergeAttributeAliases(idx int, lineage attributeLin
 		if _, conflicted := a.conflicts[idx][pair.alias]; conflicted {
 			continue
 		}
-		if _, identity := a.canonicalAttrs[pair.alias]; identity && pair.alias != pair.canonical {
-			if err := a.markAttributeConflict(idx, pair.alias, pair.alias, pair.canonical); err != nil {
-				return err
-			}
-			continue
-		}
-		if existing, ok := mapping.translatedLabels[pair.alias]; ok && existing != pair.canonical {
+		if existing, exists := mapping.translatedLabels[pair.alias]; exists && existing != pair.canonical {
 			if err := a.markAttributeConflict(idx, pair.alias, existing, pair.canonical); err != nil {
 				return err
 			}
@@ -420,7 +823,7 @@ func (a *variantAccumulator) mergeAttributeAliases(idx int, lineage attributeLin
 	return nil
 }
 
-func (a *variantAccumulator) mergeExistingAttributeAliases(matchers []*labels.Matcher, lineage attributeLineage) error {
+func (a *variantAccumulator) mergeExistingAttributeAliases(matchers []*labels.Matcher, metric string, lineage attributeLineage) error {
 	key, err := matcherKeyWithBudget(matchers, a.budget)
 	if err != nil {
 		return err
@@ -429,7 +832,76 @@ func (a *variantAccumulator) mergeExistingAttributeAliases(matchers []*labels.Ma
 	if !exists {
 		return nil
 	}
-	return a.mergeAttributeAliases(idx, lineage)
+	return a.mergeAttributeAliases(idx, metric, lineage)
+}
+
+func ambiguousAttributeRenameError(metric, alias, first, second string) error {
+	return fmt.Errorf("%w: attribute name %q resolves to both %q and %q for metric %q", errAmbiguousSchemaRename, alias, first, second, metric)
+}
+
+func (a *variantAccumulator) ensureAttributeIdentity(metric, identity string) error {
+	parents := a.attributeParents[metric]
+	if parents == nil {
+		parents = map[string]string{}
+		a.attributeParents[metric] = parents
+		a.attributeSizes[metric] = map[string]uint32{}
+	}
+	if _, exists := parents[identity]; exists {
+		return nil
+	}
+	if err := a.budget.reserveWork(1); err != nil {
+		return err
+	}
+	parents[identity] = identity
+	a.attributeSizes[metric][identity] = 1
+	return nil
+}
+
+func (a *variantAccumulator) attributeIdentityRoot(metric, identity string) (string, error) {
+	if err := a.ensureAttributeIdentity(metric, identity); err != nil {
+		return "", err
+	}
+	parents := a.attributeParents[metric]
+	for parents[identity] != identity {
+		if err := a.budget.reserveWork(1); err != nil {
+			return "", err
+		}
+		identity = parents[identity]
+	}
+	return identity, nil
+}
+
+func (a *variantAccumulator) mergeAttributeIdentities(metric, first, second string) error {
+	first, err := a.attributeIdentityRoot(metric, first)
+	if err != nil {
+		return err
+	}
+	second, err = a.attributeIdentityRoot(metric, second)
+	if err != nil {
+		return err
+	}
+	if first == second {
+		return nil
+	}
+	sizes := a.attributeSizes[metric]
+	if sizes[first] < sizes[second] || (sizes[first] == sizes[second] && second < first) {
+		first, second = second, first
+	}
+	a.attributeParents[metric][second] = first
+	sizes[first] += sizes[second]
+	return nil
+}
+
+func (a *variantAccumulator) sameAttributeIdentity(metric, first, second string) (bool, error) {
+	first, err := a.attributeIdentityRoot(metric, first)
+	if err != nil {
+		return false, err
+	}
+	second, err = a.attributeIdentityRoot(metric, second)
+	if err != nil {
+		return false, err
+	}
+	return first == second, nil
 }
 
 func (a *variantAccumulator) reserveAttributeSlot() error {
@@ -453,6 +925,31 @@ func (a *variantAccumulator) markAttributeConflict(idx int, alias, first, second
 			alias, first, second, a.anchorMetric)
 	}
 	return nil
+}
+
+type attributeOwner struct {
+	canonical string
+	current   string
+}
+
+func resolvedAttributeOwnersWithBudget(lineage attributeLineage, budget *schemaExpansionBudget) ([]attributeOwner, error) {
+	canonicalNames, err := sortedMapKeysWithBudget(lineage, budget)
+	if err != nil {
+		return nil, err
+	}
+	resolved := make([]attributeOwner, 0, len(canonicalNames))
+	for _, canonical := range canonicalNames {
+		currentNames, err := sortedMapKeysWithBudget(lineage[canonical], budget)
+		if err != nil {
+			return nil, err
+		}
+		for _, current := range currentNames {
+			if lineage[canonical][current] == attributeOriginResolved {
+				resolved = append(resolved, attributeOwner{canonical: canonical, current: current})
+			}
+		}
+	}
+	return resolved, nil
 }
 
 func attributeAliasesWithBudget(lineage attributeLineage, budget *schemaExpansionBudget) ([]attributeAlias, error) {
@@ -480,6 +977,10 @@ func attributeAliasesWithBudget(lineage attributeLineage, budget *schemaExpansio
 // directions from version. Metric renames may branch; each returned matcher
 // set carries only the attribute aliases valid for its accepted lineages.
 func generateMatcherVariantsWithBudget(version string, schema *otelSchema, matchers []*labels.Matcher, canonicalAttrs []string, rv *renameValidator, budget *schemaExpansionBudget) ([]matcherVariant, error) {
+	return generateMatcherVariantsWithAnalysis(version, schema, matchers, canonicalAttrs, rv, nil, budget)
+}
+
+func generateMatcherVariantsWithAnalysis(version string, schema *otelSchema, matchers []*labels.Matcher, canonicalAttrs []string, rv *renameValidator, analysis *schemaSafetyAnalysis, budget *schemaExpansionBudget) ([]matcherVariant, error) {
 	metricName, normalizedMatchers, satisfiable, err := normalizeMetricMatchers(matchers)
 	if err != nil {
 		return nil, err
@@ -492,6 +993,22 @@ func generateMatcherVariantsWithBudget(version string, schema *otelSchema, match
 	}
 	matchers = normalizedMatchers
 
+	var ambiguousMetrics map[string]struct{}
+	trackAttrIdentities := false
+	if analysis == nil {
+		ambiguousMetrics, err = reusedMetricNamesWithBudget(schema.revisions, budget)
+		if err != nil {
+			return nil, err
+		}
+		trackAttrIdentities, err = schemaHasAttributeRenamesWithBudget(schema.revisions, budget)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		ambiguousMetrics = analysis.reused
+		trackAttrIdentities = analysis.hasAttributeRenames
+	}
+
 	attrs, err := newAttributeLineageWithBudget(canonicalAttrs, budget)
 	if err != nil {
 		return nil, err
@@ -502,10 +1019,11 @@ func generateMatcherVariantsWithBudget(version string, schema *otelSchema, match
 		metric:   metricName,
 		attrs:    attrs,
 	}
-	acc, err := newVariantAccumulatorWithBudget(metricName, canonicalAttrs, rv, budget)
+	acc, err := newVariantAccumulatorWithBudget(metricName, canonicalAttrs, rv, trackAttrIdentities, budget)
 	if err != nil {
 		return nil, err
 	}
+	acc.ambiguousMetrics = ambiguousMetrics
 	if err := acc.add(anchor); err != nil {
 		return nil, err
 	}
@@ -784,7 +1302,7 @@ func applyAttributeRenames(states []lineageState, step *attributeRenameStep, dir
 		if err != nil {
 			return nil, err
 		}
-		if err := acc.mergeExistingAttributeAliases(state.matchers, lineage); err != nil {
+		if err := acc.mergeExistingAttributeAliases(state.matchers, state.metric, lineage); err != nil {
 			return nil, err
 		}
 		state.attrs = lineage
@@ -1403,8 +1921,15 @@ func (e *schemaEngine) findMatcherVariants(semconvURL, schemaURL string, origina
 			return nil, queryContext{}, err
 		}
 		budget := newSchemaExpansionBudget(e.limits)
+		analysis := e.schemaSafetyAnalysis(schemaURL, &schema)
+		if analysis.err != nil {
+			return nil, queryContext{}, analysis.err
+		}
+		if err := budget.reserveWork(analysis.work); err != nil {
+			return nil, queryContext{}, err
+		}
 		rv := newRenameValidator(sc, metricName)
-		allVariants, err = generateMatcherVariantsWithBudget(sc.version, &schema, matchers, sc.attributesOf(metricName), rv, budget)
+		allVariants, err = generateMatcherVariantsWithAnalysis(sc.version, &schema, matchers, sc.attributesOf(metricName), rv, &analysis, budget)
 		if err != nil {
 			return nil, queryContext{}, err
 		}

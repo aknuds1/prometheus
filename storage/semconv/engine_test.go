@@ -60,7 +60,7 @@ func requireMatcherVariants(t *testing.T, version string, schema *otelSchema, ma
 
 func requireVariantAccumulator(t *testing.T, anchorMetric string, canonicalAttrs []string, rv *renameValidator) *variantAccumulator {
 	t.Helper()
-	acc, err := newVariantAccumulatorWithBudget(anchorMetric, canonicalAttrs, rv, newSchemaExpansionBudget(productionSchemaExpansionLimits()))
+	acc, err := newVariantAccumulatorWithBudget(anchorMetric, canonicalAttrs, rv, true, newSchemaExpansionBudget(productionSchemaExpansionLimits()))
 	require.NoError(t, err)
 	return acc
 }
@@ -342,7 +342,7 @@ func TestMetricLifecycleBoundaries(t *testing.T) {
 		require.Contains(t, rv.warnings[0], "metric lifecycle boundary")
 	})
 
-	t.Run("uses the final role of a name reused within one revision", func(t *testing.T) {
+	t.Run("rejects a name reused within one revision", func(t *testing.T) {
 		schema := testSchema(schemaRevision{
 			version: "1.1.0",
 			changes: []schemaChange{
@@ -352,8 +352,59 @@ func TestMetricLifecycleBoundaries(t *testing.T) {
 		})
 
 		rv := &renameValidator{anchorDeclared: true, seen: map[string]struct{}{}}
-		variants := requireMatcherVariants(t, "1.1.0", schema, equalMatchers("metric.a"), nil, rv)
-		require.Equal(t, []string{"metric.a", "metric.c"}, variantNames(variants))
+		_, err := generateMatcherVariantsWithBudget("1.1.0", schema, equalMatchers("metric.a"), nil, rv, newSchemaExpansionBudget(productionSchemaExpansionLimits()))
+		require.ErrorIs(t, err, errAmbiguousSchemaRename)
+		require.ErrorContains(t, err, `metric name "metric.a"`)
+	})
+
+	t.Run("rejects a later identity claiming a retired name", func(t *testing.T) {
+		schema := testSchema(
+			schemaRevision{version: "1.1.0", changes: []schemaChange{metricChange(map[string]string{"foo": "bar"})}},
+			schemaRevision{version: "1.2.0", changes: []schemaChange{metricChange(map[string]string{"baz": "foo"})}},
+		)
+
+		for _, metric := range []string{"bar", "foo"} {
+			t.Run(metric, func(t *testing.T) {
+				_, err := generateMatcherVariantsWithBudget("1.2.0", schema, equalMatchers(metric), nil, nil, newSchemaExpansionBudget(productionSchemaExpansionLimits()))
+				require.ErrorIs(t, err, errAmbiguousSchemaRename)
+				require.ErrorContains(t, err, `metric name "foo"`)
+			})
+		}
+	})
+
+	t.Run("later convergence does not erase earlier reuse", func(t *testing.T) {
+		schema := testSchema(
+			schemaRevision{version: "1.1.0", changes: []schemaChange{metricChange(map[string]string{"foo": "bar"})}},
+			schemaRevision{version: "1.2.0", changes: []schemaChange{metricChange(map[string]string{"baz": "foo"})}},
+			schemaRevision{version: "1.3.0", changes: []schemaChange{metricChange(map[string]string{"foo": "bar"})}},
+		)
+
+		_, err := generateMatcherVariantsWithBudget("1.3.0", schema, equalMatchers("bar"), nil, nil, newSchemaExpansionBudget(productionSchemaExpansionLimits()))
+		require.ErrorIs(t, err, errAmbiguousSchemaRename)
+		require.ErrorContains(t, err, `metric name "foo"`)
+	})
+
+	t.Run("allows a repeated historical source to converge", func(t *testing.T) {
+		schema := testSchema(
+			schemaRevision{version: "1.1.0", changes: []schemaChange{metricChange(map[string]string{"metric.long": "metric.short"})}},
+			schemaRevision{version: "1.2.0", changes: []schemaChange{metricChange(map[string]string{
+				"metric.long":  "metric.current",
+				"metric.short": "metric.current",
+			})}},
+		)
+
+		variants := requireMatcherVariants(t, "1.2.0", schema, equalMatchers("metric.current"), nil, nil)
+		require.ElementsMatch(t, []string{"metric.current", "metric.long", "metric.short"}, variantNames(variants))
+	})
+
+	t.Run("applies one rename map atomically", func(t *testing.T) {
+		schema := testSchema(schemaRevision{
+			version: "1.1.0",
+			changes: []schemaChange{metricChange(map[string]string{"metric.a": "metric.b", "metric.b": "metric.a"})},
+		})
+
+		_, err := generateMatcherVariantsWithBudget("1.1.0", schema, equalMatchers("metric.a"), nil, nil, newSchemaExpansionBudget(productionSchemaExpansionLimits()))
+		require.ErrorIs(t, err, errAmbiguousSchemaRename)
 	})
 
 	t.Run("does not turn a transient name into a version era", func(t *testing.T) {
@@ -582,6 +633,79 @@ func TestVariantAccumulatorMergesAttributeAliases(t *testing.T) {
 		require.Len(t, rv.warnings, 1)
 		require.Contains(t, rv.warnings[0], `attribute name "user" resolves to both "tenant" and "account"`)
 	})
+
+	t.Run("identity reuse across matcher variants", func(t *testing.T) {
+		acc := requireVariantAccumulator(t, "metric", nil, nil)
+		require.NoError(t, acc.add(lineageState{
+			matchers: equalMatchers("metric", "first"),
+			metric:   "metric",
+			attrs: attributeLineage{
+				"user": {"account": attributeOriginResolved},
+			},
+		}))
+		err := acc.add(lineageState{
+			matchers: equalMatchers("metric", "second"),
+			metric:   "metric",
+			attrs: attributeLineage{
+				"tenant": {"user": attributeOriginResolved},
+			},
+		})
+		require.ErrorIs(t, err, errAmbiguousSchemaRename)
+		require.ErrorContains(t, err, `attribute name "user"`)
+	})
+
+	t.Run("identities stay scoped to a physical metric", func(t *testing.T) {
+		acc := requireVariantAccumulator(t, "metric.current", nil, nil)
+		require.NoError(t, acc.add(lineageState{
+			matchers: equalMatchers("metric.old"),
+			metric:   "metric.old",
+			attrs: attributeLineage{
+				"user": {"account": attributeOriginResolved},
+			},
+		}))
+		require.NoError(t, acc.add(lineageState{
+			matchers: equalMatchers("metric.new"),
+			metric:   "metric.new",
+			attrs: attributeLineage{
+				"tenant": {"user": attributeOriginResolved},
+			},
+		}))
+	})
+}
+
+func TestAttributeLifecycleReuse(t *testing.T) {
+	t.Run("rejects a distinct identity claiming an alias", func(t *testing.T) {
+		schema := testSchema(
+			schemaRevision{version: "1.1.0", changes: []schemaChange{attributeChange(map[string]string{"user": "tenant"})}},
+			schemaRevision{version: "1.2.0", changes: []schemaChange{attributeChange(map[string]string{"account": "user"})}},
+		)
+
+		_, err := generateMatcherVariantsWithBudget("1.2.0", schema, equalMatchers("metric", "user"), nil, nil, newSchemaExpansionBudget(productionSchemaExpansionLimits()))
+		require.ErrorIs(t, err, errAmbiguousSchemaRename)
+		require.ErrorContains(t, err, `attribute name "user"`)
+	})
+
+	t.Run("allows a legitimate rename back", func(t *testing.T) {
+		schema := testSchema(
+			schemaRevision{version: "1.1.0", changes: []schemaChange{attributeChange(map[string]string{"user": "tenant"})}},
+			schemaRevision{version: "1.2.0", changes: []schemaChange{attributeChange(map[string]string{"tenant": "user"})}},
+		)
+
+		variants := requireMatcherVariants(t, "1.2.0", schema, equalMatchers("metric", "user"), nil, nil)
+		require.NotEmpty(t, variants)
+	})
+
+	t.Run("allows explicit convergence into an occupied identity", func(t *testing.T) {
+		schema := testSchema(schemaRevision{
+			version: "1.1.0",
+			changes: []schemaChange{attributeChange(map[string]string{
+				"tls.client.server_name": "server.address",
+			})},
+		})
+
+		variants := requireMatcherVariants(t, "1.0.0", schema, equalMatchers("metric"), []string{"server.address"}, nil)
+		require.NotEmpty(t, variants)
+	})
 }
 
 func TestSchemaExpansionLimits(t *testing.T) {
@@ -736,6 +860,53 @@ versions:
 		}
 	})
 
+	t.Run("metric ownership analysis returns no partial result", func(t *testing.T) {
+		revisions := []schemaRevision{{
+			version: "1.1.0",
+			changes: []schemaChange{metricChange(map[string]string{"metric.old": "metric.current"})},
+		}}
+		reused, err := reusedMetricNamesWithBudget(revisions, newSchemaExpansionBudget(schemaExpansionLimits{work: 1, keyBytes: 1_000}))
+		require.ErrorIs(t, err, errSchemaExpansion)
+		require.Nil(t, reused)
+	})
+
+	t.Run("cached metric ownership work is charged to every query", func(t *testing.T) {
+		files := map[string][]byte{
+			"registry.yaml": []byte(`file_format: 1.1.0
+schema_url: https://example.com/schemas/1.1.0
+versions:
+  1.0.0:
+  1.1.0:
+    metrics:
+      changes:
+        - rename_metrics:
+            metric.old: metric.current
+`),
+			"1.1.0": []byte(`groups:
+  - id: metric.metric.current
+    type: metric
+    metric_name: metric.current
+    unit: s
+    instrument: histogram
+`),
+		}
+		engine := newSchemaEngine(newRegistrySource(files))
+		schema, err := engine.getOTelSchema("registry/registry.yaml")
+		require.NoError(t, err)
+		analysis := engine.schemaSafetyAnalysis("registry/registry.yaml", &schema)
+		require.NoError(t, analysis.err)
+		require.Positive(t, analysis.work)
+
+		engine.limits = schemaExpansionLimits{work: analysis.work - 1, keyBytes: 1_000_000}
+		variants, _, err := engine.findMatcherVariants(
+			"registry/1.1.0",
+			"registry/registry.yaml",
+			equalMatchers("metric.current"),
+		)
+		require.ErrorIs(t, err, errSchemaExpansion)
+		require.Nil(t, variants)
+	})
+
 	t.Run("preflights keys before allocation and state mutation", func(t *testing.T) {
 		keyBytes := uint64(len(requireLineageStateKey(t, state)))
 		require.Positive(t, keyBytes)
@@ -825,6 +996,25 @@ versions:
 		require.ErrorContains(t, err, "resolver work")
 		require.Nil(t, variants, "overflow must not return partial variants")
 	})
+}
+
+func BenchmarkMetricOwnershipAnalysisUpstream(b *testing.B) {
+	raw, err := os.ReadFile("./testdata/upstream/schema-1.44.0.yaml")
+	require.NoError(b, err)
+	schema, err := loadOTelSchema(raw)
+	require.NoError(b, err)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		reused, err := reusedMetricNamesWithBudget(schema.revisions, newSchemaExpansionBudget(productionSchemaExpansionLimits()))
+		if err != nil {
+			b.Fatal(err)
+		}
+		if reused == nil {
+			b.Fatal("ownership analysis returned a nil result")
+		}
+	}
 }
 
 func TestDeduplicateLineageStatesPreservesCanonicalIdentity(t *testing.T) {
