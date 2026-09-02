@@ -429,13 +429,6 @@ type headAppenderBase struct {
 	useHistogramST                  bool // Whether ST-capable histogram chunk encoding is used in this append.
 }
 
-type nativeMetricMetadataObservations []nativeMetricMetadataPoint
-
-type nativeMetricMetadataPending struct {
-	firstObservation     nativeMetricMetadataPoint
-	multipleObservations *nativeMetricMetadataObservations
-}
-
 func (a *headAppenderBase) observeNativeMetricMetadata(s *memSeries, timestamp int64, m metadata.Metadata) {
 	if a.head.nativeMetricMetadata == nil || m.IsEmpty() {
 		return
@@ -446,23 +439,7 @@ func (a *headAppenderBase) observeNativeMetricMetadata(s *memSeries, timestamp i
 	if m.Type == "" {
 		m.Type = model.MetricTypeUnknown
 	}
-	observation := nativeMetricMetadataPoint{
-		effectiveFrom: timestamp,
-		metadata:      a.nativeMetricMetadata.handle(m),
-	}
-	pending, ok := a.nativeMetricMetadata.pending[s.ref]
-	if !ok {
-		pending.firstObservation = observation
-	} else {
-		if pending.multipleObservations == nil {
-			observations := nativeMetricMetadataObservations{pending.firstObservation, observation}
-			pending.multipleObservations = &observations
-			pending.firstObservation = nativeMetricMetadataPoint{}
-		} else {
-			*pending.multipleObservations = append(*pending.multipleObservations, observation)
-		}
-	}
-	a.nativeMetricMetadata.pending[s.ref] = pending
+	a.nativeMetricMetadata.observe(a.head.nativeMetricMetadata, s.ref, timestamp, m)
 }
 
 func (a *headAppenderBase) clearNativeMetricMetadata() {
@@ -478,13 +455,7 @@ func (a *headAppenderBase) commitNativeMetricMetadata() {
 	if a.nativeMetricMetadata == nil {
 		return
 	}
-	for ref, pending := range a.nativeMetricMetadata.pending {
-		if pending.multipleObservations == nil {
-			a.head.nativeMetricMetadata.mergeOne(ref, pending.firstObservation)
-			continue
-		}
-		a.head.nativeMetricMetadata.merge(ref, *pending.multipleObservations)
-	}
+	a.head.nativeMetricMetadata.commitAppender(a.nativeMetricMetadata)
 	a.clearNativeMetricMetadata()
 }
 
