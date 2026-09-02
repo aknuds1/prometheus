@@ -129,27 +129,26 @@ func (a *nativeMetricMetadataAppender) metadataReference(store *nativeMetricMeta
 	// Reuse the committed handle for stable high-cardinality metadata. This
 	// bounds raw transaction state without paying the interning cost again.
 	var (
-		handle         unique.Handle[metadata.Metadata]
-		reuseCommitted bool
+		committed     unique.Handle[metadata.Metadata]
+		haveCommitted bool
 	)
 	stripe := store.stripe(ref)
 	stripe.mtx.RLock()
 	history, ok := stripe.histories[ref]
 	if ok && len(history.versions) > 0 {
-		handle = history.versions[len(history.versions)-1].metadata
-		reuseCommitted = handle.Value() == m
+		committed = history.versions[len(history.versions)-1].metadata
+		haveCommitted = true
 	}
 	stripe.mtx.RUnlock()
-	if !reuseCommitted {
+
+	// Compare after unlocking. The handle keeps its value alive independently
+	// of the stripe, and the comparison copies a struct and walks three
+	// strings, which is more than a read lock shared with commits should hold.
+	handle := committed
+	if !haveCommitted || committed.Value() != m {
 		handle = unique.Make(m)
 	}
 	valueRef := nativeMetricMetadataDirectRefMask | nativeMetricMetadataValueRef(len(a.directHandles))
-	if len(a.directHandles) == cap(a.directHandles) {
-		newCapacity := max(16, 2*cap(a.directHandles))
-		handles := make([]unique.Handle[metadata.Metadata], len(a.directHandles), newCapacity)
-		copy(handles, a.directHandles)
-		a.directHandles = handles
-	}
 	a.directHandles = append(a.directHandles, handle)
 	return valueRef
 }
@@ -167,11 +166,6 @@ func (a *nativeMetricMetadataAppender) observe(store *nativeMetricMetadataStore,
 	// Group observations by stripe for commit.
 	stripe := uint8(uint64(ref) % nativeMetricMetadataStripes)
 	observationRef := nativeMetricMetadataObservationRef(len(a.observations) + 1)
-	if len(a.observations) == cap(a.observations) {
-		observations := make([]nativeMetricMetadataObservation, len(a.observations), 2*cap(a.observations))
-		copy(observations, a.observations)
-		a.observations = observations
-	}
 	a.observations = append(a.observations, nativeMetricMetadataObservation{
 		ref:           ref,
 		effectiveFrom: effectiveFrom,

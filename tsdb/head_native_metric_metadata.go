@@ -16,7 +16,6 @@ package tsdb
 import (
 	"context"
 	"errors"
-	"slices"
 	"sync"
 	"unique"
 
@@ -95,20 +94,6 @@ func (s *nativeMetricMetadataStore) stripe(ref chunks.HeadSeriesRef) *nativeMetr
 	return &s.stripes[uint64(ref)%nativeMetricMetadataStripes]
 }
 
-// merge applies observations in append order when timestamps are equal.
-func (s *nativeMetricMetadataStore) merge(ref chunks.HeadSeriesRef, observations []nativeMetricMetadataPoint) {
-	if len(observations) == 0 {
-		return
-	}
-	observations = sortAndCompactNativeMetricMetadataObservations(observations)
-
-	stripe := s.stripe(ref)
-	stripe.mtx.Lock()
-	history, exists := stripe.histories[ref]
-	s.mergeLocked(stripe, ref, history, exists, observations)
-	stripe.mtx.Unlock()
-}
-
 func (s *nativeMetricMetadataStore) mergeLocked(stripe *nativeMetricMetadataStripe, ref chunks.HeadSeriesRef, history nativeMetricMetadataHistory, exists bool, observations []nativeMetricMetadataPoint) {
 	oldLen := len(history.versions)
 	var evictions int
@@ -127,23 +112,6 @@ func (s *nativeMetricMetadataStore) mergeLocked(stripe *nativeMetricMetadataStri
 		s.series.Add(1)
 	}
 	s.versions.Add(int64(len(history.versions) - oldLen))
-}
-
-func (s *nativeMetricMetadataStore) mergeOne(ref chunks.HeadSeriesRef, observation nativeMetricMetadataPoint) {
-	stripe := s.stripe(ref)
-	stripe.mtx.Lock()
-	history, exists := stripe.histories[ref]
-	if exists && len(history.versions) > 0 {
-		last := history.versions[len(history.versions)-1]
-		if observation.effectiveFrom >= last.effectiveFrom && observation.metadata == last.metadata {
-			stripe.mtx.Unlock()
-			return
-		}
-	}
-
-	observations := [1]nativeMetricMetadataPoint{observation}
-	s.mergeLocked(stripe, ref, history, exists, observations[:])
-	stripe.mtx.Unlock()
 }
 
 func (s *nativeMetricMetadataStore) get(ref chunks.HeadSeriesRef) ([]NativeMetricMetadataVersion, bool, bool) {
@@ -211,34 +179,6 @@ func (s *nativeMetricMetadataStore) reset() {
 	}
 	s.series.Store(0)
 	s.versions.Store(0)
-}
-
-func compareNativeMetricMetadataPoints(a, b nativeMetricMetadataPoint) int {
-	switch {
-	case a.effectiveFrom < b.effectiveFrom:
-		return -1
-	case a.effectiveFrom > b.effectiveFrom:
-		return 1
-	default:
-		return 0
-	}
-}
-
-func sortAndCompactNativeMetricMetadataObservations(observations []nativeMetricMetadataPoint) []nativeMetricMetadataPoint {
-	if !slices.IsSortedFunc(observations, compareNativeMetricMetadataPoints) {
-		slices.SortStableFunc(observations, compareNativeMetricMetadataPoints)
-	}
-
-	compacted := observations[:0]
-	for _, observation := range observations {
-		if len(compacted) > 0 && compacted[len(compacted)-1].effectiveFrom == observation.effectiveFrom {
-			compacted[len(compacted)-1] = observation
-			continue
-		}
-		compacted = append(compacted, observation)
-	}
-	clear(observations[len(compacted):])
-	return compacted
 }
 
 func appendNativeMetricMetadataPoint(versions []nativeMetricMetadataPoint, point nativeMetricMetadataPoint) ([]nativeMetricMetadataPoint, bool) {
@@ -393,6 +333,10 @@ func (h *Head) nativeMetricMetadataForMatchers(ctx context.Context, matcherSets 
 		}
 		postings = append(postings, p)
 	}
+	// Sorting materialises every matching series before iteration, so limit
+	// bounds the response and the per-series decode below but not this. That is
+	// deliberate: bounding before the sort would return an arbitrary subset
+	// rather than the first by label order.
 	p := reader.SortedPostings(&nativeMetricMetadataPostings{
 		Postings: index.Merge(ctx, postings...),
 		store:    h.nativeMetricMetadata,
@@ -414,6 +358,10 @@ func (h *Head) nativeMetricMetadataForMatchers(ctx context.Context, matcherSets 
 			}
 			return nil, false, err
 		}
+		// Check the limit only once a series has actually produced a result.
+		// Either continue above can still skip a posting when a concurrent gc
+		// removes the series, so checking earlier would report truncation
+		// without a further result existing.
 		if limit > 0 && len(result) == limit {
 			return result, true, nil
 		}

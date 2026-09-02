@@ -45,6 +45,17 @@ func makeNativeMetricMetadataPoint(timestamp int64, m metadata.Metadata) nativeM
 	}
 }
 
+// commitNativeMetricMetadata applies observations for ref as one transaction
+// through the same path ingestion uses.
+func commitNativeMetricMetadata(store *nativeMetricMetadataStore, ref chunks.HeadSeriesRef, observations ...nativeMetricMetadataPoint) {
+	appender := store.getAppender()
+	for _, observation := range observations {
+		appender.observe(store, ref, observation.effectiveFrom, observation.metadata.Value())
+	}
+	store.commitAppender(appender)
+	store.putAppender(appender)
+}
+
 func TestNativeMetricMetadataAppender(t *testing.T) {
 	t.Run("reference encoding", func(t *testing.T) {
 		require.Equal(t, uintptr(4), unsafe.Sizeof(nativeMetricMetadataValueRef(0)))
@@ -131,7 +142,7 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 		ref := chunks.HeadSeriesRef(1)
 		m := metadata.Metadata{Type: model.MetricTypeUnknown, Help: "stable"}
 		point := makeNativeMetricMetadataPoint(100, m)
-		store.mergeOne(ref, point)
+		commitNativeMetricMetadata(store, ref, point)
 		for i := range maxNativeMetricMetadataValues {
 			appender.metadataReference(store, chunks.HeadSeriesRef(i+2), metadata.Metadata{Type: model.MetricTypeUnknown, Help: strconv.Itoa(i)})
 		}
@@ -190,7 +201,7 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 	t.Run("does not intern a stable stripe", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		ref := chunks.HeadSeriesRef(1)
-		store.mergeOne(ref, makeNativeMetricMetadataPoint(100, a))
+		commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(100, a))
 		appender := store.getAppender()
 		appender.observe(store, ref, 200, a)
 		require.False(t, appender.values[0].resolved)
@@ -205,7 +216,7 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 	t.Run("sorts observations and applies the last value at an equal timestamp", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		ref := chunks.HeadSeriesRef(1)
-		store.mergeOne(ref, makeNativeMetricMetadataPoint(100, a))
+		commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(100, a))
 		appender := store.getAppender()
 		appender.observe(store, ref, 300, a)
 		appender.observe(store, ref, 150, b)
@@ -227,10 +238,10 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 	t.Run("retains the time range of a consecutive value", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		ref := chunks.HeadSeriesRef(1)
-		store.merge(ref, []nativeMetricMetadataPoint{
+		commitNativeMetricMetadata(store, ref,
 			makeNativeMetricMetadataPoint(50, a),
 			makeNativeMetricMetadataPoint(150, b),
-		})
+		)
 		appender := store.getAppender()
 		appender.observe(store, ref, 300, a)
 		appender.observe(store, ref, 100, a)
@@ -251,8 +262,8 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		firstRef := chunks.HeadSeriesRef(1)
 		secondRef := firstRef + nativeMetricMetadataStripes
-		store.mergeOne(firstRef, makeNativeMetricMetadataPoint(100, a))
-		store.mergeOne(secondRef, makeNativeMetricMetadataPoint(100, a))
+		commitNativeMetricMetadata(store, firstRef, makeNativeMetricMetadataPoint(100, a))
+		commitNativeMetricMetadata(store, secondRef, makeNativeMetricMetadataPoint(100, a))
 		appender := store.getAppender()
 		appender.observe(store, firstRef, 200, a)
 		appender.observe(store, secondRef, 200, b)
@@ -277,7 +288,7 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 		appender := store.getAppender()
 		for i := range series {
 			ref := chunks.HeadSeriesRef(1 + i*nativeMetricMetadataStripes)
-			store.mergeOne(ref, makeNativeMetricMetadataPoint(100, a))
+			commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(100, a))
 			appender.observe(store, ref, 200, b)
 		}
 		store.commitAppender(appender)
@@ -300,7 +311,7 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 		appender := store.getAppender()
 		for i := range maxNativeMetricMetadataBatch + 1 {
 			ref := chunks.HeadSeriesRef(1 + i*nativeMetricMetadataStripes)
-			store.mergeOne(ref, makeNativeMetricMetadataPoint(100, a))
+			commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(100, a))
 			m := a
 			if i == maxNativeMetricMetadataBatch {
 				m = b
@@ -345,7 +356,7 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 		const workers = 8
 		for i := range workers {
 			ref := chunks.HeadSeriesRef(1 + i*nativeMetricMetadataStripes)
-			store.mergeOne(ref, makeNativeMetricMetadataPoint(100, a))
+			commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(100, a))
 		}
 
 		start := make(chan struct{})
@@ -377,57 +388,79 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 }
 
 func TestNativeMetricMetadataStoreVersioning(t *testing.T) {
-	store := newNativeMetricMetadataStore()
 	ref := chunks.HeadSeriesRef(1)
 	a := metadata.Metadata{Type: model.MetricTypeGauge, Help: "A"}
 	b := metadata.Metadata{Type: model.MetricTypeCounter, Help: "B"}
 	c := metadata.Metadata{Type: model.MetricTypeUnknown, Help: "C"}
 
-	store.merge(ref, []nativeMetricMetadataPoint{
-		makeNativeMetricMetadataPoint(200, b),
-		makeNativeMetricMetadataPoint(100, a),
-		makeNativeMetricMetadataPoint(150, c),
-		makeNativeMetricMetadataPoint(150, b), // Later in the transaction wins.
-	})
-	versions, truncated, ok := store.get(ref)
-	require.True(t, ok)
-	require.False(t, truncated)
-	require.Equal(t, []NativeMetricMetadataVersion{
-		{EffectiveFrom: 100, Metadata: a},
-		{EffectiveFrom: 150, Metadata: b},
-	}, versions)
-
-	// Identical canonical metadata values coalesce into one version.
-	store.merge(ref, []nativeMetricMetadataPoint{
-		makeNativeMetricMetadataPoint(250, c),
-		makeNativeMetricMetadataPoint(300, c),
-	})
-	versions, _, _ = store.get(ref)
-	require.Equal(t, []NativeMetricMetadataVersion{
-		{EffectiveFrom: 100, Metadata: a},
-		{EffectiveFrom: 150, Metadata: b},
-		{EffectiveFrom: 250, Metadata: c},
-	}, versions)
-
-	// A later store application wins for an equal timestamp.
-	store.mergeOne(ref, makeNativeMetricMetadataPoint(150, a))
-	versions, _, _ = store.get(ref)
-	require.Equal(t, []NativeMetricMetadataVersion{
-		{EffectiveFrom: 100, Metadata: a},
-		{EffectiveFrom: 250, Metadata: c},
-	}, versions)
-
-	// Equal incoming values must not coalesce across an existing change point.
-	store.merge(ref, []nativeMetricMetadataPoint{
-		makeNativeMetricMetadataPoint(50, a),
-		makeNativeMetricMetadataPoint(300, a),
-	})
-	versions, _, _ = store.get(ref)
-	require.Equal(t, []NativeMetricMetadataVersion{
-		{EffectiveFrom: 50, Metadata: a},
-		{EffectiveFrom: 250, Metadata: c},
-		{EffectiveFrom: 300, Metadata: a},
-	}, versions)
+	transactions := [][]nativeMetricMetadataPoint{
+		{
+			makeNativeMetricMetadataPoint(200, b),
+			makeNativeMetricMetadataPoint(100, a),
+			makeNativeMetricMetadataPoint(150, c),
+			makeNativeMetricMetadataPoint(150, b),
+		},
+		{
+			makeNativeMetricMetadataPoint(250, c),
+			makeNativeMetricMetadataPoint(300, c),
+		},
+		{makeNativeMetricMetadataPoint(150, a)},
+		{
+			makeNativeMetricMetadataPoint(50, a),
+			makeNativeMetricMetadataPoint(300, a),
+		},
+	}
+	for _, tc := range []struct {
+		name         string
+		transactions [][]nativeMetricMetadataPoint
+		want         []NativeMetricMetadataVersion
+	}{
+		{
+			name:         "unordered input and later observation wins timestamp tie",
+			transactions: transactions[:1],
+			want: []NativeMetricMetadataVersion{
+				{EffectiveFrom: 100, Metadata: a},
+				{EffectiveFrom: 150, Metadata: b},
+			},
+		},
+		{
+			name:         "identical canonical metadata values coalesce",
+			transactions: transactions[:2],
+			want: []NativeMetricMetadataVersion{
+				{EffectiveFrom: 100, Metadata: a},
+				{EffectiveFrom: 150, Metadata: b},
+				{EffectiveFrom: 250, Metadata: c},
+			},
+		},
+		{
+			name:         "later transaction wins timestamp tie",
+			transactions: transactions[:3],
+			want: []NativeMetricMetadataVersion{
+				{EffectiveFrom: 100, Metadata: a},
+				{EffectiveFrom: 250, Metadata: c},
+			},
+		},
+		{
+			name:         "equal incoming values preserve an intervening change",
+			transactions: transactions,
+			want: []NativeMetricMetadataVersion{
+				{EffectiveFrom: 50, Metadata: a},
+				{EffectiveFrom: 250, Metadata: c},
+				{EffectiveFrom: 300, Metadata: a},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newNativeMetricMetadataStore()
+			for _, observations := range tc.transactions {
+				commitNativeMetricMetadata(store, ref, observations...)
+			}
+			versions, truncated, ok := store.get(ref)
+			require.True(t, ok)
+			require.False(t, truncated)
+			require.Equal(t, tc.want, versions)
+		})
+	}
 }
 
 func TestNativeMetricMetadataStoreCapsVersions(t *testing.T) {
@@ -441,7 +474,7 @@ func TestNativeMetricMetadataStoreCapsVersions(t *testing.T) {
 	for i := range points {
 		points[i] = makeNativeMetricMetadataPoint(int64(i), a)
 	}
-	store.merge(ref, points)
+	commitNativeMetricMetadata(store, ref, points...)
 
 	stripe := store.stripe(ref)
 	stripe.mtx.RLock()
@@ -456,8 +489,8 @@ func TestNativeMetricMetadataStoreCapsVersions(t *testing.T) {
 	require.False(t, truncated)
 	require.Zero(t, store.evictions.Load())
 
-	store.mergeOne(ref, makeNativeMetricMetadataPoint(observations, a))
-	store.mergeOne(ref, makeNativeMetricMetadataPoint(0, a))
+	commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(observations, a))
+	commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(0, a))
 	stripe.mtx.RLock()
 	history = stripe.histories[ref]
 	unchangedBacking := &history.versions[0]
@@ -473,7 +506,7 @@ func TestNativeMetricMetadataStoreCapsVersions(t *testing.T) {
 		}
 		points[i] = makeNativeMetricMetadataPoint(int64(observations+1+i), m)
 	}
-	store.merge(ref, points)
+	commitNativeMetricMetadata(store, ref, points...)
 
 	versions, truncated, ok := store.get(ref)
 	require.True(t, ok)
@@ -487,7 +520,7 @@ func TestNativeMetricMetadataStoreCapsVersions(t *testing.T) {
 	require.LessOrEqual(t, versionCapacity, maxNativeMetricMetadataVersions)
 	require.Equal(t, int64(maxNativeMetricMetadataVersions), store.versions.Load())
 
-	store.mergeOne(ref, makeNativeMetricMetadataPoint(2*observations+1, a))
+	commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(2*observations+1, a))
 	versions, truncated, ok = store.get(ref)
 	require.True(t, ok)
 	require.True(t, truncated)
@@ -506,8 +539,8 @@ func TestNativeMetricMetadataStoreCapsVersions(t *testing.T) {
 func TestNativeMetricMetadataPostings(t *testing.T) {
 	t.Run("Next and Seek filter refs", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
-		store.merge(1, []nativeMetricMetadataPoint{makeNativeMetricMetadataPoint(1, metadata.Metadata{Help: "one"})})
-		store.merge(3, []nativeMetricMetadataPoint{makeNativeMetricMetadataPoint(1, metadata.Metadata{Help: "three"})})
+		commitNativeMetricMetadata(store, 1, makeNativeMetricMetadataPoint(1, metadata.Metadata{Help: "one"}))
+		commitNativeMetricMetadata(store, 3, makeNativeMetricMetadataPoint(1, metadata.Metadata{Help: "three"}))
 
 		p := &nativeMetricMetadataPostings{
 			Postings: index.NewListPostings([]storage.SeriesRef{1, 2, 3, 4}),
@@ -733,6 +766,131 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 			require.Equal(t, []NativeMetricMetadataVersion{{EffectiveFrom: 100, Metadata: meta}}, versions)
 		})
 	}
+
+	t.Run("more distinct values than one transaction retains raw", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, true)
+		opts.EnableNativeMetadata = true
+		head, _ := newTestHeadWithOptions(t, compression.None, opts)
+		ctx := context.Background()
+
+		// Values beyond maxNativeMetricMetadataValues are interned as they are
+		// observed rather than held raw until commit.
+		const series = 3 * maxNativeMetricMetadataValues
+		app := head.AppenderV2(ctx)
+		for i := range series {
+			lset := labels.FromStrings(labels.MetricName, "requests_total", "id", strconv.Itoa(i))
+			_, err := app.Append(0, lset, 0, 100, float64(i), nil, nil, storage.AOptions{
+				Metadata: metadata.Metadata{Type: model.MetricTypeCounter, Help: strconv.Itoa(i)},
+			})
+			require.NoError(t, err)
+		}
+		require.NoError(t, app.Commit())
+
+		nameMatcher := labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "requests_total")
+		result, truncated, err := head.nativeMetricMetadataForMatchers(ctx, [][]*labels.Matcher{{nameMatcher}}, 0)
+		require.NoError(t, err)
+		require.False(t, truncated)
+		require.Len(t, result, series)
+		for _, item := range result {
+			require.Equal(t, []NativeMetricMetadataVersion{{
+				EffectiveFrom: 100,
+				Metadata:      metadata.Metadata{Type: model.MetricTypeCounter, Help: item.Labels.Get("id")},
+			}}, item.Versions, "series %s", item.Labels)
+		}
+	})
+
+	t.Run("concurrent garbage collection leaves no orphans", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, true)
+		opts.EnableNativeMetadata = true
+		head, _ := newTestHeadWithOptions(t, compression.None, opts)
+		ctx := context.Background()
+
+		const (
+			workers      = 4
+			rounds       = 20
+			perTx        = 512
+			evictAllTime = math.MaxInt64
+		)
+		observe := func(app storage.AppenderV2, worker, round, i int) error {
+			lset := labels.FromStrings(labels.MetricName, "requests_total",
+				"worker", strconv.Itoa(worker), "id", strconv.Itoa(i))
+			_, err := app.Append(0, lset, 0, int64(round+1), float64(round), nil, nil, storage.AOptions{
+				Metadata: metadata.Metadata{Type: model.MetricTypeCounter, Help: strconv.Itoa(round)},
+			})
+			return err
+		}
+
+		// Metadata is published while the appender's pending commits still keep
+		// its series in the Head. Committing it any later would let a
+		// concurrent collection delete the series first, leaving metadata that
+		// no later collection can reach.
+		var appendWG sync.WaitGroup
+		for worker := range workers {
+			appendWG.Go(func() {
+				for round := range rounds {
+					app := head.AppenderV2(ctx)
+					for i := range perTx {
+						if err := observe(app, worker, round, i); err != nil {
+							t.Errorf("append failed: %v", err)
+							_ = app.Rollback()
+							return
+						}
+					}
+					if err := app.Commit(); err != nil {
+						t.Errorf("commit failed: %v", err)
+						return
+					}
+				}
+			})
+		}
+
+		done := make(chan struct{})
+		var gcWG sync.WaitGroup
+		gcWG.Go(func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				refs := make([]storage.SeriesRef, 0, workers*perTx)
+				for all := head.postings.All(); all.Next(); {
+					refs = append(refs, all.At())
+				}
+				head.gcSeries(refs, evictAllTime, func(*memSeries) bool { return true })
+			}
+		})
+
+		appendWG.Wait()
+		close(done)
+		gcWG.Wait()
+
+		// Leave something behind so an empty store cannot pass vacuously.
+		app := head.AppenderV2(ctx)
+		for i := range perTx {
+			require.NoError(t, observe(app, 0, rounds, i))
+		}
+		require.NoError(t, app.Commit())
+
+		var (
+			orphans []chunks.HeadSeriesRef
+			stored  int64
+		)
+		for i := range head.nativeMetricMetadata.stripes {
+			stripe := &head.nativeMetricMetadata.stripes[i]
+			stripe.mtx.RLock()
+			for ref := range stripe.histories {
+				stored++
+				if head.series.getByID(ref) == nil {
+					orphans = append(orphans, ref)
+				}
+			}
+			stripe.mtx.RUnlock()
+		}
+		require.Empty(t, orphans, "metadata retained for series the Head no longer has")
+		require.Positive(t, stored)
+		require.Equal(t, stored, head.nativeMetricMetadata.series.Load())
+	})
 }
 
 func TestHeadNativeMetricMetadataWALReplayDeletion(t *testing.T) {
@@ -864,4 +1022,55 @@ func TestHeadNativeMetricMetadataMatchersAndLimit(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("metadata outliving its series does not leak into results", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, false)
+		opts.EnableNativeMetadata = true
+		head, _ := newTestHeadWithOptions(t, compression.None, opts)
+
+		// "z" sorts last, so the query reaches it only after the limit is
+		// already satisfied.
+		for _, name := range []string{"a", "b", "z"} {
+			app := head.AppenderV2(ctx)
+			_, err := app.Append(0, labels.FromStrings(labels.MetricName, name, "job", "api"), 0, 100, 1, nil, nil, storage.AOptions{
+				Metadata: metadata.Metadata{Type: model.MetricTypeGauge, Help: name},
+			})
+			require.NoError(t, err)
+			require.NoError(t, app.Commit())
+		}
+		var zRef storage.SeriesRef
+		for _, name := range []string{"a", "b"} {
+			app := head.AppenderV2(ctx)
+			_, err := app.Append(0, labels.FromStrings(labels.MetricName, name, "job", "api"), 0, 900, 1, nil, nil, storage.AOptions{
+				Metadata: metadata.Metadata{Type: model.MetricTypeGauge, Help: name},
+			})
+			require.NoError(t, err)
+			require.NoError(t, app.Commit())
+		}
+
+		// Reproduce the window inside Head.gc between dropping expired series
+		// and removing them from the postings and the metadata store: "z" is
+		// gone from head.series while its postings entry and its metadata both
+		// survive. SortedPostings drops it, so it must not appear in the result
+		// and must not be mistaken for a further result behind the limit.
+		//
+		// Note this cannot stage the narrower race where a gc lands *during*
+		// the loop below, which is what makes the limit check's position
+		// load-bearing; reproducing that needs a seam in the query path.
+		deleted, _, _, _, _, _, _, _, _ := head.series.gc(500, 0)
+		require.Len(t, deleted, 1, "gc must expire exactly the trailing series")
+		for ref := range deleted {
+			zRef = ref
+		}
+		require.Nil(t, head.series.getByID(chunks.HeadSeriesRef(zRef)))
+		require.True(t, head.nativeMetricMetadata.has(chunks.HeadSeriesRef(zRef)),
+			"the removed series must keep its metadata, or the query never reaches it")
+
+		result, truncated, err := head.nativeMetricMetadataForMatchers(ctx, [][]*labels.Matcher{{jobMatcher}}, 2)
+		require.NoError(t, err)
+		require.False(t, truncated, "every matching series was returned, so nothing was truncated")
+		require.Len(t, result, 2)
+		require.Equal(t, "a", result[0].Labels.Get(labels.MetricName))
+		require.Equal(t, "b", result[1].Labels.Get(labels.MetricName))
+	})
 }
