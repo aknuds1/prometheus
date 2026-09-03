@@ -338,7 +338,7 @@ func (s *attributeRenameStep) appliesTo(metricName string) bool {
 // collectSchemaRevision preserves the transformation order defined by the
 // schema format: all-section changes precede metric-section changes, and each
 // section is processed top-to-bottom.
-func collectSchemaRevision(versionStr string, version otelSchemaVersion) *schemaRevision {
+func collectSchemaRevision(versionStr string, version otelSchemaVersion) (*schemaRevision, error) {
 	revision := &schemaRevision{version: versionStr}
 	if version.All != nil {
 		for _, change := range version.All.Changes {
@@ -349,6 +349,9 @@ func collectSchemaRevision(versionStr string, version otelSchemaVersion) *schema
 	}
 	if version.Metrics != nil {
 		for _, change := range version.Metrics.Changes {
+			if change.Split.Kind != 0 {
+				return nil, fmt.Errorf("schema version %q contains unsupported metric split transformation", versionStr)
+			}
 			if step := newAttributeRenameStep(change.RenameAttributes, true); step != nil {
 				revision.changes = append(revision.changes, schemaChange{attributeRenames: step})
 			}
@@ -358,9 +361,9 @@ func collectSchemaRevision(versionStr string, version otelSchemaVersion) *schema
 		}
 	}
 	if len(revision.changes) == 0 {
-		return nil
+		return nil, nil
 	}
-	return revision
+	return revision, nil
 }
 
 // semconvGroup represents a semantic conventions group definition.
@@ -509,6 +512,8 @@ type otelSchemaSection struct {
 
 type otelSchemaChange struct {
 	RenameAttributes *otelRenameAttributes `yaml:"rename_attributes,omitempty"`
+	// Split is retained only to reject a transformation the resolver cannot apply.
+	Split yaml.Node `yaml:"split,omitempty"`
 
 	// RenameMetrics maps each old metric name to its new name directly, with no
 	// intervening key. This is asymmetric with RenameAttributes, which nests its
@@ -591,7 +596,11 @@ func loadOTelSchema(b []byte) (otelSchema, error) {
 			return otelSchema{}, err
 		}
 		s.allVersions = append(s.allVersions, versionStr)
-		if revision := collectSchemaRevision(versionStr, version); revision != nil {
+		revision, err := collectSchemaRevision(versionStr, version)
+		if err != nil {
+			return otelSchema{}, err
+		}
+		if revision != nil {
 			s.revisions = append(s.revisions, *revision)
 		}
 	}
