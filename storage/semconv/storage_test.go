@@ -582,6 +582,20 @@ versions:
 `)...)
 	return map[string][]byte{
 		"registry.yaml": schema,
+		"1.0.0": []byte(`groups:
+  - id: metric.metric.a
+    type: metric
+    metric_name: metric.a
+    unit: s
+    instrument: histogram
+    stability: stable
+  - id: metric.metric.b
+    type: metric
+    metric_name: metric.b
+    unit: s
+    instrument: histogram
+    stability: stable
+`),
 		"1.1.0": []byte(`groups:
   - id: metric.metric.current
     type: metric

@@ -423,7 +423,10 @@ semconv:
 Exactly one of `files` or `url` must be set. A registry must contain at least one
 OTel schema file (e.g. `registry.yaml`) plus the semver-named semconv files (e.g.
 `1.0.0`) you query as `__semconv_url__` anchors. Files are addressed by base name,
-so each must be unique.
+so each must be unique. Include the semconv versions on both sides of relevant
+rename boundaries to corroborate those renames. A missing boundary version is
+allowed, but the query follows its explicit renames without corroboration and
+reports a warning.
 
 The registry is loaded and validated at startup: it must be reachable and every
 file must parse (a semver-named file as a semconv file, any other as an OTel
@@ -475,11 +478,11 @@ cannot separate a genuine rename from one joining unrelated metrics. Before
 following a structurally safe rename, Prometheus therefore checks it against the
 semconv files of the versions it connects: `unit` and `instrument` describe what a
 metric is rather than what it is called. Semantic conventions forbid a stable
-metric from changing either, so a disagreement between two explicitly stable
-definitions means the two names denote different metrics. Development,
-experimental, deprecated, and unspecified definitions may legitimately evolve;
-Prometheus follows an explicit schema rename between them but reports the metadata
-disagreement.
+metric from changing either, so a disagreement between values specified by two
+explicitly stable definitions means the two names denote different metrics.
+Incomplete, development, experimental, deprecated, and unspecified definitions
+may legitimately evolve; Prometheus follows an explicit schema rename between
+them but reports the metadata disagreement.
 
 The query still returns a safe partial or direct result in every case below,
 with a warning attached:
@@ -488,14 +491,16 @@ with a warning attached:
   definitions that disagree on a specified unit or instrument. That rename is not
   followed and its series are left out, because combining metrics measured in
   different units yields meaningless numbers.
-- **Non-stable metadata changed.** The schema links definitions with different
-  units or instruments, but they are not both explicitly stable. The rename is
+- **Metadata is incomplete or non-stable.** The schema links definitions with
+  different units or instruments, but the metadata is not a positive contradiction
+  between values specified by two explicitly stable definitions. The rename is
   followed because the schema is the available lineage authority, and the query
-  warns that the result was not corroborated by stable metadata.
-- **The rename could not be corroborated.** A name a rename refers to is not
-  declared as a metric by the semconv of the version it belongs to, so there is
-  nothing to check it against. The rename is still followed: a registry may
-  legitimately ship semconv files trimmed to the metrics its operator cares about.
+  reports that the metadata does not prove the metrics are different.
+- **The rename could not be corroborated.** The semconv file for a rename boundary
+  is unavailable, or it does not declare the referenced name as a metric, so there
+  is nothing to check the rename against. The rename is still followed: a registry
+  may legitimately omit unqueried versions or ship semconv files trimmed to the
+  metrics its operator cares about.
 - **The queried metric's identity is unknown.** No semconv version declares the
   queried name, or the versions that do disagree on what it is. This can occur
   across an explicit rename-back history whose metadata changed. Renames that are

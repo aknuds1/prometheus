@@ -346,6 +346,53 @@ func TestGenerateMatcherVariants(t *testing.T) {
 	})
 }
 
+func TestRenameValidatorLookupFailures(t *testing.T) {
+	t.Run("deduplicates an unavailable semconv at one boundary", func(t *testing.T) {
+		rv := &renameValidator{
+			anchorKnown: true,
+			seen:        map[string]struct{}{},
+			lookup: func(string, string) (metricDef, metricLookupStatus) {
+				return metricDef{}, metricFileMissing
+			},
+		}
+
+		require.True(t, rv.allowRevision("1.1.0", "1.0.0", "metric.current", "metric.a"))
+		require.True(t, rv.allowRevision("1.1.0", "1.0.0", "metric.current", "metric.b"))
+		require.Len(t, rv.warnings, 1)
+		require.Contains(t, rv.warnings[0], "version 1.0.0 is unavailable")
+	})
+
+	t.Run("reports an unavailable semconv before an unknown anchor", func(t *testing.T) {
+		rv := &renameValidator{
+			anchorName:    "metric.current",
+			anchorVersion: "1.1.0",
+			seen:          map[string]struct{}{},
+			lookup: func(string, string) (metricDef, metricLookupStatus) {
+				return metricDef{}, metricFileMissing
+			},
+		}
+
+		require.True(t, rv.allowRevision("1.1.0", "1.0.0", "metric.current", "metric.old"))
+		require.Len(t, rv.warnings, 1)
+		require.Contains(t, rv.warnings[0], "version 1.0.0 is unavailable")
+		require.NotContains(t, rv.warnings[0], "no other version")
+	})
+
+	t.Run("fails open for an unknown lookup status", func(t *testing.T) {
+		rv := &renameValidator{
+			anchorKnown: true,
+			seen:        map[string]struct{}{},
+			lookup: func(string, string) (metricDef, metricLookupStatus) {
+				return metricDef{}, metricLookupStatus(255)
+			},
+		}
+
+		require.True(t, rv.allowRevision("1.1.0", "1.0.0", "metric.current", "metric.old"))
+		require.Len(t, rv.warnings, 1)
+		require.Contains(t, rv.warnings[0], "unknown metric lookup status 255")
+	})
+}
+
 func TestMetricLifecycleBoundaries(t *testing.T) {
 	t.Run("stops a corroborated retired name from a later anchor", func(t *testing.T) {
 		schema := testSchemaWithVersions([]string{"1.0.0", "1.1.0", "1.2.0"}, schemaRevision{

@@ -439,21 +439,11 @@ const (
 // file is distinct from a file that omits or ambiguously declares the name.
 type metricLookup func(version, name string) (metricDef, metricLookupStatus)
 
-// metricLookup returns a metricLookup that resolves sibling semconv versions
-// from the same registry directory as semconvURL, e.g. registry/1.0.0 for
-// version 1.0.0 when semconvURL is registry/1.1.0.
-//
-// This is where validating rename edges costs more than the current name-only
-// traversal: answering one query can now touch a semconv file per version in
-// the metric's rename chain rather than the anchor version alone. The per-call
-// memo below collapses repeat lookups within a single query, and getSemconv's
-// process-wide cache means each file is parsed at most once for the lifetime of
-// the process, so the steady-state cost is the resident size of the versions
-// actually queried rather than per-query I/O. It is still a real increase in
-// the resolver's footprint, from the anchor version to O(versions in chain).
-func (e *schemaEngine) metricLookup(semconvURL string) metricLookup {
+// newMetricLookup resolves sibling semconv versions in semconvURL's registry
+// directory and memoizes both successful and failed loads for one query.
+func (e *schemaEngine) newMetricLookup(semconvURL string) metricLookup {
 	dir, _ := path.Split(semconvURL)
-	// memo distinguishes "loaded" from "tried and failed" so an absent semconv
+	// Memo distinguishes "loaded" from "tried and failed" so an absent semconv
 	// is not re-fetched for every hop that consults it.
 	memo := map[string]*semconv{}
 	return func(version, name string) (metricDef, metricLookupStatus) {
@@ -612,6 +602,11 @@ func (rv *renameValidator) allowRevision(revision, destinationVersion, fromName,
 			revision, fromName, toName, destinationVersion, toName)
 		return false
 	}
+	if status == metricFileMissing {
+		rv.warn("version %s is unavailable while checking metric renames at schema revision %s. Prometheus is following explicit schema renames at that boundary without corroboration",
+			destinationVersion, revision)
+		return true
+	}
 	if !rv.anchorKnown {
 		// No semconv version declares the queried name, or the ones that do
 		// disagree on what it is. Every hop is then traversed unchecked, which is
@@ -625,8 +620,6 @@ func (rv *renameValidator) allowRevision(revision, destinationVersion, fromName,
 	}
 
 	switch status {
-	case metricFileMissing:
-		return true
 	case metricUndeclared:
 		rv.warn("schema version %s resolves metric %q to %q, but semconv %s does not declare %q as a metric; the rename could not be corroborated",
 			revision, fromName, toName, destinationVersion, toName)
@@ -636,23 +629,24 @@ func (rv *renameValidator) allowRevision(revision, destinationVersion, fromName,
 			return true
 		}
 		if !def.stablyContradicts(rv.anchorDef) {
-			rv.warn("queried metric %q is declared as %s/%s with %s stability by semconv %s, but schema version %s resolves it to %q, which semconv %s declares as %s/%s with %s stability; following the explicit schema rename because the metadata disagreement is not a positive contradiction between two explicitly stable definitions",
-				rv.anchorName, describeUnit(rv.anchorDef.unit), describeUnit(rv.anchorDef.instrument), describeStability(rv.anchorDef.stability), rv.anchorVersion,
-				revision, toName, destinationVersion, describeUnit(def.unit), describeUnit(def.instrument), describeStability(def.stability))
+			rv.warn("queried metric %q is declared as %s/%s with %s stability by semconv %s, while schema version %s resolves it to %q, declared as %s/%s with %s stability by semconv %s. Prometheus is following the explicit schema rename because the metadata does not prove the metrics are different",
+				rv.anchorName, describeOrUnspecified(rv.anchorDef.unit), describeOrUnspecified(rv.anchorDef.instrument), describeStability(rv.anchorDef.stability), rv.anchorVersion,
+				revision, toName, describeOrUnspecified(def.unit), describeOrUnspecified(def.instrument), describeStability(def.stability), destinationVersion)
 			return true
 		}
 		rv.warn("queried metric %q is declared as %s/%s by semconv %s, but schema version %s resolves it to %q, which semconv %s declares as %s/%s; treating them as different metrics and not merging their series",
-			rv.anchorName, describeUnit(rv.anchorDef.unit), describeUnit(rv.anchorDef.instrument), rv.anchorVersion,
-			revision, toName, destinationVersion, describeUnit(def.unit), describeUnit(def.instrument))
+			rv.anchorName, describeOrUnspecified(rv.anchorDef.unit), describeOrUnspecified(rv.anchorDef.instrument), rv.anchorVersion,
+			revision, toName, destinationVersion, describeOrUnspecified(def.unit), describeOrUnspecified(def.instrument))
 		return false
 	default:
-		panic("unhandled metric lookup status")
+		rv.warn("version %s returned unknown metric lookup status %d while checking schema revision %s. Prometheus is following the explicit schema rename without corroboration",
+			destinationVersion, status, revision)
+		return true
 	}
 }
 
-// describeUnit renders a unit or instrument for a warning message, naming an
-// undeclared one rather than rendering it as an empty string.
-func describeUnit(s string) string {
+// describeOrUnspecified renders an empty unit or instrument explicitly in warnings.
+func describeOrUnspecified(s string) string {
 	if s == "" {
 		return "(unspecified)"
 	}
@@ -2194,7 +2188,7 @@ func (e *schemaEngine) findMatcherVariants(semconvURL, schemaURL string, origina
 		if err := budget.reserveWork(analysis.work); err != nil {
 			return nil, queryContext{}, err
 		}
-		rv, err := newRenameValidator(&schema, e.metricLookup(semconvURL), sc, metricName, budget)
+		rv, err := newRenameValidator(&schema, e.newMetricLookup(semconvURL), sc, metricName, budget)
 		if err != nil {
 			return nil, queryContext{}, err
 		}

@@ -182,15 +182,17 @@ func TestRenameEdgeValidation(t *testing.T) {
 
 	// A registry need not ship a semconv for every version its schema
 	// references, so an absent file means "cannot verify" and must leave the
-	// existing name-traversal behaviour untouched rather than drop series.
-	t.Run("traverses unverifiable renames unchanged when a semconv is absent", func(t *testing.T) {
+	// existing name-traversal behaviour untouched while warning the caller.
+	t.Run("warns but traverses an unverifiable rename when a semconv is absent", func(t *testing.T) {
 		got, warnings := selectRenamed(t, map[string][]byte{
 			"registry.yaml": fmt.Appendf(nil, renameSchema, "old.name", "new.name"),
 			"1.1.0":         metricSemconv("new.name", "s", "histogram"),
 		}, "old.name", "new.name")
 
 		require.Len(t, got, 1, "expected the pre-rename series to still merge, got %v", got)
-		require.Empty(t, warnings, "an unverifiable rename is not evidence of a problem")
+		require.Len(t, warnings, 1)
+		requireWarningsContain(t, warnings, "version 1.0.0 is unavailable")
+		requireWarningsContain(t, warnings, "without corroboration")
 	})
 
 	// A name the semconv does not declare as a metric is a strong hint of a
