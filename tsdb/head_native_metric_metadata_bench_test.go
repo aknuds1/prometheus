@@ -38,12 +38,41 @@ type metricMetadataBenchmarkMode struct {
 	nativeEnabled bool
 }
 
+// metricMetadataBenchmarkModes returns the metadata storage configurations
+// under test: "off" stores none, "legacy" writes metadata WAL records, and
+// "native" fills the in-memory versioned store.
+//
+// All three receive Metadata and MetricFamilyName from the fixture, because
+// clients supply them regardless of what the Head does with them. "off"
+// therefore measures a caller handing over metadata that the Head discards,
+// which is what makes it the control for the other two rather than simply a
+// cheaper benchmark. The name avoids "baseline", which benchstat already uses
+// for the left-hand side of a comparison.
 func metricMetadataBenchmarkModes() []metricMetadataBenchmarkMode {
 	return []metricMetadataBenchmarkMode{
-		{name: "baseline"},
+		{name: "off"},
 		{name: "legacy", legacyEnabled: true},
 		{name: "native", nativeEnabled: true},
 	}
+}
+
+// metricMetadataFamilyOrder decides which family each series belongs to, which
+// in turn decides how often consecutive appends share metadata.
+type metricMetadataFamilyOrder int
+
+const (
+	// familyInterleaved assigns families round-robin, as a Remote Write request may.
+	familyInterleaved metricMetadataFamilyOrder = iota
+	// familyGrouped emits a family's series consecutively, the way a scrape
+	// walks an exposition one metric family at a time.
+	familyGrouped
+)
+
+func (o metricMetadataFamilyOrder) familyOf(series, numSeries, numFamilies int) int {
+	if o == familyGrouped {
+		return series * numFamilies / numSeries
+	}
+	return series % numFamilies
 }
 
 type metricMetadataBenchmarkFixture struct {
@@ -53,6 +82,10 @@ type metricMetadataBenchmarkFixture struct {
 }
 
 func newMetricMetadataBenchmarkFixture(numSeries, numFamilies, numVariants int) *metricMetadataBenchmarkFixture {
+	return newOrderedMetricMetadataBenchmarkFixture(numSeries, numFamilies, numVariants, familyInterleaved)
+}
+
+func newOrderedMetricMetadataBenchmarkFixture(numSeries, numFamilies, numVariants int, order metricMetadataFamilyOrder) *metricMetadataBenchmarkFixture {
 	metricNames := make([]string, numFamilies)
 	for family := range numFamilies {
 		metricNames[family] = fmt.Sprintf("metadata_benchmark_%03d_total", family)
@@ -64,7 +97,7 @@ func newMetricMetadataBenchmarkFixture(numSeries, numFamilies, numVariants int) 
 		options:        make([][]storage.AOptions, numVariants),
 	}
 	for i := range numSeries {
-		family := i % numFamilies
+		family := order.familyOf(i, numSeries, numFamilies)
 		fixture.familyBySeries[i] = family
 		fixture.labels[i] = labels.FromStrings(
 			labels.MetricName, metricNames[family],
@@ -72,8 +105,8 @@ func newMetricMetadataBenchmarkFixture(numSeries, numFamilies, numVariants int) 
 			"job", "metadata-benchmark",
 		)
 	}
-	// Supply metadata in every mode, independently of whether native storage
-	// or legacy metadata WAL recording is enabled.
+	// Supply metadata and its family name in every mode, independently of
+	// whether native storage or legacy metadata WAL recording is enabled.
 	for variant := range numVariants {
 		fixture.options[variant] = make([]storage.AOptions, numFamilies)
 		for family := range numFamilies {
@@ -82,7 +115,10 @@ func newMetricMetadataBenchmarkFixture(numSeries, numFamilies, numVariants int) 
 				Unit: "requests",
 				Help: fmt.Sprintf("Total requests processed by benchmark family %03d, metadata version %02d.", family, variant),
 			}
-			fixture.options[variant][family] = storage.AOptions{Metadata: meta}
+			fixture.options[variant][family] = storage.AOptions{
+				MetricFamilyName: metricNames[family],
+				Metadata:         meta,
+			}
 		}
 	}
 	return fixture
@@ -207,7 +243,7 @@ func validateMetricMetadataBenchmarkState(b *testing.B, h *Head, mode metricMeta
 		}
 	default:
 		if h.nativeMetricMetadata != nil {
-			b.Fatal("baseline unexpectedly created a native metadata store")
+			b.Fatal("mode=off unexpectedly created a native metadata store")
 		}
 		for _, i := range []int{0, len(refs) - 1} {
 			series := h.series.getByID(chunks.HeadSeriesRef(refs[i]))
@@ -218,7 +254,7 @@ func validateMetricMetadataBenchmarkState(b *testing.B, h *Head, mode metricMeta
 			got := series.meta
 			series.Unlock()
 			if got != nil {
-				b.Fatalf("baseline unexpectedly retained metadata for series %d", refs[i])
+				b.Fatalf("mode=off unexpectedly retained metadata for series %d", refs[i])
 			}
 		}
 	}
@@ -301,20 +337,25 @@ func BenchmarkHeadMetricMetadataAppendInMemory(b *testing.B) {
 
 func benchmarkHeadMetricMetadataAppend(b *testing.B, withWAL bool) {
 	const numSeries = 1_000
+	// "stable" interleaves metric families, as a Remote Write request may.
+	// "stable-grouped" appends each family's series together, as a scrape does.
+	// These cases compare workload shapes rather than isolate one optimization.
 	cases := []struct {
 		name          string
 		numFamilies   int
 		setupVersions int
 		numVariants   int
+		order         metricMetadataFamilyOrder
 	}{
-		{name: "stable", numFamilies: 100, setupVersions: 1, numVariants: 1},
-		{name: "stable-unique", numFamilies: numSeries, setupVersions: 1, numVariants: 1},
-		{name: "changing-at-cap", numFamilies: 100, setupVersions: maxNativeMetricMetadataVersions, numVariants: 2},
+		{name: "stable", numFamilies: 100, setupVersions: 1, numVariants: 1, order: familyInterleaved},
+		{name: "stable-grouped", numFamilies: 100, setupVersions: 1, numVariants: 1, order: familyGrouped},
+		{name: "stable-unique", numFamilies: numSeries, setupVersions: 1, numVariants: 1, order: familyInterleaved},
+		{name: "changing-at-cap", numFamilies: 100, setupVersions: maxNativeMetricMetadataVersions, numVariants: 2, order: familyInterleaved},
 	}
 	for _, benchmarkCase := range cases {
 		for _, mode := range metricMetadataBenchmarkModes() {
 			b.Run(fmt.Sprintf("case=%s/mode=%s", benchmarkCase.name, mode.name), func(b *testing.B) {
-				fixture := newMetricMetadataBenchmarkFixture(numSeries, benchmarkCase.numFamilies, benchmarkCase.numVariants)
+				fixture := newOrderedMetricMetadataBenchmarkFixture(numSeries, benchmarkCase.numFamilies, benchmarkCase.numVariants, benchmarkCase.order)
 				refs := make([]storage.SeriesRef, numSeries)
 				h, wal, closeHead := newMetricMetadataBenchmarkHead(b, mode, 1_000_000_000, withWAL)
 				b.Cleanup(closeHead)
@@ -364,7 +405,7 @@ func BenchmarkHeadMetricMetadataAppendConcurrent(b *testing.B) {
 		{name: "stable-unique", numFamilies: func(numSeries int) int { return numSeries }},
 	} {
 		for _, mode := range []metricMetadataBenchmarkMode{
-			{name: "baseline"},
+			{name: "off"},
 			{name: "native", nativeEnabled: true},
 		} {
 			b.Run(fmt.Sprintf("case=%s/mode=%s", benchmarkCase.name, mode.name), func(b *testing.B) {
