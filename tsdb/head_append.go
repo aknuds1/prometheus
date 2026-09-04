@@ -437,13 +437,24 @@ func (a *headAppenderBase) observeNativeMetricMetadata(s *memSeries, timestamp i
 	if a.head.nativeMetricMetadata == nil || m.IsEmpty() {
 		return
 	}
-	if a.nativeMetricMetadata == nil {
-		a.nativeMetricMetadata = a.head.nativeMetricMetadata.getAppender()
-	}
 	if m.Type == "" {
 		m.Type = model.MetricTypeUnknown
 	}
-	a.nativeMetricMetadata.observe(a.head.nativeMetricMetadata, s.ref, timestamp, m)
+
+	// Skip transaction work for metadata matching the committed cache.
+	// A discarded observation cannot reassert this value after an intervening change.
+	s.Lock()
+	unchanged := s.nativeMeta != nil && s.nativeMeta.effectiveFrom <= timestamp &&
+		*s.nativeMeta.metadata == m
+	s.Unlock()
+	if unchanged {
+		return
+	}
+
+	if a.nativeMetricMetadata == nil {
+		a.nativeMetricMetadata = a.head.nativeMetricMetadata.getAppender()
+	}
+	a.nativeMetricMetadata.observe(a.head.nativeMetricMetadata, s, timestamp, m)
 }
 
 func (a *headAppenderBase) clearNativeMetricMetadata() {

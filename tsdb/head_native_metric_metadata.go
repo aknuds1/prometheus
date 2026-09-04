@@ -71,6 +71,14 @@ type nativeMetricMetadataStripe struct {
 	histories map[chunks.HeadSeriesRef]nativeMetricMetadataHistory
 }
 
+// nativeSeriesMetadata caches committed metadata for append-time comparisons.
+// It can lag the history store until publication. The series lock protects the
+// cache; its immutable pointee is shared within the publishing transaction.
+type nativeSeriesMetadata struct {
+	metadata      *metadata.Metadata
+	effectiveFrom int64
+}
+
 // nativeMetricMetadataStore holds a Head's committed, in-memory metadata
 // histories, keyed by series reference. It is shared across appenders and
 // queries; each stripe's lock protects its histories.
@@ -94,7 +102,10 @@ func (s *nativeMetricMetadataStore) stripe(ref chunks.HeadSeriesRef) *nativeMetr
 	return &s.stripes[uint64(ref)%nativeMetricMetadataStripes]
 }
 
-func (s *nativeMetricMetadataStore) mergeLocked(stripe *nativeMetricMetadataStripe, ref chunks.HeadSeriesRef, history nativeMetricMetadataHistory, exists bool, observations []nativeMetricMetadataPoint) {
+// mergeLocked applies observations and returns the newest version of the
+// resulting history, which is not necessarily the newest observation: an
+// out-of-order transaction can leave an older version in front of it.
+func (s *nativeMetricMetadataStore) mergeLocked(stripe *nativeMetricMetadataStripe, ref chunks.HeadSeriesRef, history nativeMetricMetadataHistory, exists bool, observations []nativeMetricMetadataPoint) nativeMetricMetadataPoint {
 	oldLen := len(history.versions)
 	var evictions int
 	if len(history.versions) == 0 || observations[0].effectiveFrom >= history.versions[len(history.versions)-1].effectiveFrom {
@@ -112,6 +123,7 @@ func (s *nativeMetricMetadataStore) mergeLocked(stripe *nativeMetricMetadataStri
 		s.series.Add(1)
 	}
 	s.versions.Add(int64(len(history.versions) - oldLen))
+	return history.versions[len(history.versions)-1]
 }
 
 func (s *nativeMetricMetadataStore) get(ref chunks.HeadSeriesRef) ([]NativeMetricMetadataVersion, bool, bool) {

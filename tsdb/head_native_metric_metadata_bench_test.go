@@ -340,6 +340,7 @@ func benchmarkHeadMetricMetadataAppend(b *testing.B, withWAL bool) {
 	// "stable" interleaves metric families, as a Remote Write request may.
 	// "stable-grouped" appends each family's series together, as a scrape does.
 	// These cases compare workload shapes rather than isolate one optimization.
+	// Once seeded, both skip recording unchanged native metadata.
 	cases := []struct {
 		name          string
 		numFamilies   int
