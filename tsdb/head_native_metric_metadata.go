@@ -30,7 +30,7 @@ import (
 
 const (
 	nativeMetricMetadataStripes     = 256
-	maxNativeMetricMetadataVersions = 32
+	maxNativeMetricMetadataVersions = 5
 )
 
 // ErrNativeMetadataDisabled is returned when native metadata storage is not enabled.
