@@ -22,6 +22,7 @@ import (
 )
 
 const (
+	nativeMetricMetadataBitsPerWord   = 64
 	maxNativeMetricMetadataValues     = 128 // Limits raw metadata retained by a transaction.
 	maxNativeMetricMetadataBatch      = 256 // Limits series merged under one stripe lock.
 	nativeMetricMetadataDirectRefMask = nativeMetricMetadataValueRef(1 << 31)
@@ -86,12 +87,15 @@ type nativeMetricMetadataAppender struct {
 	// Immutable cache values shared across this transaction's series.
 	shared map[unique.Handle[metadata.Metadata]]*metadata.Metadata
 	// Stripes with observations, in order of first use.
-	touched         []uint8
-	stripeFirst     [nativeMetricMetadataStripes]nativeMetricMetadataObservationRef
-	stripeLast      [nativeMetricMetadataStripes]nativeMetricMetadataObservationRef
-	lastMetadata    metadata.Metadata
-	lastObservation nativeMetricMetadataObservationRef
-	haveLast        bool
+	touched     []uint8
+	stripeFirst [nativeMetricMetadataStripes]nativeMetricMetadataObservationRef
+	stripeLast  [nativeMetricMetadataStripes]nativeMetricMetadataObservationRef
+	// One bit per stripe, set when this transaction records observations for
+	// multiple distinct series. Stripe sharing is expected.
+	multiSeriesStripes [nativeMetricMetadataStripes / nativeMetricMetadataBitsPerWord]uint64
+	lastMetadata       metadata.Metadata
+	lastObservation    nativeMetricMetadataObservationRef
+	haveLast           bool
 }
 
 func newNativeMetricMetadataAppender() *nativeMetricMetadataAppender {
@@ -167,6 +171,23 @@ func (a *nativeMetricMetadataAppender) metadataReference(store *nativeMetricMeta
 	return valueRef
 }
 
+// mayHaveObservedSeries reports whether ref may have a buffered observation
+// in this transaction. False is definitive; true may be a false positive.
+func (a *nativeMetricMetadataAppender) mayHaveObservedSeries(ref chunks.HeadSeriesRef) bool {
+	stripe := uint8(uint64(ref) % nativeMetricMetadataStripes)
+	first := a.stripeFirst[stripe]
+	if first == 0 {
+		return false
+	}
+	if a.observations[first-1].series.ref == ref {
+		return true
+	}
+	// The first observed series differs from ref. If multiple series were
+	// observed in this stripe, conservatively report a possible match rather
+	// than walking its observation chain.
+	return a.multiSeriesStripes[stripe/nativeMetricMetadataBitsPerWord]&(uint64(1)<<(stripe%nativeMetricMetadataBitsPerWord)) != 0
+}
+
 // observe buffers m for the series at effectiveFrom without updating committed
 // metadata. Every call adds an observation, even when m is unchanged.
 func (a *nativeMetricMetadataAppender) observe(store *nativeMetricMetadataStore, s *memSeries, effectiveFrom int64, m metadata.Metadata) {
@@ -189,6 +210,10 @@ func (a *nativeMetricMetadataAppender) observe(store *nativeMetricMetadataStore,
 		a.stripeFirst[stripe] = observationRef
 		a.touched = append(a.touched, stripe)
 	} else {
+		first := a.observations[a.stripeFirst[stripe]-1]
+		if first.series.ref != s.ref {
+			a.multiSeriesStripes[stripe/nativeMetricMetadataBitsPerWord] |= uint64(1) << (stripe % nativeMetricMetadataBitsPerWord)
+		}
 		a.observations[a.stripeLast[stripe]-1].next = observationRef
 	}
 	a.stripeLast[stripe] = observationRef
@@ -219,10 +244,9 @@ func (a *nativeMetricMetadataAppender) selectBatchLocked(stripe *nativeMetricMet
 // applyPendingCache publishes each series' newest committed metadata so a later
 // append carrying the same metadata can skip recording it.
 //
-// Must run with no stripe lock held. The store's lock order is stripe before
-// series: observeNativeMetricMetadata releases the series lock before reaching
-// the store, and nothing takes a stripe lock while holding a series one.
-func (a *nativeMetricMetadataAppender) applyPendingCache() {
+// Called with no stripe lock held. Shared copies are allocated before the
+// newest store state is revalidated under stripe-before-series lock order.
+func (a *nativeMetricMetadataAppender) applyPendingCache(stripe *nativeMetricMetadataStripe) {
 	for _, pending := range a.pending {
 		shared, ok := a.shared[pending.handle]
 		if !ok {
@@ -232,17 +256,25 @@ func (a *nativeMetricMetadataAppender) applyPendingCache() {
 			*shared = pending.metadata
 			a.shared[pending.handle] = shared
 		}
-		// Reuse the series' entry rather than replacing it. A series whose
-		// metadata changes every scrape would otherwise allocate one per
-		// commit, which costs more than the skip saves.
-		pending.series.Lock()
-		if pending.series.nativeMeta == nil {
-			pending.series.nativeMeta = &nativeSeriesMetadata{}
+	}
+
+	stripe.mtx.RLock()
+	for _, pending := range a.pending {
+		history, ok := stripe.histories[pending.series.ref]
+		if !ok || len(history.versions) == 0 {
+			continue
 		}
-		pending.series.nativeMeta.metadata = shared
-		pending.series.nativeMeta.effectiveFrom = pending.effectiveFrom
+		newest := history.versions[len(history.versions)-1]
+		if newest.metadata != pending.handle || newest.effectiveFrom != pending.effectiveFrom {
+			continue
+		}
+		// Reuse the series' sidecar rather than replacing it. A series whose
+		// metadata changes every scrape would otherwise allocate one per commit.
+		pending.series.Lock()
+		pending.series.setNativeMetadataLocked(a.shared[pending.handle], pending.effectiveFrom)
 		pending.series.Unlock()
 	}
+	stripe.mtx.RUnlock()
 	clear(a.pending)
 	a.pending = a.pending[:0]
 }
@@ -259,6 +291,7 @@ func (s *nativeMetricMetadataStore) putAppender(appender *nativeMetricMetadataAp
 		appender.stripeFirst[stripe] = 0
 		appender.stripeLast[stripe] = 0
 	}
+	appender.multiSeriesStripes = [nativeMetricMetadataStripes / nativeMetricMetadataBitsPerWord]uint64{}
 	clear(appender.observations)
 	appender.observations = appender.observations[:0]
 	clear(appender.values)
@@ -380,8 +413,9 @@ func (s *nativeMetricMetadataStore) commitAppenderStripe(stripeIndex uint8, appe
 			})
 		}
 		stripe.mtx.Unlock()
-		// Publish committed values to the per-series append cache.
-		appender.applyPendingCache()
+		// Revalidate before publishing: another commit or GC may have changed
+		// the history since the write lock was released.
+		appender.applyPendingCache(stripe)
 	}
 }
 

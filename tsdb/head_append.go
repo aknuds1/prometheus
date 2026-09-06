@@ -21,8 +21,6 @@ import (
 	"math"
 	"time"
 
-	"github.com/prometheus/common/model"
-
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
@@ -429,28 +427,25 @@ type headAppenderBase struct {
 	useHistogramST                  bool // Whether ST-capable histogram chunk encoding is used in this append.
 }
 
-// observeNativeMetricMetadata records m for s at timestamp. The store check is
-// repeated at the call site, which skips the call entirely when the Head has no
-// native metadata store, so that the disabled case costs a branch rather than a
-// call. This one keeps the method safe for callers that do not.
-func (a *headAppenderBase) observeNativeMetricMetadata(s *memSeries, timestamp int64, m metadata.Metadata) {
-	if a.head.nativeMetricMetadata == nil || m.IsEmpty() {
-		return
+// shouldObserveNativeMetricMetadataLocked checks committed and transaction-local state.
+// The caller must hold the series lock. A nil value disables observation.
+// Discarded observations cannot reassert metadata after intervening changes.
+func (a *headAppenderBase) shouldObserveNativeMetricMetadataLocked(s *memSeries, timestamp int64, m *metadata.Metadata) bool {
+	if m == nil {
+		return false
 	}
-	if m.Type == "" {
-		m.Type = model.MetricTypeUnknown
+	// A pending change can make a return to the committed value significant:
+	// with committed A, the transaction must retain both B and a following A.
+	if a.nativeMetricMetadata != nil && a.nativeMetricMetadata.mayHaveObservedSeries(s.ref) {
+		return true
 	}
+	native := s.nativeMetadataLocked()
+	// Matching the newest value does not establish what applied at an older
+	// timestamp; that observation may move the start of the matching version.
+	return native == nil || native.effectiveFrom > timestamp || *native.metadata != *m
+}
 
-	// Skip transaction work for metadata matching the committed cache.
-	// A discarded observation cannot reassert this value after an intervening change.
-	s.Lock()
-	unchanged := s.nativeMeta != nil && s.nativeMeta.effectiveFrom <= timestamp &&
-		*s.nativeMeta.metadata == m
-	s.Unlock()
-	if unchanged {
-		return
-	}
-
+func (a *headAppenderBase) recordNativeMetricMetadata(s *memSeries, timestamp int64, m metadata.Metadata) {
 	if a.nativeMetricMetadata == nil {
 		a.nativeMetricMetadata = a.head.nativeMetricMetadata.getAppender()
 	}
@@ -1127,7 +1122,8 @@ func (a *headAppender) UpdateMetadata(ref storage.SeriesRef, lset labels.Labels,
 	}
 
 	s.Lock()
-	hasNewMetadata := s.meta == nil || *s.meta != meta
+	currentMetadata := s.legacyMetadataLocked()
+	hasNewMetadata := currentMetadata == nil || *currentMetadata != meta
 	s.Unlock()
 
 	if hasNewMetadata {
@@ -1781,7 +1777,7 @@ func commitMetadata(b *appendBatch) {
 	for i, m := range b.metadata {
 		series = b.metadataSeries[i]
 		series.Lock()
-		series.meta = &metadata.Metadata{Type: record.ToMetricType(m.Type), Unit: m.Unit, Help: m.Help}
+		series.setLegacyMetadataLocked(&metadata.Metadata{Type: record.ToMetricType(m.Type), Unit: m.Unit, Help: m.Help})
 		series.Unlock()
 	}
 }

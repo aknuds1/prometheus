@@ -43,6 +43,7 @@ type NativeMetricMetadataVersion struct {
 }
 
 // NativeMetricMetadataSeries contains native metric metadata for one series.
+// Labels are immutable; callers must not modify them.
 type NativeMetricMetadataSeries struct {
 	Labels labels.Labels
 	// Versions contains change points ordered by increasing EffectiveFrom.
@@ -126,24 +127,18 @@ func (s *nativeMetricMetadataStore) mergeLocked(stripe *nativeMetricMetadataStri
 	return history.versions[len(history.versions)-1]
 }
 
-func (s *nativeMetricMetadataStore) get(ref chunks.HeadSeriesRef) ([]NativeMetricMetadataVersion, bool, bool) {
+// snapshot takes the stripe read lock and copies ref's history into snapshot.
+// It reports whether the history exists, leaving snapshot unchanged on a miss.
+func (s *nativeMetricMetadataStore) snapshot(ref chunks.HeadSeriesRef, snapshot *nativeMetricMetadataSnapshot) bool {
 	stripe := s.stripe(ref)
 	stripe.mtx.RLock()
 	history, ok := stripe.histories[ref]
-	if !ok {
-		stripe.mtx.RUnlock()
-		return nil, false, false
+	if ok {
+		snapshot.count = copy(snapshot.points[:], history.versions)
+		snapshot.truncated = history.truncated
 	}
-	versions := make([]NativeMetricMetadataVersion, len(history.versions))
-	for i, version := range history.versions {
-		versions[i] = NativeMetricMetadataVersion{
-			EffectiveFrom: version.effectiveFrom,
-			Metadata:      version.metadata.Value(),
-		}
-	}
-	truncated := history.truncated
 	stripe.mtx.RUnlock()
-	return versions, truncated, true
+	return ok
 }
 
 func (s *nativeMetricMetadataStore) has(ref chunks.HeadSeriesRef) bool {
@@ -302,6 +297,21 @@ func mergeOverlappingNativeMetricMetadata(existing, observations []nativeMetricM
 	return versions, evictions
 }
 
+// nativeMetricMetadataSnapshot owns its points independently of the store lock.
+type nativeMetricMetadataSnapshot struct {
+	points    [maxNativeMetricMetadataVersions]nativeMetricMetadataPoint
+	count     int
+	truncated bool
+}
+
+func (s *nativeMetricMetadataSnapshot) expand() []NativeMetricMetadataVersion {
+	versions := make([]NativeMetricMetadataVersion, s.count)
+	for i, point := range s.points[:s.count] {
+		versions[i] = NativeMetricMetadataVersion{EffectiveFrom: point.effectiveFrom, Metadata: point.metadata.Value()}
+	}
+	return versions
+}
+
 type nativeMetricMetadataPostings struct {
 	index.Postings
 	store *nativeMetricMetadataStore
@@ -354,33 +364,37 @@ func (h *Head) nativeMetricMetadataForMatchers(ctx context.Context, matcherSets 
 		store:    h.nativeMetricMetadata,
 	})
 
+	return h.nativeMetricMetadataForPostings(ctx, p, limit)
+}
+
+// nativeMetricMetadataForPostings consumes label-sorted references, not retained
+// series pointers.
+func (h *Head) nativeMetricMetadataForPostings(ctx context.Context, p index.Postings, limit int) ([]NativeMetricMetadataSeries, bool, error) {
 	result := make([]NativeMetricMetadataSeries, 0)
-	builder := labels.NewScratchBuilder(0)
 	for p.Next() {
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
-		versions, historyTruncated, ok := h.nativeMetricMetadata.get(chunks.HeadSeriesRef(p.At()))
-		if !ok {
+		ref := chunks.HeadSeriesRef(p.At())
+		var snapshot nativeMetricMetadataSnapshot
+		if !h.nativeMetricMetadata.snapshot(ref, &snapshot) {
 			continue
 		}
-		if err := reader.Series(p.At(), &builder, nil); err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				continue
-			}
-			return nil, false, err
+		// Revalidate Head membership after reading metadata. labels takes the
+		// series lock only in builds whose label representation can change.
+		series := h.series.getByID(ref)
+		if series == nil {
+			continue
 		}
-		// Check the limit only once a series has actually produced a result.
-		// Either continue above can still skip a posting when a concurrent gc
-		// removes the series, so checking earlier would report truncation
-		// without a further result existing.
+		lset := series.labels()
+		// Only a live additional row proves truncation. Do not expand its metadata.
 		if limit > 0 && len(result) == limit {
 			return result, true, nil
 		}
 		result = append(result, NativeMetricMetadataSeries{
-			Labels:    builder.Labels(),
-			Versions:  versions,
-			Truncated: historyTruncated,
+			Labels:    lset,
+			Versions:  snapshot.expand(),
+			Truncated: snapshot.truncated,
 		})
 	}
 	if err := p.Err(); err != nil {

@@ -120,9 +120,14 @@ type Head struct {
 	// All series addressable by their ID or hash.
 	series *stripeSeries
 
-	// Native metric metadata histories are kept outside memSeries, which holds
-	// only a pointer to the newest committed entry so that appends can tell
-	// whether they have anything to record.
+	// Native metric metadata histories live outside memSeries. Their maps also
+	// filter out references without metadata before label sorting. Each series
+	// lazily caches committed metadata and its timestamp for append-time checks.
+	//
+	// A lazy series-owned history could also avoid enlarging memSeries and keep
+	// the unchanged-append fast path. An earlier prototype saved memory but
+	// slowed the measured sparse queries; that layout combined with a separate
+	// presence index remains untested.
 	nativeMetricMetadata *nativeMetricMetadataStore
 
 	walExpiriesMtx sync.Mutex
@@ -2805,8 +2810,7 @@ func (s sample) Copy() chunks.Sample {
 // are goroutine safe and it is the caller's responsibility to lock it.
 type memSeries struct {
 	// Members up to the Mutex are not changed after construction, so can be accessed without a lock.
-	ref  chunks.HeadSeriesRef
-	meta *metadata.Metadata
+	ref chunks.HeadSeriesRef
 
 	// Series labels hash to use for sharding purposes. The value is always 0 when sharding has not
 	// been explicitly enabled in TSDB.
@@ -2817,15 +2821,10 @@ type memSeries struct {
 
 	lset labels.Labels // Locking required with -tags dedupelabels, not otherwise.
 
-	// Newest native metadata committed for this series, nil until the first is
-	// recorded. Distinct from meta, which belongs to the metadata WAL path:
-	// this one must only ever be set once the native store has actually been
-	// updated, or an append would skip recording metadata the store never saw.
-	//
-	// The pointee is mutated in place under the series lock, so readers must
-	// dereference it inside their critical section and must not retain the
-	// pointer beyond it.
-	nativeMeta *nativeSeriesMetadata
+	// Lazily allocated after either metadata path commits state for this series.
+	// The series lock protects this pointer and its contents, except during
+	// legacy WAL replay, which exclusively owns metadata until initialization completes.
+	metadata *memSeriesMetadata
 
 	// Immutable chunks on disk that have not yet gone into a block, in order of ascending time stamps.
 	// When compaction runs, chunks get moved into a block and all pointers are shifted like so:
@@ -2872,6 +2871,43 @@ type memSeries struct {
 
 	// txs is nil if isolation is disabled.
 	txs *txRing
+}
+
+// memSeriesMetadata holds the independent native and legacy metadata state.
+type memSeriesMetadata struct {
+	native nativeSeriesMetadata
+	legacy *metadata.Metadata
+}
+
+func (s *memSeries) ensureMetadataLocked() *memSeriesMetadata {
+	if s.metadata == nil {
+		s.metadata = &memSeriesMetadata{}
+	}
+	return s.metadata
+}
+
+func (s *memSeries) legacyMetadataLocked() *metadata.Metadata {
+	if s.metadata == nil {
+		return nil
+	}
+	return s.metadata.legacy
+}
+
+func (s *memSeries) setLegacyMetadataLocked(m *metadata.Metadata) {
+	s.ensureMetadataLocked().legacy = m
+}
+
+func (s *memSeries) nativeMetadataLocked() *nativeSeriesMetadata {
+	if s.metadata == nil || s.metadata.native.metadata == nil {
+		return nil
+	}
+	return &s.metadata.native
+}
+
+func (s *memSeries) setNativeMetadataLocked(m *metadata.Metadata, effectiveFrom int64) {
+	native := &s.ensureMetadataLocked().native
+	native.metadata = m
+	native.effectiveFrom = effectiveFrom
 }
 
 // Layout of memSeries.state. After construction, it is only read or written with

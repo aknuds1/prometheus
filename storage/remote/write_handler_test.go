@@ -916,18 +916,18 @@ func TestRemoteWriteHandler_V2NativeMetadata(t *testing.T) {
 				return
 			}
 
-			var b labels.ScratchBuilder
+			b := labels.NewScratchBuilder(0)
 			expectedLabels, err := writeV2RequestFixture.Timeseries[0].ToLabels(&b, writeV2RequestFixture.Symbols)
 			require.NoError(t, err)
-			require.Equal(t, []tsdb.NativeMetricMetadataSeries{{
-				Labels: expectedLabels,
-				Versions: []tsdb.NativeMetricMetadataVersion{
-					{EffectiveFrom: 10, Metadata: writeV2RequestSeries1Metadata},
-					{EffectiveFrom: 20, Metadata: writeV2RequestSeries2Metadata},
-					{EffectiveFrom: 30, Metadata: writeV2RequestSeries1Metadata},
-					{EffectiveFrom: 50, Metadata: writeV2RequestSeries2Metadata},
-				},
-			}}, result)
+			require.Len(t, result, 1)
+			require.True(t, labels.Equal(expectedLabels, result[0].Labels))
+			require.False(t, result[0].Truncated)
+			require.Equal(t, []tsdb.NativeMetricMetadataVersion{
+				{EffectiveFrom: 10, Metadata: writeV2RequestSeries1Metadata},
+				{EffectiveFrom: 20, Metadata: writeV2RequestSeries2Metadata},
+				{EffectiveFrom: 30, Metadata: writeV2RequestSeries1Metadata},
+				{EffectiveFrom: 50, Metadata: writeV2RequestSeries2Metadata},
+			}, result[0].Versions)
 		})
 	}
 }
