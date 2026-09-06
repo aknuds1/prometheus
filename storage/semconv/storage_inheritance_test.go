@@ -55,6 +55,7 @@ groups:
   - id: attributes.queue
     type: attribute_group
     extends: attributes.queue.base
+    prefix: legacy
     attributes:
       - id: partition
   - id: metric.queue.depth
@@ -75,6 +76,7 @@ groups:
   - id: attributes.queue
     type: attribute_group
     extends: attributes.queue.base
+    prefix: tenant
     attributes:
       - id: partition
   - id: attributes.identity
