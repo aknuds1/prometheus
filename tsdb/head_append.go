@@ -427,26 +427,21 @@ type headAppenderBase struct {
 	useHistogramST                  bool // Whether ST-capable histogram chunk encoding is used in this append.
 }
 
-// observeNativeMetricMetadata records m for s at timestamp. The store check is
-// repeated at the call site, which skips the call entirely when the Head has no
-// native metadata store, so that the disabled case costs a branch rather than a
-// call. This one keeps the method safe for callers that do not.
-func (a *headAppenderBase) observeNativeMetricMetadata(s *memSeries, timestamp int64, m metadata.Metadata) {
-	if a.head.nativeMetricMetadata == nil || m.IsEmpty() {
-		return
+// shouldObserveNativeMetricMetadataLocked checks committed and transaction-local state.
+// The caller must hold the series lock. A nil value disables observation.
+// Discarded observations cannot reassert metadata after intervening changes.
+func (a *headAppenderBase) shouldObserveNativeMetricMetadataLocked(s *memSeries, timestamp int64, m *metadata.Metadata) bool {
+	if m == nil {
+		return false
 	}
-	m = canonicalMetricMetadata(m)
-
-	// Skip transaction work for metadata matching the committed cache.
-	// A discarded observation cannot reassert this value after an intervening change.
-	s.Lock()
-	unchanged := s.nativeMeta != nil && s.nativeMeta.effectiveFrom <= timestamp &&
-		*s.nativeMeta.metadata == m
-	s.Unlock()
-	if unchanged {
-		return
+	if a.nativeMetricMetadata != nil && a.nativeMetricMetadata.mayHaveObservedSeries(s.ref) {
+		return true
 	}
+	native := s.nativeMetadataLocked()
+	return native == nil || native.effectiveFrom > timestamp || *native.metadata != *m
+}
 
+func (a *headAppenderBase) recordNativeMetricMetadata(s *memSeries, timestamp int64, m metadata.Metadata) {
 	if a.nativeMetricMetadata == nil {
 		a.nativeMetricMetadata = a.head.nativeMetricMetadata.getAppender()
 	}
@@ -1123,7 +1118,8 @@ func (a *headAppender) UpdateMetadata(ref storage.SeriesRef, lset labels.Labels,
 	}
 
 	s.Lock()
-	hasNewMetadata := s.meta == nil || *s.meta != meta
+	currentMetadata := s.legacyMetadataLocked()
+	hasNewMetadata := currentMetadata == nil || *currentMetadata != meta
 	s.Unlock()
 
 	if hasNewMetadata {
@@ -1777,7 +1773,7 @@ func commitMetadata(b *appendBatch) {
 	for i, m := range b.metadata {
 		series = b.metadataSeries[i]
 		series.Lock()
-		series.meta = &metadata.Metadata{Type: record.ToMetricType(m.Type), Unit: m.Unit, Help: m.Help}
+		series.setLegacyMetadataLocked(&metadata.Metadata{Type: record.ToMetricType(m.Type), Unit: m.Unit, Help: m.Help})
 		series.Unlock()
 	}
 }

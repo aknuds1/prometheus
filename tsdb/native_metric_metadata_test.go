@@ -15,9 +15,9 @@ package tsdb
 
 import (
 	"context"
-	"errors"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"unique"
@@ -26,12 +26,12 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 
+	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
-	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/prometheus/prometheus/util/compression"
 )
 
@@ -59,6 +59,23 @@ func nativeMetadataTxn(app storage.AppenderV2) *nativeMetricMetadataAppender {
 // sharing a ref behave as one series.
 func nativeMetadataSeries(ref chunks.HeadSeriesRef) *memSeries {
 	return &memSeries{ref: ref}
+}
+
+func legacyMetadataForTest(s *memSeries) *metadata.Metadata {
+	s.Lock()
+	defer s.Unlock()
+	return s.legacyMetadataLocked()
+}
+
+func nativeMetadataForTest(s *memSeries) *nativeSeriesMetadata {
+	s.Lock()
+	defer s.Unlock()
+	native := s.nativeMetadataLocked()
+	if native == nil {
+		return nil
+	}
+	nativeCopy := *native
+	return &nativeCopy
 }
 
 // commitNativeMetricMetadata applies observations for ref as one transaction
@@ -180,7 +197,7 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 		appender.points = appender.points[:1]
 		store.putAppender(appender)
 
-		appender = store.getAppender()
+		// Inspect this exact object; sync.Pool need not return it again.
 		require.Empty(t, appender.observations)
 		require.Empty(t, appender.values)
 		require.Empty(t, appender.valueRefs)
@@ -194,7 +211,26 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 		require.Empty(t, appender.touched)
 		require.Zero(t, appender.stripeFirst)
 		require.Zero(t, appender.stripeLast)
+		require.Zero(t, appender.stripeCollision)
 		require.False(t, appender.haveLast)
+	})
+
+	t.Run("tracks observations through bounded stripe collisions", func(t *testing.T) {
+		store := newNativeMetricMetadataStore()
+		appender := store.getAppender()
+		m := canonicalMetricMetadata(metadata.Metadata{Help: "A"})
+		firstRef := chunks.HeadSeriesRef(1)
+		secondRef := firstRef + nativeMetricMetadataStripes
+		thirdRef := secondRef + nativeMetricMetadataStripes
+
+		require.False(t, appender.mayHaveObservedSeries(firstRef))
+		appender.observe(store, nativeMetadataSeries(firstRef), 100, m)
+		require.True(t, appender.mayHaveObservedSeries(firstRef))
+		require.False(t, appender.mayHaveObservedSeries(secondRef))
+
+		appender.observe(store, nativeMetadataSeries(secondRef), 100, m)
+		require.True(t, appender.mayHaveObservedSeries(secondRef))
+		require.True(t, appender.mayHaveObservedSeries(thirdRef), "a collided stripe must be conservative")
 		store.putAppender(appender)
 	})
 }
@@ -391,6 +427,38 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 			}, versions)
 		}
 	})
+
+	t.Run("stale publisher cannot overwrite the newest series cache", func(t *testing.T) {
+		store := newNativeMetricMetadataStore()
+		ref := chunks.HeadSeriesRef(1)
+		series := nativeMetadataSeries(ref)
+
+		initial := store.getAppender()
+		initial.observe(store, series, 100, a)
+		store.commitAppender(initial)
+		store.putAppender(initial)
+
+		stale := store.getAppender()
+		stale.pending = append(stale.pending, nativeMetricMetadataPendingCache{
+			series:        series,
+			handle:        unique.Make(canonicalMetricMetadata(a)),
+			metadata:      canonicalMetricMetadata(a),
+			effectiveFrom: 100,
+		})
+
+		newer := store.getAppender()
+		newer.observe(store, series, 200, b)
+		newer.observe(store, series, 300, a)
+		store.commitAppender(newer)
+		store.putAppender(newer)
+
+		stale.applyPendingCache(store.stripe(ref))
+		got := nativeMetadataForTest(series)
+		require.NotNil(t, got)
+		require.Equal(t, int64(300), got.effectiveFrom)
+		require.Equal(t, canonicalMetricMetadata(a), *got.metadata)
+		store.putAppender(stale)
+	})
 }
 
 func TestNativeMetricMetadataStoreVersioning(t *testing.T) {
@@ -542,33 +610,146 @@ func TestNativeMetricMetadataStoreCapsVersions(t *testing.T) {
 	require.Zero(t, store.versions.Load())
 }
 
-func TestNativeMetricMetadataPostings(t *testing.T) {
-	t.Run("Next and Seek filter refs", func(t *testing.T) {
-		store := newNativeMetricMetadataStore()
-		commitNativeMetricMetadata(store, 1, makeNativeMetricMetadataPoint(1, metadata.Metadata{Help: "one"}))
-		commitNativeMetricMetadata(store, 3, makeNativeMetricMetadataPoint(1, metadata.Metadata{Help: "three"}))
+func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
+	meta := metadata.Metadata{Type: model.MetricTypeCounter, Unit: "requests", Help: "requests"}
+	for _, tc := range []struct {
+		name   string
+		legacy bool
+		native bool
+	}{
+		{name: "off"},
+		{name: "legacy", legacy: true},
+		{name: "native", native: true},
+		{name: "dual", legacy: true, native: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := newTestHeadDefaultOptions(1000, true)
+			opts.EnableMetadataWALRecords = tc.legacy
+			opts.EnableNativeMetadata = tc.native
+			head, _ := newTestHeadWithOptions(t, compression.None, opts)
+			lset := labels.FromStrings(labels.MetricName, "requests_total", "job", "api")
 
-		p := &nativeMetricMetadataPostings{
-			Postings: index.NewListPostings([]storage.SeriesRef{1, 2, 3, 4}),
-			store:    store,
-		}
-		require.True(t, p.Next())
-		require.Equal(t, storage.SeriesRef(1), p.At())
-		require.True(t, p.Seek(2))
-		require.Equal(t, storage.SeriesRef(3), p.At())
-		require.False(t, p.Seek(4))
-		require.NoError(t, p.Err())
+			app := head.AppenderV2(context.Background())
+			ref, err := app.Append(0, lset, 0, 100, 1, nil, nil, storage.AOptions{Metadata: meta})
+			require.NoError(t, err)
+			series := head.series.getByID(chunks.HeadSeriesRef(ref))
+			series.Lock()
+			hasSidecar := series.metadata != nil
+			series.Unlock()
+			require.False(t, hasSidecar, "uncommitted metadata must not allocate the sidecar")
+			require.NoError(t, app.Commit())
+
+			series.Lock()
+			hasSidecar = series.metadata != nil
+			hasLegacy := series.legacyMetadataLocked() != nil
+			hasNative := series.nativeMetadataLocked() != nil
+			series.Unlock()
+			require.Equal(t, tc.legacy || tc.native, hasSidecar)
+			require.Equal(t, tc.legacy, hasLegacy)
+			require.Equal(t, tc.native, hasNative)
+		})
+	}
+
+	t.Run("rollback and empty metadata do not allocate", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, true)
+		opts.EnableMetadataWALRecords = true
+		opts.EnableNativeMetadata = true
+		head, _ := newTestHeadWithOptions(t, compression.None, opts)
+		ctx := context.Background()
+
+		app := head.AppenderV2(ctx)
+		ref, err := app.Append(0, labels.FromStrings(labels.MetricName, "rolled_back"), 0, 100, 1, nil, nil, storage.AOptions{Metadata: meta})
+		require.NoError(t, err)
+		series := head.series.getByID(chunks.HeadSeriesRef(ref))
+		require.NoError(t, app.Rollback())
+		series.Lock()
+		hasSidecar := series.metadata != nil
+		series.Unlock()
+		require.False(t, hasSidecar)
+
+		app = head.AppenderV2(ctx)
+		ref, err = app.Append(0, labels.FromStrings(labels.MetricName, "empty"), 0, 100, 1, nil, nil, storage.AOptions{})
+		require.NoError(t, err)
+		require.NoError(t, app.Commit())
+		series = head.series.getByID(chunks.HeadSeriesRef(ref))
+		series.Lock()
+		hasSidecar = series.metadata != nil
+		series.Unlock()
+		require.False(t, hasSidecar)
 	})
 
-	t.Run("underlying error is propagated", func(t *testing.T) {
-		expectedErr := errors.New("postings failed")
-		p := &nativeMetricMetadataPostings{
-			Postings: index.ErrPostings(expectedErr),
-			store:    newNativeMetricMetadataStore(),
-		}
-		require.False(t, p.Next())
-		require.ErrorIs(t, p.Err(), expectedErr)
+	t.Run("rejected append does not allocate", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, true)
+		opts.EnableMetadataWALRecords = true
+		opts.EnableNativeMetadata = true
+		head, _ := newTestHeadWithOptions(t, compression.None, opts)
+		ctx := context.Background()
+		lset := labels.FromStrings(labels.MetricName, "rejected")
+
+		seed := head.AppenderV2(ctx)
+		ref, err := seed.Append(0, lset, 0, 100, 1, nil, nil, storage.AOptions{})
+		require.NoError(t, err)
+		require.NoError(t, seed.Commit())
+
+		app := head.AppenderV2(ctx)
+		_, err = app.Append(ref, lset, 0, 50, 0.5, nil, nil, storage.AOptions{Metadata: meta, RejectOutOfOrder: true})
+		require.ErrorIs(t, err, storage.ErrOutOfOrderSample)
+		require.NoError(t, app.Rollback())
+		series := head.series.getByID(chunks.HeadSeriesRef(ref))
+		series.Lock()
+		hasSidecar := series.metadata != nil
+		series.Unlock()
+		require.False(t, hasSidecar)
 	})
+
+	t.Run("WAL failure does not allocate", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, true)
+		opts.EnableMetadataWALRecords = true
+		opts.EnableNativeMetadata = true
+		head, wal := newTestHeadWithOptions(t, compression.None, opts)
+
+		app := head.AppenderV2(context.Background())
+		ref, err := app.Append(0, labels.FromStrings(labels.MetricName, "wal_failure"), 0, 100, 1, nil, nil, storage.AOptions{Metadata: meta})
+		require.NoError(t, err)
+		series := head.series.getByID(chunks.HeadSeriesRef(ref))
+		require.NoError(t, wal.Close())
+		require.Error(t, app.Commit())
+		series.Lock()
+		hasSidecar := series.metadata != nil
+		series.Unlock()
+		require.False(t, hasSidecar)
+	})
+}
+
+func TestHeadMetadataWALReplayPopulatesOnlyLegacySidecarState(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions()
+	opts.EnableMetadataWALRecords = true
+	opts.EnableNativeMetadata = true
+	db := newTestDB(t, withDir(dir), withOpts(opts))
+	ctx := context.Background()
+	lset := labels.FromStrings(labels.MetricName, "requests_total")
+	meta := metadata.Metadata{Type: model.MetricTypeCounter, Help: "requests"}
+
+	app := db.Appender(ctx)
+	ref, err := app.Append(0, lset, 100, 1)
+	require.NoError(t, err)
+	_, err = app.UpdateMetadata(ref, lset, meta)
+	require.NoError(t, err)
+	require.NoError(t, app.Commit())
+	require.NoError(t, db.Close())
+
+	reopened := newTestDB(t, withDir(dir), withOpts(opts))
+	series := reopened.head.series.getByHash(lset.Hash(), lset)
+	require.NotNil(t, series)
+	series.Lock()
+	hasSidecar := series.metadata != nil
+	series.Unlock()
+	require.True(t, hasSidecar)
+	require.Equal(t, &meta, legacyMetadataForTest(series))
+	require.Nil(t, nativeMetadataForTest(series))
+	_, _, ok := reopened.head.nativeMetricMetadata.get(series.ref)
+	require.False(t, ok)
 }
 
 func TestHeadAppenderV2NativeMetricMetadataLifecycle(t *testing.T) {
@@ -589,21 +770,18 @@ func TestHeadAppenderV2NativeMetricMetadataLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	series := head.series.getByID(chunks.HeadSeriesRef(ref))
 	series.Lock()
-	require.Equal(t, uint32(2), series.pendingCommitCount()) // Created series and sample.
+	pending := series.pendingCommitCount()
 	series.Unlock()
+	require.Equal(t, uint32(2), pending) // Created series and sample.
 	require.NoError(t, app.Commit())
-	series.Lock()
-	require.Equal(t, &a, series.meta)
-	series.Unlock()
+	require.Equal(t, &a, legacyMetadataForTest(series))
 
 	// The shared observation populates both native and legacy metadata stores.
 	app = head.AppenderV2(ctx)
 	_, err = app.Append(ref, seriesLabels, 0, 150, 1.5, nil, nil, storage.AOptions{Metadata: b})
 	require.NoError(t, err)
 	require.NoError(t, app.Commit())
-	series.Lock()
-	require.Equal(t, &b, series.meta)
-	series.Unlock()
+	require.Equal(t, &b, legacyMetadataForTest(series))
 
 	app = head.AppenderV2(ctx)
 	_, err = app.Append(ref, seriesLabels, 0, 200, 2, nil, nil, storage.AOptions{
@@ -611,8 +789,9 @@ func TestHeadAppenderV2NativeMetricMetadataLifecycle(t *testing.T) {
 	})
 	require.NoError(t, err)
 	series.Lock()
-	require.Equal(t, uint32(1), series.pendingCommitCount()) // Sample.
+	pending = series.pendingCommitCount()
 	series.Unlock()
+	require.Equal(t, uint32(1), pending) // Sample.
 	require.NoError(t, app.Rollback())
 
 	nameMatcher := labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "requests_total")
@@ -641,9 +820,7 @@ func TestHeadAppenderV2NativeMetricMetadataLifecycle(t *testing.T) {
 		{EffectiveFrom: 150, Metadata: b},
 		{EffectiveFrom: 300, Metadata: c},
 	}, result[0].Versions)
-	series.Lock()
-	require.Equal(t, &b, series.meta) // Legacy metadata ignores stale samples.
-	series.Unlock()
+	require.Equal(t, &b, legacyMetadataForTest(series)) // Legacy metadata ignores stale samples.
 
 	head.gcSeries([]storage.SeriesRef{ref}, 301, func(*memSeries) bool { return true })
 	result, _, err = head.nativeMetricMetadataForMatchers(ctx, [][]*labels.Matcher{{nameMatcher}}, 0)
@@ -671,8 +848,9 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 
 		series := head.series.getByID(chunks.HeadSeriesRef(ref))
 		series.Lock()
-		require.Equal(t, uint32(4), series.pendingCommitCount()) // Created series and three samples.
+		pending := series.pendingCommitCount()
 		series.Unlock()
+		require.Equal(t, uint32(4), pending) // Created series and three samples.
 		require.NoError(t, app.Commit())
 
 		versions, truncated, ok := head.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
@@ -683,8 +861,9 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 			{EffectiveFrom: 200, Metadata: c},
 		}, versions)
 		series.Lock()
-		require.Zero(t, series.pendingCommitCount())
+		pending = series.pendingCommitCount()
 		series.Unlock()
+		require.Zero(t, pending)
 	})
 
 	t.Run("outstanding unchanged metadata does not restore an intervening change", func(t *testing.T) {
@@ -724,6 +903,66 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 		}, versions)
 	})
 
+	t.Run("later out-of-order change can follow a discarded stable observation", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, true)
+		opts.EnableNativeMetadata = true
+		head, _ := newTestHeadWithOptions(t, compression.None, opts)
+		ctx := context.Background()
+		lset := labels.FromStrings(labels.MetricName, "requests_total", "job", "api")
+		a := metadata.Metadata{Type: model.MetricTypeCounter, Help: "A"}
+		b := metadata.Metadata{Type: model.MetricTypeCounter, Help: "B"}
+
+		seed := head.AppenderV2(ctx)
+		ref, err := seed.Append(0, lset, 0, 100, 1, nil, nil, storage.AOptions{Metadata: a})
+		require.NoError(t, err)
+		require.NoError(t, seed.Commit())
+
+		app := head.AppenderV2(ctx)
+		_, err = app.Append(ref, lset, 0, 300, 3, nil, nil, storage.AOptions{Metadata: a})
+		require.NoError(t, err)
+		require.Nil(t, nativeMetadataTxn(app), "the stable observation is discarded before later appends arrive")
+		_, err = app.Append(ref, lset, 0, 200, 2, nil, nil, storage.AOptions{Metadata: b})
+		require.NoError(t, err)
+		require.NoError(t, app.Commit())
+
+		versions, _, ok := head.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
+		require.True(t, ok)
+		require.Equal(t, []NativeMetricMetadataVersion{
+			{EffectiveFrom: 100, Metadata: a},
+			{EffectiveFrom: 200, Metadata: b},
+		}, versions)
+	})
+
+	t.Run("restores metadata changed earlier in the same transaction", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, true)
+		opts.EnableNativeMetadata = true
+		head, _ := newTestHeadWithOptions(t, compression.None, opts)
+		ctx := context.Background()
+		lset := labels.FromStrings(labels.MetricName, "requests_total", "job", "api")
+		a := metadata.Metadata{Type: model.MetricTypeCounter, Help: "A"}
+		b := metadata.Metadata{Type: model.MetricTypeCounter, Help: "B"}
+
+		seed := head.AppenderV2(ctx)
+		ref, err := seed.Append(0, lset, 0, 100, 1, nil, nil, storage.AOptions{Metadata: a})
+		require.NoError(t, err)
+		require.NoError(t, seed.Commit())
+
+		app := head.AppenderV2(ctx)
+		_, err = app.Append(ref, lset, 0, 200, 2, nil, nil, storage.AOptions{Metadata: b})
+		require.NoError(t, err)
+		_, err = app.Append(ref, lset, 0, 300, 3, nil, nil, storage.AOptions{Metadata: a})
+		require.NoError(t, err)
+		require.NoError(t, app.Commit())
+
+		versions, _, ok := head.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
+		require.True(t, ok)
+		require.Equal(t, []NativeMetricMetadataVersion{
+			{EffectiveFrom: 100, Metadata: a},
+			{EffectiveFrom: 200, Metadata: b},
+			{EffectiveFrom: 300, Metadata: a},
+		}, versions)
+	})
+
 	for _, tc := range []struct {
 		name     string
 		rollback bool
@@ -749,8 +988,9 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 
 			series := head.series.getByID(chunks.HeadSeriesRef(ref))
 			series.Lock()
-			require.Equal(t, uint32(1), series.pendingCommitCount())
+			pending := series.pendingCommitCount()
 			series.Unlock()
+			require.Equal(t, uint32(1), pending)
 			require.Empty(t, head.gcSeries([]storage.SeriesRef{ref}, math.MaxInt64, func(*memSeries) bool { return true }))
 			_, _, ok := head.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
 			require.False(t, ok)
@@ -758,8 +998,9 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 			if tc.rollback {
 				require.NoError(t, app.Rollback())
 				series.Lock()
-				require.Zero(t, series.pendingCommitCount())
+				pending = series.pendingCommitCount()
 				series.Unlock()
+				require.Zero(t, pending)
 				require.Contains(t, head.gcSeries([]storage.SeriesRef{ref}, math.MaxInt64, func(*memSeries) bool { return true }), ref)
 				_, _, ok = head.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
 				require.False(t, ok)
@@ -768,8 +1009,9 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 
 			require.NoError(t, app.Commit())
 			series.Lock()
-			require.Zero(t, series.pendingCommitCount())
+			pending = series.pendingCommitCount()
 			series.Unlock()
+			require.Zero(t, pending)
 			versions, truncated, ok := head.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
 			require.True(t, ok)
 			require.False(t, truncated)
@@ -831,7 +1073,7 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 
 		series := head.series.getByID(chunks.HeadSeriesRef(ref))
 		series.Lock()
-		first := series.nativeMeta
+		first := series.metadata
 		series.Unlock()
 		require.NotNil(t, first)
 
@@ -846,7 +1088,7 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 			require.NoError(t, app.Commit())
 
 			series.Lock()
-			same := series.nativeMeta
+			same := series.metadata
 			series.Unlock()
 			require.Same(t, first, same)
 		}
@@ -880,8 +1122,9 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 			s := head.series.getByID(chunks.HeadSeriesRef(refs[i]))
 			s.Lock()
 			defer s.Unlock()
-			require.NotNil(t, s.nativeMeta)
-			return s.nativeMeta.metadata
+			native := s.nativeMetadataLocked()
+			require.NotNil(t, native)
+			return native.metadata
 		}
 		// One copy per distinct value, not per series: that is what keeps the
 		// cache to a pointer rather than 48 bytes of string headers each.
@@ -934,7 +1177,7 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 		lset := labels.FromStrings(labels.MetricName, "requests_total", "job", "api")
 		a := metadata.Metadata{Type: model.MetricTypeCounter, Help: "A"}
 
-		// The V1 appender sets memSeries.meta without going near the native
+		// The V1 appender sets legacy metadata without going near the native
 		// store. A later V2 append carrying the same metadata must still record.
 		v1 := head.Appender(ctx)
 		ref, err := v1.Append(0, lset, 50, 1)
@@ -944,10 +1187,8 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 		require.NoError(t, v1.Commit())
 
 		series := head.series.getByID(chunks.HeadSeriesRef(ref))
-		series.Lock()
-		require.Equal(t, &a, series.meta)
-		require.Nil(t, series.nativeMeta)
-		series.Unlock()
+		require.Equal(t, &a, legacyMetadataForTest(series))
+		require.Nil(t, nativeMetadataForTest(series))
 
 		app := head.AppenderV2(ctx)
 		_, err = app.Append(ref, lset, 0, 100, 1, nil, nil, storage.AOptions{Metadata: a})
@@ -1152,9 +1393,7 @@ func TestHeadNativeMetricMetadataIsFeatureGatedAndNonPersistent(t *testing.T) {
 		require.NoError(t, app.Commit())
 
 		series := head.series.getByID(chunks.HeadSeriesRef(ref))
-		series.Lock()
-		require.Nil(t, series.meta)
-		series.Unlock()
+		require.Nil(t, legacyMetadataForTest(series))
 		versions, truncated, ok := head.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
 		require.True(t, ok)
 		require.False(t, truncated)
@@ -1162,107 +1401,44 @@ func TestHeadNativeMetricMetadataIsFeatureGatedAndNonPersistent(t *testing.T) {
 	})
 }
 
-func TestHeadNativeMetricMetadataMatchersAndLimit(t *testing.T) {
-	opts := newTestHeadDefaultOptions(1000, false)
-	opts.EnableNativeMetadata = true
-	head, _ := newTestHeadWithOptions(t, compression.None, opts)
-	ctx := context.Background()
-
-	for i, name := range []string{"b", "a"} {
-		app := head.AppenderV2(ctx)
-		_, err := app.Append(0, labels.FromStrings(labels.MetricName, name, "job", "api"), 0, int64(100+i), float64(i), nil, nil, storage.AOptions{
-			Metadata: metadata.Metadata{Type: model.MetricTypeGauge, Help: name},
-		})
-		require.NoError(t, err)
-		require.NoError(t, app.Commit())
+func (s *nativeMetricMetadataStore) get(ref chunks.HeadSeriesRef) ([]NativeMetricMetadataVersion, bool, bool) {
+	var snapshot nativeMetricMetadataSnapshot
+	ok := s.snapshot(ref, &snapshot)
+	if !ok {
+		return nil, false, false
 	}
+	return snapshot.expand(), snapshot.truncated, true
+}
 
-	app := head.AppenderV2(ctx)
-	_, err := app.Append(0, labels.FromStrings(labels.MetricName, "c", "job", "api"), 0, 102, 2, nil, nil, storage.AOptions{
-		Metadata: metadata.Metadata{Type: model.MetricTypeGauge, Help: "c"},
-	})
-	require.NoError(t, err)
-	require.NoError(t, app.Commit())
-
-	jobMatcher := labels.MustNewMatcher(labels.MatchEqual, "job", "api")
-	nameMatcher := labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "a")
-	for _, tc := range []struct {
-		name          string
-		limit         int
-		wantNames     []string
-		wantTruncated bool
-	}{
-		{
-			name:          "limit one reports truncation",
-			limit:         1,
-			wantNames:     []string{"a"},
-			wantTruncated: true,
-		},
-		{
-			name:      "limit equal to result count",
-			limit:     3,
-			wantNames: []string{"a", "b", "c"},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			result, truncated, err := head.nativeMetricMetadataForMatchers(ctx, [][]*labels.Matcher{{jobMatcher}, {nameMatcher}}, tc.limit)
-			require.NoError(t, err)
-			require.Equal(t, tc.wantTruncated, truncated)
-			require.Len(t, result, len(tc.wantNames))
-			for i, name := range tc.wantNames {
-				require.Equal(t, name, result[i].Labels.Get(labels.MetricName))
+func TestHeadNativeMetricMetadataSampleKinds(t *testing.T) {
+	for _, kind := range []string{"float", "histogram", "float-histogram"} {
+		t.Run(kind, func(t *testing.T) {
+			opts := newTestHeadDefaultOptions(1000, false)
+			opts.EnableNativeMetadata = true
+			opts.EnableSTAsZeroSample = true
+			head, _ := newTestHeadWithOptions(t, compression.None, opts)
+			lset := labels.FromStrings(labels.MetricName, "a")
+			var hist *histogram.Histogram
+			var floatHist *histogram.FloatHistogram
+			if kind == "histogram" {
+				hist = &histogram.Histogram{}
 			}
+			if kind == "float-histogram" {
+				floatHist = &histogram.FloatHistogram{}
+			}
+			m := metadata.Metadata{Help: "description", Unit: "seconds"}
+			app := head.AppenderV2(t.Context())
+			ref, err := app.Append(0, lset, 50, 100, 1, hist, floatHist, storage.AOptions{Metadata: m})
+			require.NoError(t, err)
+			require.NoError(t, app.Commit())
+			app = head.AppenderV2(t.Context())
+			_, err = app.Append(ref, lset, 50, 200, 2, hist, floatHist, storage.AOptions{Metadata: metadata.Metadata{Help: strings.Clone(m.Help), Unit: strings.Clone(m.Unit)}})
+			require.NoError(t, err)
+			require.Nil(t, nativeMetadataTxn(app), "unchanged content must not stage metadata")
+			require.NoError(t, app.Commit())
+			versions, _, ok := head.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
+			require.True(t, ok)
+			require.Equal(t, []NativeMetricMetadataVersion{{EffectiveFrom: 100, Metadata: canonicalMetricMetadata(m)}}, versions, "synthetic ST samples must not carry metadata")
 		})
 	}
-
-	t.Run("metadata outliving its series does not leak into results", func(t *testing.T) {
-		opts := newTestHeadDefaultOptions(1000, false)
-		opts.EnableNativeMetadata = true
-		head, _ := newTestHeadWithOptions(t, compression.None, opts)
-
-		// "z" sorts last, so the query reaches it only after the limit is
-		// already satisfied.
-		for _, name := range []string{"a", "b", "z"} {
-			app := head.AppenderV2(ctx)
-			_, err := app.Append(0, labels.FromStrings(labels.MetricName, name, "job", "api"), 0, 100, 1, nil, nil, storage.AOptions{
-				Metadata: metadata.Metadata{Type: model.MetricTypeGauge, Help: name},
-			})
-			require.NoError(t, err)
-			require.NoError(t, app.Commit())
-		}
-		var zRef storage.SeriesRef
-		for _, name := range []string{"a", "b"} {
-			app := head.AppenderV2(ctx)
-			_, err := app.Append(0, labels.FromStrings(labels.MetricName, name, "job", "api"), 0, 900, 1, nil, nil, storage.AOptions{
-				Metadata: metadata.Metadata{Type: model.MetricTypeGauge, Help: name},
-			})
-			require.NoError(t, err)
-			require.NoError(t, app.Commit())
-		}
-
-		// Reproduce the window inside Head.gc between dropping expired series
-		// and removing them from the postings and the metadata store: "z" is
-		// gone from head.series while its postings entry and its metadata both
-		// survive. SortedPostings drops it, so it must not appear in the result
-		// and must not be mistaken for a further result behind the limit.
-		//
-		// Note this cannot stage the narrower race where a gc lands *during*
-		// the loop below, which is what makes the limit check's position
-		// load-bearing; reproducing that needs a seam in the query path.
-		deleted, _, _, _, _, _, _, _, _ := head.series.gc(500, 0)
-		require.Len(t, deleted, 1, "gc must expire exactly the trailing series")
-		for ref := range deleted {
-			zRef = ref
-		}
-		require.Nil(t, head.series.getByID(chunks.HeadSeriesRef(zRef)))
-		require.True(t, head.nativeMetricMetadata.has(chunks.HeadSeriesRef(zRef)),
-			"the removed series must keep its metadata, or the query never reaches it")
-
-		result, truncated, err := head.nativeMetricMetadataForMatchers(ctx, [][]*labels.Matcher{{jobMatcher}}, 2)
-		require.NoError(t, err)
-		require.False(t, truncated, "every matching series was returned, so nothing was truncated")
-		require.Len(t, result, 2)
-		require.Equal(t, "a", result[0].Labels.Get(labels.MetricName))
-		require.Equal(t, "b", result[1].Labels.Get(labels.MetricName))
-	})
 }
