@@ -167,6 +167,13 @@ install-goyacc:
 	@go install golang.org/x/tools/cmd/goyacc@$(GOYACC_VERSION)
 
 .PHONY: test
+test: test-tool-downloads
+
+.PHONY: test-tool-downloads
+test-tool-downloads: export TEST_MAKE ?= $(MAKE)
+test-tool-downloads:
+	@./scripts/test-tool-downloads.sh
+
 # If we only want to test go code we have to change the test target
 # which is called by all.
 ifeq ($(GO_ONLY),1)

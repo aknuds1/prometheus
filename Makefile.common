@@ -101,24 +101,28 @@ SKIP_GOLANGCI_LINT :=
 GOLANGCI_LINT :=
 GOLANGCI_LINT_OPTS ?=
 GOLANGCI_LINT_VERSION ?= v2.12.2
-GOLANGCI_LINT_INSTALLER_URL := https://raw.githubusercontent.com/golangci/golangci-lint/$(GOLANGCI_LINT_VERSION)/install.sh
-# This matches the versioned installer script above.
-GOLANGCI_LINT_INSTALLER_SHA256_v2.12.2 := d32d3534af96cfd59546a084d22b213e8a47541cada5013aa8a84c4fa2589905
-GOLANGCI_LINT_INSTALLER_SHA256 ?= $(GOLANGCI_LINT_INSTALLER_SHA256_$(GOLANGCI_LINT_VERSION))
+GOLANGCI_LINT_PLATFORM := $(GOHOSTOS)-$(patsubst i386,386,$(GOHOSTARCH))
+GOLANGCI_LINT_ARCHIVE := golangci-lint-$(patsubst v%,%,$(GOLANGCI_LINT_VERSION))-$(GOLANGCI_LINT_PLATFORM)
+GOLANGCI_LINT_URL := https://github.com/golangci/golangci-lint/releases/download/$(GOLANGCI_LINT_VERSION)/$(GOLANGCI_LINT_ARCHIVE).tar.gz
+# These match the tarballs in the golangci-lint release's checksums.txt.
+GOLANGCI_LINT_SHA256_v2.12.2_darwin-amd64 := f6f06d94b6241521c53d15450c5209b028270bf966f842afb11c030c79f5bc16
+GOLANGCI_LINT_SHA256_v2.12.2_darwin-arm64 := a9c54498731b3128f79e090be6110f3e5fffccc617b08142ed244d4126c73f29
+GOLANGCI_LINT_SHA256_v2.12.2_linux-386 := 8acadd219d421b89186438c095fd6da72bcb2cc6a334798d31732003c376233a
+GOLANGCI_LINT_SHA256_v2.12.2_linux-amd64 := 8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553
+GOLANGCI_LINT_SHA256_v2.12.2_linux-arm64 := 44cd40a8c76c86755375adfeea52cfd3533cb43d7bd647771e0ae065e166df3a
+# Override this checksum when selecting a release without a pinned checksum.
+GOLANGCI_LINT_SHA256 ?= $(GOLANGCI_LINT_SHA256_$(GOLANGCI_LINT_VERSION)_$(GOLANGCI_LINT_PLATFORM))
 GOLANGCI_FMT_OPTS ?=
-# golangci-lint only supports linux, darwin and windows platforms on i386/amd64/arm64.
-# windows isn't included here because of the path separator being different.
-ifeq ($(GOHOSTOS),$(filter $(GOHOSTOS),linux darwin))
-	ifeq ($(GOHOSTARCH),$(filter $(GOHOSTARCH),amd64 i386 arm64))
-		# If we're in CI and there is an Actions file, that means the linter
-		# is being run in Actions, so we don't need to run it here.
-		ifneq (,$(SKIP_GOLANGCI_LINT))
-			GOLANGCI_LINT :=
-		else ifeq (,$(CIRCLE_JOB))
-			GOLANGCI_LINT := $(FIRST_GOPATH)/bin/golangci-lint
-		else ifeq (,$(wildcard .github/workflows/golangci-lint.yml))
-			GOLANGCI_LINT := $(FIRST_GOPATH)/bin/golangci-lint
-		endif
+# Windows isn't included here because of its different path separator.
+ifneq (,$(filter $(GOLANGCI_LINT_PLATFORM),darwin-amd64 darwin-arm64 linux-386 linux-amd64 linux-arm64))
+	# If we're in CI and there is an Actions file, that means the linter
+	# is being run in Actions, so we don't need to run it here.
+	ifneq (,$(SKIP_GOLANGCI_LINT))
+		GOLANGCI_LINT :=
+	else ifeq (,$(CIRCLE_JOB))
+		GOLANGCI_LINT := $(FIRST_GOPATH)/bin/golangci-lint
+	else ifeq (,$(wildcard .github/workflows/golangci-lint.yml))
+		GOLANGCI_LINT := $(FIRST_GOPATH)/bin/golangci-lint
 	endif
 endif
 
@@ -489,18 +493,22 @@ common-proto:
 
 ifdef GOLANGCI_LINT
 $(GOLANGCI_LINT):
-	$(eval GOLANGCI_LINT_TMP := $(shell mktemp -d))
 	@set -e; \
-	trap 'rm -rf "$(GOLANGCI_LINT_TMP)"' EXIT; \
-	if [ -z "$(GOLANGCI_LINT_INSTALLER_SHA256)" ]; then \
-		echo "No golangci-lint installer checksum configured for version $(GOLANGCI_LINT_VERSION)" >&2; \
+	if [ -z "$(strip $(GOLANGCI_LINT_SHA256))" ]; then \
+		echo "No golangci-lint checksum configured for version $(GOLANGCI_LINT_VERSION) on $(GOLANGCI_LINT_PLATFORM)" >&2; \
 		exit 1; \
 	fi; \
-	installer="$(GOLANGCI_LINT_TMP)/install.sh"; \
-	curl --fail --silent --show-error --location "$(GOLANGCI_LINT_INSTALLER_URL)" --output "$$installer"; \
-	$(call check_sha256,$$installer,$(GOLANGCI_LINT_INSTALLER_SHA256)); \
-	mkdir -p "$(FIRST_GOPATH)/bin"; \
-	sed -e '/install -d/d' "$$installer" | sh -s -- -b "$(FIRST_GOPATH)/bin" "$(GOLANGCI_LINT_VERSION)"
+	download_tmp="$$(mktemp -d)"; \
+	install_tmp=; \
+	trap 'rm -rf "$$download_tmp"; if [ -n "$$install_tmp" ]; then rm -rf "$$install_tmp"; fi' EXIT; \
+	archive="$$download_tmp/golangci-lint.tar.gz"; \
+	curl --fail --silent --show-error --location "$(GOLANGCI_LINT_URL)" --output "$$archive"; \
+	$(call check_sha256,$$archive,$(GOLANGCI_LINT_SHA256)); \
+	tar --no-same-owner -xzf "$$archive" -C "$$download_tmp"; \
+	mkdir -p "$(dir $(GOLANGCI_LINT))"; \
+	install_tmp="$$(mktemp -d "$(dir $(GOLANGCI_LINT)).golangci-lint.XXXXXX")"; \
+	install -m 755 "$$download_tmp/$(GOLANGCI_LINT_ARCHIVE)/golangci-lint" "$$install_tmp/golangci-lint"; \
+	mv -f "$$install_tmp/golangci-lint" "$(GOLANGCI_LINT)"
 endif
 
 .PHONY: common-print-golangci-lint-version
