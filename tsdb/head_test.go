@@ -7520,6 +7520,147 @@ func TestStripeSeries_iterForDeletion(t *testing.T) {
 }
 
 func TestStripeSeries_gc(t *testing.T) {
+	t.Run("gcSeries does not wait on unselected series", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			selectedRef storage.SeriesRef
+		}{
+			{name: "unique entry", selectedRef: 1},
+			{name: "conflicting entry", selectedRef: 2},
+			{name: "empty selection"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				s, ms1, ms2 := stripeSeriesWithCollidingSeries(t)
+				// Use a different hash so identity revalidation cannot wait on this series.
+				unselectedLabels := labels.FromStrings("series", "unselected")
+				require.NotEqual(t, ms1.lset.Hash(), unselectedLabels.Hash())
+				unselected := newMemSeries(unselectedLabels, 3, 0, defaultIsolationDisabled, false)
+				got, created := s.setUnlessAlreadySet(unselectedLabels.Hash(), unselectedLabels, unselected)
+				require.True(t, created)
+				require.Same(t, unselected, got)
+
+				var refs []storage.SeriesRef
+				wantDeleted := map[storage.SeriesRef]struct{}{}
+				if tc.selectedRef != 0 {
+					refs = append(refs, tc.selectedRef)
+					wantDeleted[tc.selectedRef] = struct{}{}
+				}
+
+				unselected.Lock()
+				done := make(chan map[storage.SeriesRef]struct{}, 1)
+				go func() {
+					deleted, _, _, _, _, _ := s.gcSeries(refs, 0, func(*memSeries) bool { return true })
+					done <- deleted
+				}()
+
+				var deleted map[storage.SeriesRef]struct{}
+				var completedWhileLocked bool
+				select {
+				case deleted = <-done:
+					completedWhileLocked = true
+				case <-time.After(5 * time.Second):
+				}
+				// Release the lock and join the worker before asserting, even on failure.
+				unselected.Unlock()
+				if !completedWhileLocked {
+					select {
+					case deleted = <-done:
+					case <-time.After(5 * time.Second):
+						t.Fatal("gcSeries did not finish after releasing the unselected series lock")
+					}
+				}
+
+				require.True(t, completedWhileLocked, "gcSeries waited for an unselected series lock")
+				require.Equal(t, wantDeleted, deleted)
+				for _, series := range []*memSeries{ms1, ms2, unselected} {
+					selected := storage.SeriesRef(series.ref) == tc.selectedRef
+					lset := series.labels()
+					if selected {
+						require.Nil(t, s.getByID(series.ref))
+						require.Nil(t, s.getByHash(lset.Hash(), lset))
+					} else {
+						require.Same(t, series, s.getByID(series.ref))
+						require.Same(t, series, s.getByHash(lset.Hash(), lset))
+					}
+					series.Lock()
+					gced := series.isGCed()
+					series.Unlock()
+					require.Equal(t, selected, gced)
+				}
+			})
+		}
+	})
+
+	t.Run("iterForDeletion does not lock unrelated series during revalidation", func(t *testing.T) {
+		s, remainingSeries, unlinkedSeries := stripeSeriesWithCollidingSeries(t)
+		remainingLabels := remainingSeries.labels()
+		unlinkedLabels := unlinkedSeries.labels()
+		hash := unlinkedLabels.Hash()
+		checkStarted := make(chan struct{})
+		continueCheck := make(chan struct{})
+		iterationDone := make(chan struct{})
+		deleteCalled := false
+		deletedCount := 0
+		go func() {
+			deletedCount = s.iterForDeletion(func(_ int, _ uint64, series *memSeries) bool {
+				// Only the stale candidate is eligible; the locked series must not be deleted.
+				if series != unlinkedSeries {
+					return false
+				}
+				close(checkStarted)
+				<-continueCheck
+				return true
+			}, func(_ int, _ uint64, _ *memSeries, _ map[chunks.HeadSeriesRef]labels.Labels) {
+				deleteCalled = true
+			})
+			close(iterationDone)
+		}()
+
+		var started bool
+		select {
+		case <-checkStarted:
+			started = true
+		case <-time.After(5 * time.Second):
+		}
+		lockAvailable := started && s.locks[0].TryLock()
+		if lockAvailable {
+			// Unlink the snapshot candidate but keep its reference resolvable.
+			s.hashes[0].del(hash, unlinkedSeries.ref)
+			s.locks[0].Unlock()
+			// A label-based lookup takes this mutex with dedupelabels.
+			remainingSeries.Lock()
+		}
+		close(continueCheck)
+
+		var completedWhileLocked bool
+		select {
+		case <-iterationDone:
+			completedWhileLocked = true
+		case <-time.After(5 * time.Second):
+		}
+		if lockAvailable {
+			remainingSeries.Unlock()
+		}
+		// Join the worker before inspecting results, including after a watchdog fires.
+		if !completedWhileLocked {
+			select {
+			case <-iterationDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("iterForDeletion did not finish after releasing the unrelated series lock")
+			}
+		}
+
+		require.True(t, started, "iterForDeletion did not reach the candidate check")
+		require.True(t, lockAvailable, "stripe write lock must be available during the deletion check")
+		require.True(t, completedWhileLocked, "identity revalidation waited for an unrelated series lock")
+		require.False(t, deleteCalled)
+		require.Zero(t, deletedCount)
+		require.Same(t, remainingSeries, s.getByID(remainingSeries.ref))
+		require.Same(t, remainingSeries, s.getByHash(hash, remainingLabels))
+		require.Same(t, unlinkedSeries, s.getByID(unlinkedSeries.ref))
+		require.Nil(t, s.getByHash(hash, unlinkedLabels))
+	})
+
 	t.Run("marks collected series", func(t *testing.T) {
 		s, ms1, ms2 := stripeSeriesWithCollidingSeries(t)
 		hash := ms1.lset.Hash()
