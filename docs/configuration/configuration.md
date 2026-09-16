@@ -4061,7 +4061,8 @@ queue_config:
 
 # Configures the sending of series metadata to remote storage
 # if the `prometheus.WriteRequest` message was chosen. When
-# `io.prometheus.write.v2.Request` is used, metadata is always sent.
+# `io.prometheus.write.v2.Request` is used, available metadata is always sent
+# from native Head storage (when enabled), falling back to metadata WAL records.
 #
 # Metadata configuration is subject to change at any point
 # or be removed in future releases.
