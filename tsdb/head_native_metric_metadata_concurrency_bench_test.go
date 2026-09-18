@@ -15,6 +15,7 @@ package tsdb
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"sync"
 	"testing"
@@ -26,6 +27,121 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 )
+
+// BenchmarkHeadMetricMetadataLookupAppendConcurrent measures eight ingestion
+// workers feeding zero, one, or two sequential metadata lookup consumers, matching
+// the WAL watcher's one-consumer-per-destination model. Each operation waits for
+// its committed batch's lookups, keeping the amount of work per operation fixed;
+// this includes publication-barrier contention without asynchronous work escaping
+// the timed region. Run with -cpu=1,8 -benchmem -count=6.
+func BenchmarkHeadMetricMetadataLookupAppendConcurrent(b *testing.B) {
+	const workers, perWorker = 8, 1000
+	for _, lookupState := range []string{"current", "historical"} {
+		for _, changing := range []bool{false, true} {
+			for _, destinations := range []int{0, 1, 2} {
+				if lookupState == "historical" && destinations == 0 {
+					continue
+				}
+				b.Run(fmt.Sprintf("lookup=%s/changing=%t/destinations=%d", lookupState, changing, destinations), func(b *testing.B) {
+					procs := runtime.GOMAXPROCS(0)
+					if procs > workers || workers%procs != 0 {
+						b.Skipf("GOMAXPROCS must divide %d", workers)
+					}
+					h, _, closeHead := newMetricMetadataBenchmarkHead(b, metricMetadataBenchmarkMode{nativeEnabled: true}, 1_000_000_000, false)
+					b.Cleanup(closeHead)
+					fixture := newMetricMetadataBenchmarkFixture(workers*perWorker, 100, maxNativeMetricMetadataVersions+2)
+					refs := make([]storage.SeriesRef, workers*perWorker)
+					for version := range maxNativeMetricMetadataVersions {
+						appendMetricMetadataBenchmarkRound(b, h, fixture, refs, version, int64(100+version))
+					}
+					type request struct {
+						lookups []storage.NativeMetricMetadataLookup
+						done    chan error
+					}
+					queues := make([]chan request, destinations)
+					var consumers sync.WaitGroup
+					for i := range queues {
+						queues[i] = make(chan request)
+						consumers.Go(func() {
+							for req := range queues[i] {
+								req.done <- h.LookupNativeMetricMetadata(b.Context(), req.lookups)
+							}
+						})
+					}
+					var nextWorker atomic.Uint64
+					b.SetParallelism(workers / procs)
+					b.ReportAllocs()
+					b.ResetTimer()
+					b.RunParallel(func(pb *testing.PB) {
+						worker := int(nextWorker.Add(1) - 1)
+						done := make(chan error, 1)
+						lookups := make([]storage.NativeMetricMetadataLookup, perWorker)
+						for i := range lookups {
+							lookups[i] = storage.NativeMetricMetadataLookup{Ref: refs[worker*perWorker+i], Timestamp: math.MaxInt64}
+							if lookupState == "historical" {
+								lookups[i].Timestamp = 100 + maxNativeMetricMetadataVersions - 2
+							}
+						}
+						var round int64
+						for pb.Next() {
+							variant := maxNativeMetricMetadataVersions - 1
+							if changing {
+								variant = maxNativeMetricMetadataVersions + int(round%2)
+							}
+							app := h.AppenderV2(b.Context())
+							for i := worker * perWorker; i < (worker+1)*perWorker; i++ {
+								if _, err := app.Append(refs[i], fixture.labels[i], 0, 1000+round, 1, nil, nil, fixture.options[variant][fixture.familyBySeries[i]]); err != nil {
+									b.Fatal(err)
+								}
+							}
+							if err := app.Commit(); err != nil {
+								b.Fatal(err)
+							}
+							if lookupState == "historical" && changing {
+								// This worker owns its series and waits for both destinations,
+								// so the preceding version cannot be evicted by the next round.
+								for i := range lookups {
+									lookups[i].Timestamp = 1000 + round - 1
+								}
+							}
+							for _, queue := range queues {
+								queue <- request{lookups: lookups, done: done}
+								if err := <-done; err != nil {
+									b.Fatal(err)
+								}
+							}
+							round++
+						}
+						if destinations > 0 && round > 0 {
+							wantVariant := maxNativeMetricMetadataVersions - 1
+							if changing {
+								if lookupState == "current" {
+									wantVariant = maxNativeMetricMetadataVersions + int((round-1)%2)
+								} else if round > 1 {
+									wantVariant = maxNativeMetricMetadataVersions + int((round-2)%2)
+								}
+							} else if lookupState == "historical" {
+								wantVariant--
+							}
+							for i, lookup := range lookups {
+								want := fixture.options[wantVariant][fixture.familyBySeries[worker*perWorker+i]].Metadata
+								if lookup.Metadata == nil || *lookup.Metadata != want {
+									b.Errorf("unexpected metadata at %d: got %v, want %v", lookup.Timestamp, lookup.Metadata, want)
+								}
+							}
+						}
+					})
+					b.StopTimer()
+					for _, queue := range queues {
+						close(queue)
+					}
+					consumers.Wait()
+					b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*perWorker), "ns/sample")
+				})
+			}
+		}
+	}
+}
 
 // BenchmarkHeadMetricMetadataAppendFixedConcurrency keeps the series, worker
 // count, batch size, and total work fixed while GOMAXPROCS changes.
