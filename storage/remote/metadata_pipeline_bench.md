@@ -175,6 +175,14 @@ states and independent parallel readers sharing one Head. Each operation visits
 encoding, or HTTP delivery. The existing append/encode benchmarks retain their
 original loop shapes.
 
+The `historical-full` cases select the oldest of five retained versions, with
+shared or 4,096-distinct historical values. `missing-full` scans the same full
+history for a timestamp before its oldest version. Both include serial and
+parallel readers; existing two-version cases are unchanged.
+`BenchmarkHeadMetricMetadataLookupAppendConcurrent/lookup=oldest/changing=true/destinations=2`
+adds the corresponding full-history lookup while eight ingestion workers replace
+versions and wait for two lookup destinations before advancing their own series.
+
 ## Linux findings (2026-09-20)
 
 Measured on Debian 13.7, an eight-vCPU Xeon Platinum 8358 guest with 16 GB RAM,
@@ -263,6 +271,86 @@ The evidence archive `native-metadata-linux.D6L8QF/evidence.tar.gz` contains the
 frozen source trees, binaries and hashes, expected-run manifest, runner/analyzer,
 monitoring, validation logs, raw results, per-cohort `benchstat` tables, and `REPORT.md`.
 Its SHA-256 is recorded alongside it. This was a scoped run, not a run of the entire
-repository benchmark script. Linux `newseries`, held backlog, unchanged distinct
-metadata, 100,000-series sensitivity, receiver-capacity variants, heap/profiles,
-the full transport-only matrix, and larger-cardinality studies remain outstanding.
+repository benchmark script. It did not cover Linux `newseries`, held backlog,
+unchanged distinct metadata, 100,000-series sensitivity, receiver-capacity variants,
+heap/profiles, the full transport-only matrix, or larger-cardinality studies.
+
+### Historical point selection: not adopted (2026-09-20)
+
+A subsequent experiment compared `d0f862d2a1a6291b18bcb4922b586c6d80ca68d1`
+against direct historical point selection under the metadata stripe read lock,
+copying only the selected handle instead of a complete history snapshot. The
+publication barrier, current-value fast path, materialization, and query snapshots
+were semantically unchanged. Both revisions used identical additional fixtures.
+The host, kernel (`6.12.107+deb13-amd64`), Go toolchain, and runtime settings were
+unchanged from the earlier Linux study.
+
+Two separate six-pair fresh-process cohorts covered 18 lookup cases, three
+concurrent lookup/append cases, and six pipeline cases: native unchanged, changing,
+distinct-changing, and paced-changing; WAL changing; and disabled unchanged.
+All 648 scored observations passed validation, with no host-noise exclusions or
+retries. Lookup/concurrency runs used one-second measurement targets; each pipeline
+run delivered a two-million-sample trace. Revision order alternated within pairs.
+
+Selected candidate/baseline changes are paired-ratio medians with minimum/maximum
+paired ratios in brackets, not simultaneous confidence bounds:
+
+| Case / metric | Cohort 1 | Cohort 2 |
+| --- | ---: | ---: |
+| Shared historical serial lookup time | -2.62% [-4.07%, -2.08%] | -5.14% [-7.95%, -2.71%] |
+| 4,096-distinct historical serial lookup time | -3.11% [-4.76%, -1.95%] | -2.81% [-3.40%, -1.62%] |
+| Current-value serial lookup time | +4.26% [+3.02%, +7.63%] | +3.71% [+2.10%, +4.85%] |
+| Native unchanged pipeline CPU/sample | +1.21% [-2.38%, +2.48%] | -1.67% [-4.48%, +3.52%] |
+| Native changing pipeline CPU/sample | -1.65% [-5.59%, +3.40%] | -1.30% [-3.10%, +4.21%] |
+| Native distinct-changing pipeline CPU/sample | +1.29% [-0.62%, +6.83%] | +1.60% [-2.64%, +4.93%] |
+| Native paced-changing pipeline CPU/sample | +0.26% [-1.06%, +3.03%] | -0.78% [-2.83%, +1.21%] |
+
+Both predeclared historical serial primaries passed the improvement gate: at least
+2% paired-median improvement and every pair faster in both cohorts. Adoption also
+required every timing and allocation control's worst paired ratio to remain within
+5%; zero-allocation controls had to remain zero. Fourteen case/metric/cohort controls
+failed that bound, including current-value lookup, parallel lookup, concurrent
+current lookup, and changing-pipeline completion. Several failures had favorable
+medians, so failure of the conservative gate does not itself establish a regression.
+The current-value serial slowdown was consistent across both cohorts, but its cause
+was not isolated. The candidate was rejected without retuning or additional scored
+runs; **no production optimization from this experiment is retained**.
+
+Full-five-version serial lookup gains were smaller: shared -0.62% / -1.11%,
+4,096-distinct -1.86% / -2.00%. Concurrent oldest-version lookup changed by
+-0.46% / -1.00%. Lookup allocation counts were unchanged, including zero-allocation
+serial current/missing/disabled controls. These results do not establish a pipeline
+win or forwarding parity with WAL metadata.
+
+Before scoring, 50 separate diagnostic traces collected sender CPU/allocation
+profiles for native and WAL unchanged, changing, distinct-changing, and
+paced-changing workloads, plus block/mutex profiles for distinct-changing workloads.
+Each diagnostic process ran five traces, including Go's calibration trace; profiles
+include setup and teardown and are not scored phase measurements. Historical value
+materialization accounted for about 19.5% of sampled allocation bytes with shared
+changing values and 33.8% with distinct changing values. Selection accounted for
+about 9.9% of sampled CPU cumulatively in the shared-changing native profile, which
+includes its callees rather than isolating snapshot copying. In the distinct-changing
+native CPU profile, RW2 time-series population accounted for 24.0%, selection 7.7%,
+materialization 4.6%, background GC marking 3.6%, and GC assists 0.2%. These cumulative
+figures overlap and do not attribute all GC work to metadata. Large allocation
+savings therefore would not imply a proportional sender-CPU improvement.
+
+In the separate distinct-changing native blocking profile, selection accumulated
+about 0.73 seconds of waiting across five traces; semaphore acquisition across all
+callers accumulated 2.34 seconds. Mutex contention was dominated by WAL logging
+(about 158 ms of 166 ms total), rather than metadata publication. Blocking totals
+include concurrent and background goroutine waits, not elapsed time or removable
+CPU cost. These diagnostics do not establish publication waits as the principal
+source of the native-versus-WAL CPU gap.
+
+The findings leave historical value ownership/materialization as a candidate for
+separate future work, not a demonstrated fix or a reason to reopen the rejected copy
+cache. They do not complete the other pipeline, retained-heap, receiver-capacity,
+transport-only, or larger-cardinality studies listed above.
+
+The archive `native-metadata-point-lookup.yzvd7i/evidence.tar.gz` preserves the rejected
+patch, both source trees and binaries, validation and profile outputs, the frozen
+648-run manifest and gates, monitoring, raw observations, separate `benchstat`
+tables, and `REPORT.md`. SHA-256:
+`936f76e47336f8c779ef703a1e1b9f48c2f0becae559b8a4bca0d3ab42ee85cf`.

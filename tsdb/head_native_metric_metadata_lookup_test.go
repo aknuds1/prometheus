@@ -146,6 +146,40 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 		})
 	}
 
+	t.Run("full history timestamp boundaries after eviction", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, false)
+		opts.EnableNativeMetadata = true
+		head, _ := newTestHeadWithOptions(t, compression.None, opts)
+		var ref storage.SeriesRef
+		values := make([]metadata.Metadata, maxNativeMetricMetadataVersions+1)
+		for version := range values {
+			values[version] = metadata.Metadata{Type: model.MetricTypeCounter, Help: strconv.Itoa(version)}
+			app := head.AppenderV2(t.Context())
+			var err error
+			ref, err = app.Append(ref, labels.FromStrings(labels.MetricName, "metric"), 0, int64(100*(version+1)), 1, nil, nil, storage.AOptions{Metadata: values[version]})
+			require.NoError(t, err)
+			require.NoError(t, app.Commit())
+		}
+		lookups := []storage.NativeMetricMetadataLookup{
+			{Ref: ref, Timestamp: math.MinInt64, Metadata: &a},
+			{Ref: ref, Timestamp: 100, Metadata: &a},
+			{Ref: ref, Timestamp: 199, Metadata: &a},
+		}
+		want := make([]*metadata.Metadata, len(lookups))
+		for version := 1; version < len(values); version++ {
+			for _, timestamp := range []int64{int64(100 * (version + 1)), int64(100*(version+2) - 1)} {
+				lookups = append(lookups, storage.NativeMetricMetadataLookup{Ref: ref, Timestamp: timestamp, Metadata: &a})
+				want = append(want, &values[version])
+			}
+		}
+		lookups = append(lookups, storage.NativeMetricMetadataLookup{Ref: ref, Timestamp: math.MaxInt64})
+		want = append(want, &values[len(values)-1])
+		require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
+		for i, lookup := range lookups {
+			require.Equal(t, want[i], lookup.Metadata, "timestamp %d", lookup.Timestamp)
+		}
+	})
+
 	t.Run("mixed batches and concurrent readers", func(t *testing.T) {
 		opts := newTestHeadDefaultOptions(1000, false)
 		opts.EnableNativeMetadata = true

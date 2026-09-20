@@ -33,13 +33,17 @@ import (
 // the WAL watcher's one-consumer-per-destination model. Each operation waits for
 // its committed batch's lookups, keeping the amount of work per operation fixed;
 // this includes publication-barrier contention without asynchronous work escaping
-// the timed region. Run with -cpu=1,8 -benchmem -count=6.
+// the timed region. Oldest-version lookups scan the full retained history while
+// commits replace it. Run with -cpu=1,8 -benchmem -count=6.
 func BenchmarkHeadMetricMetadataLookupAppendConcurrent(b *testing.B) {
 	const workers, perWorker = 8, 1000
-	for _, lookupState := range []string{"current", "historical"} {
+	for _, lookupState := range []string{"current", "historical", "oldest"} {
 		for _, changing := range []bool{false, true} {
 			for _, destinations := range []int{0, 1, 2} {
-				if lookupState == "historical" && destinations == 0 {
+				if lookupState != "current" && destinations == 0 {
+					continue
+				}
+				if lookupState == "oldest" && (!changing || destinations != 2) {
 					continue
 				}
 				b.Run(fmt.Sprintf("lookup=%s/changing=%t/destinations=%d", lookupState, changing, destinations), func(b *testing.B) {
@@ -103,6 +107,16 @@ func BenchmarkHeadMetricMetadataLookupAppendConcurrent(b *testing.B) {
 								for i := range lookups {
 									lookups[i].Timestamp = 1000 + round - 1
 								}
+							} else if lookupState == "oldest" {
+								// Each changing commit evicts one version. Select seeded history
+								// until all five retained versions come from measured rounds.
+								timestamp := 1000 + round - (maxNativeMetricMetadataVersions - 1)
+								if round < maxNativeMetricMetadataVersions-1 {
+									timestamp = 100 + round + 1
+								}
+								for i := range lookups {
+									lookups[i].Timestamp = timestamp
+								}
 							}
 							for _, queue := range queues {
 								queue <- request{lookups: lookups, done: done}
@@ -114,13 +128,19 @@ func BenchmarkHeadMetricMetadataLookupAppendConcurrent(b *testing.B) {
 						}
 						if destinations > 0 && round > 0 {
 							wantVariant := maxNativeMetricMetadataVersions - 1
-							if changing {
+							switch {
+							case lookupState == "oldest":
+								wantVariant = int(round)
+								if round >= maxNativeMetricMetadataVersions {
+									wantVariant = maxNativeMetricMetadataVersions + int((round-maxNativeMetricMetadataVersions)%2)
+								}
+							case changing:
 								if lookupState == "current" {
 									wantVariant = maxNativeMetricMetadataVersions + int((round-1)%2)
 								} else if round > 1 {
 									wantVariant = maxNativeMetricMetadataVersions + int((round-2)%2)
 								}
-							} else if lookupState == "historical" {
+							case lookupState == "historical":
 								wantVariant--
 							}
 							for i, lookup := range lookups {

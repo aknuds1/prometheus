@@ -31,6 +31,7 @@ import (
 // histories. Each operation visits the entire working set, including value
 // copies; setup and result validation are outside timing. Parallel cases share
 // one Head but have independent result buffers, modeling multiple destinations.
+// Full-history cases scan all five retained versions.
 func BenchmarkHeadMetricMetadataLookup(b *testing.B) {
 	const series = 4096
 	for _, tc := range []struct {
@@ -42,7 +43,14 @@ func BenchmarkHeadMetricMetadataLookup(b *testing.B) {
 		{"distinct4096", series, 64},
 		{"oversized", 4, 256 << 10},
 	} {
-		for _, state := range []string{"current", "historical", "missing", "disabled"} {
+		states := []string{"current", "historical", "missing", "disabled"}
+		if tc.name == "shared" || tc.name == "distinct4096" {
+			states = append(states, "historical-full")
+		}
+		if tc.name == "shared" {
+			states = append(states, "missing-full")
+		}
+		for _, state := range states {
 			for _, parallel := range []bool{false, true} {
 				b.Run(fmt.Sprintf("values=%s/state=%s/parallel=%t", tc.name, state, parallel), func(b *testing.B) {
 					h, _, closeHead := newMetricMetadataBenchmarkHead(b, metricMetadataBenchmarkMode{nativeEnabled: state != "disabled"}, 1_000_000_000, false)
@@ -53,12 +61,18 @@ func BenchmarkHeadMetricMetadataLookup(b *testing.B) {
 						values[i].Type = model.MetricTypeCounter
 						values[i].Help = strconv.Itoa(i) + strings.Repeat("x", tc.helpBytes)
 					}
-					for version := range 2 {
+					versions := 2
+					if state == "historical-full" || state == "missing-full" {
+						versions = maxNativeMetricMetadataVersions
+					}
+					for version := range versions {
 						app := h.AppenderV2(b.Context())
 						for i := range refs {
 							m := values[i%len(values)]
-							if version == 1 {
+							if version == versions-1 {
 								m = metadata.Metadata{Type: model.MetricTypeCounter, Help: "current"}
+							} else if version > 0 {
+								m = metadata.Metadata{Type: model.MetricTypeCounter, Help: "intermediate-" + strconv.Itoa(version)}
 							}
 							var err error
 							refs[i], err = app.Append(refs[i], labels.FromStrings(labels.MetricName, "lookup", "id", strconv.Itoa(i)), 0, int64(100+100*version), 1, nil, nil, storage.AOptions{Metadata: m})
@@ -66,7 +80,7 @@ func BenchmarkHeadMetricMetadataLookup(b *testing.B) {
 						}
 						require.NoError(b, app.Commit())
 					}
-					timestamp := map[string]int64{"current": 200, "historical": 100, "missing": 50, "disabled": 100}[state]
+					timestamp := map[string]int64{"current": 200, "historical": 100, "missing": 50, "disabled": 100, "historical-full": 100, "missing-full": 50}[state]
 					lookups := make([]storage.NativeMetricMetadataLookup, series)
 					for i, ref := range refs {
 						lookups[i] = storage.NativeMetricMetadataLookup{Ref: ref, Timestamp: timestamp}
@@ -94,7 +108,7 @@ func BenchmarkHeadMetricMetadataLookup(b *testing.B) {
 					require.NoError(b, h.LookupNativeMetricMetadata(b.Context(), lookups))
 					for i, lookup := range lookups {
 						switch state {
-						case "historical":
+						case "historical", "historical-full":
 							require.Equal(b, &values[i%len(values)], lookup.Metadata)
 						case "current":
 							require.Equal(b, &metadata.Metadata{Type: model.MetricTypeCounter, Help: "current"}, lookup.Metadata)
