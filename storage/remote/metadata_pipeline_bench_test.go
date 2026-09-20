@@ -42,6 +42,8 @@ type metadataPipelineResult struct {
 	ResidentSeries                                 uint64
 	DrainedHeap, BacklogHeap                       uint64
 	TransactionP50, TransactionP95, TransactionP99 float64
+	ScheduleP50, ScheduleP99, ScheduleMax          float64
+	SweepsLateByInterval                           int64
 }
 
 // BenchmarkRemoteWriteMetadataPipeline includes ingestion, WAL reading, metadata
@@ -62,15 +64,17 @@ func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
 	receiverProcs := setting("PROMETHEUS_METADATA_PIPELINE_RECEIVER_PROCS", 2)
 	require.Zero(b, series%100, "series count must be a multiple of 100")
 	require.LessOrEqual(b, sweeps, 400, "changing traces must fit the five-version native history")
-	for _, workload := range []string{"cold", "unchanged", "changes", "newseries", "backlog", "cardinality", "distinct"} {
+	for _, workload := range []string{"cold", "unchanged", "changes", "newseries", "backlog", "cardinality", "distinct", "changes-distinct", "paced-unchanged", "paced-changes"} {
 		c := metadataPipelineConfig{Case: workload, Series: series, Values: 100, Sweeps: sweeps, Writers: 4, Shards: 4, CommitSize: 1000, Batch: 2000, Capacity: 10000, ReceiverProcs: receiverProcs}
 		switch workload {
 		case "backlog":
 			c.Writers, c.Shards, c.Sweeps = 1, 1, 4
 		case "cardinality":
 			c.Series *= 10
-		case "distinct":
+		case "distinct", "changes-distinct":
 			c.Values = c.Series
+		case "paced-unchanged", "paced-changes":
+			c.SweepInterval = 20 * time.Millisecond
 		}
 		for _, mode := range []string{"disabled", "wal", "native"} {
 			c.Source = mode
@@ -90,6 +94,12 @@ func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
 					metrics["wire-B/sample"] += float64(r.RequestBytes) / n
 					metrics["drain-ms/op"] += float64(r.Drain) / float64(time.Millisecond)
 					metrics["txn-p99-ns"] += r.TransactionP99
+					if c.SweepInterval > 0 {
+						metrics["ingested-samples/s"] += n / r.Ingestion.Seconds()
+						metrics["schedule-p99-ns"] += r.ScheduleP99
+						metrics["schedule-max-ns"] += r.ScheduleMax
+						metrics["late-sweeps/op"] += float64(r.SweepsLateByInterval)
+					}
 					if r.CPU.Available {
 						metrics["cpu-ns/sample"] += float64(r.CPU.User+r.CPU.System) / n
 					}
@@ -215,12 +225,22 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	runtime.ReadMemStats(&afterMemory)
 	r.LifecycleAllocatedBytes, r.LifecycleAllocations = afterMemory.TotalAlloc-lifecycleMemory.TotalAlloc, afterMemory.Mallocs-lifecycleMemory.Mallocs
 	var latencies []time.Duration
+	var lateness []time.Duration
 	for i := range f.latency {
 		latencies = append(latencies, f.latency[i]...)
 		r.PeakSampledQueue = max(r.PeakSampledQueue, f.peak[i])
+		lateness = append(lateness, f.lateness[i]...)
+		for _, late := range f.lateness[i] {
+			if late >= c.SweepInterval {
+				r.SweepsLateByInterval++
+			}
+		}
 	}
 	r.TransactionP50 = metadataPipelinePercentile(latencies, 50)
 	r.TransactionP95 = metadataPipelinePercentile(latencies, 95)
 	r.TransactionP99 = metadataPipelinePercentile(latencies, 99)
+	r.ScheduleP50 = metadataPipelinePercentile(lateness, 50)
+	r.ScheduleP99 = metadataPipelinePercentile(lateness, 99)
+	r.ScheduleMax = metadataPipelinePercentile(lateness, 100)
 	return r
 }

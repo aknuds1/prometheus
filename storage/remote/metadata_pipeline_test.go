@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	remoteapi "github.com/prometheus/client_golang/exp/api/remote"
@@ -60,6 +61,7 @@ type metadataPipelineConfig struct {
 	CommitSize, ReceiverProcs        int
 	Base                             int64
 	Mixed                            bool
+	SweepInterval                    time.Duration
 }
 
 func (c metadataPipelineConfig) lastStep() int {
@@ -87,7 +89,7 @@ func (c metadataPipelineConfig) version(slot, step int) int {
 	switch c.Case {
 	case "backlog":
 		return step
-	case "changes":
+	case "changes", "changes-distinct", "paced-changes":
 		if step > slot%100 {
 			return 1 + (step-1-slot%100)/100
 		}
@@ -456,6 +458,7 @@ type metadataPipeline struct {
 	queue                    *QueueManager
 	latency                  [][]time.Duration
 	peak                     []int64
+	lateness                 [][]time.Duration
 	enqueueRetriesBeforeHold float64
 }
 
@@ -463,6 +466,7 @@ func newMetadataPipeline(ctx context.Context, c metadataPipelineConfig) (*metada
 	f := &metadataPipeline{
 		config: c, registry: prometheus.NewRegistry(), observer: prometheus.NewRegistry(), refs: make([]storage.SeriesRef, c.Series),
 		latency: make([][]time.Duration, c.Writers), peak: make([]int64, c.Writers),
+		lateness: make([][]time.Duration, c.Writers),
 	}
 	f.labels, f.metadata = metadataPipelineInputs(c)
 	for w := range f.latency {
@@ -570,6 +574,30 @@ func (f *metadataPipeline) awaitBacklog(ctx context.Context) error {
 	}
 }
 
+// metadataPipelinePacer schedules sweeps against absolute deadlines. Late sweeps
+// catch up without dropping observations or shifting subsequent deadlines.
+type metadataPipelinePacer struct {
+	start    time.Time
+	interval time.Duration
+	timer    *time.Timer
+}
+
+func (p *metadataPipelinePacer) wait(ctx context.Context, step int) (time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	deadline := p.start.Add(time.Duration(step) * p.interval)
+	if delay := time.Until(deadline); delay > 0 {
+		p.timer.Reset(delay)
+		select {
+		case <-p.timer.C:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	return max(0, time.Since(deadline)), ctx.Err()
+}
+
 func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 	c := f.config
 	group, ctx := errgroup.WithContext(ctx)
@@ -579,10 +607,31 @@ func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 		// shard assignments. Measured sweeps still use concurrent producers.
 		writers = 1
 	}
+	var paceStart time.Time
+	if c.SweepInterval > 0 && first > 0 {
+		paceStart = time.Now()
+	}
 	for writer := range writers {
 		group.Go(func() error {
+			var pacer *metadataPipelinePacer
+			if !paceStart.IsZero() {
+				pacer = &metadataPipelinePacer{
+					start:    paceStart.Add(time.Duration(writer) * c.SweepInterval / time.Duration(writers)),
+					interval: c.SweepInterval,
+					timer:    time.NewTimer(time.Hour),
+				}
+				pacer.timer.Stop()
+				defer pacer.timer.Stop()
+			}
 			begin, end := c.Series*writer/writers, c.Series*(writer+1)/writers
 			for step := first; step <= last; step++ {
+				if pacer != nil {
+					late, err := pacer.wait(ctx, step-first)
+					if err != nil {
+						return err
+					}
+					f.lateness[writer] = append(f.lateness[writer], late)
+				}
 				for offset := begin; offset < end; offset += c.CommitSize {
 					if err := ctx.Err(); err != nil {
 						return err
@@ -719,14 +768,20 @@ func (u metadataPipelineCPUUsage) sub(before metadataPipelineCPUUsage) metadataP
 
 func TestRemoteWriteMetadataPipeline(t *testing.T) {
 	for _, mode := range []string{"disabled", "wal", "native"} {
-		for _, workload := range []string{"cold", "unchanged", "changes", "newseries", "backlog", "mixed"} {
+		for _, workload := range []string{"cold", "unchanged", "changes", "changes-distinct", "paced-unchanged", "paced-changes", "newseries", "backlog", "mixed"} {
 			t.Run("source="+mode+"/case="+workload, func(t *testing.T) {
 				c := metadataPipelineConfig{Source: mode, Case: workload, Series: 300, Values: 100, Sweeps: 4, Writers: 4, Shards: 4, Batch: 20, Capacity: 100, CommitSize: 50, ReceiverProcs: 2, Base: time.Now().Add(time.Hour).UnixMilli(), Mixed: workload == "mixed"}
 				if workload == "backlog" {
 					c.Writers, c.Shards = 1, 1
 				}
-				if workload == "changes" || workload == "newseries" {
+				if workload == "changes" || workload == "changes-distinct" || workload == "paced-changes" || workload == "newseries" {
 					c.Sweeps = 101
+				}
+				if workload == "changes-distinct" {
+					c.Values = c.Series
+				}
+				if strings.HasPrefix(workload, "paced-") {
+					c.SweepInterval = time.Millisecond
 				}
 				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 				defer cancel()
@@ -857,6 +912,41 @@ func TestRemoteWriteMetadataPipelineValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMetadataPipelinePacer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := metadataPipelinePacer{start: time.Now().Add(5 * time.Millisecond), interval: 20 * time.Millisecond, timer: time.NewTimer(time.Hour)}
+		p.timer.Stop()
+		defer p.timer.Stop()
+		for _, step := range []int{0, 1} {
+			late, err := p.wait(t.Context(), step)
+			require.NoError(t, err)
+			require.Zero(t, late)
+			require.Equal(t, p.start.Add(time.Duration(step)*p.interval), time.Now())
+		}
+		time.Sleep(50 * time.Millisecond)
+		late, err := p.wait(t.Context(), 2)
+		require.NoError(t, err)
+		require.Equal(t, 30*time.Millisecond, late)
+		late, err = p.wait(t.Context(), 3)
+		require.NoError(t, err)
+		require.Equal(t, 10*time.Millisecond, late)
+		late, err = p.wait(t.Context(), 4)
+		require.NoError(t, err)
+		require.Zero(t, late)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() {
+			_, err := p.wait(ctx, 5)
+			done <- err
+		}()
+		synctest.Wait()
+		cancel()
+		require.ErrorIs(t, <-done, context.Canceled)
+		_, err = p.wait(ctx, 0)
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 func metadataPipelineRetainedHeap(f *metadataPipeline) uint64 {

@@ -68,19 +68,29 @@ run() {
     -test.benchtime=1x -test.benchmem -test.timeout=10m >"$destination.txt" 2>"$destination.stderr"
 }
 
-for cohort in 1 2; do
-  mkdir "$results/cohort-$cohort"
-  for repetition in 1 2 3 4 5 6; do
-    for case_index in "${!cases[@]}"; do
-      workload=${cases[$case_index]}
-      for offset in 0 1 2; do
-        mode=${modes[$(((cohort + repetition + case_index + offset) % 3))]}
-        run "$results/cohort-$cohort/$workload-$mode-$repetition" "$workload" "$mode"
+run_cohorts() {
+  local prefix=$1
+  shift
+  local workloads=("$@")
+  local cohort repetition case_index workload offset mode
+  for cohort in 1 2; do
+    mkdir "$results/$prefix-$cohort"
+    for repetition in 1 2 3 4 5 6; do
+      for case_index in "${!workloads[@]}"; do
+        workload=${workloads[$case_index]}
+        for offset in 0 1 2; do
+          mode=${modes[$(((cohort + repetition + case_index + offset) % 3))]}
+          run "$results/$prefix-$cohort/$workload-$mode-$repetition" "$workload" "$mode"
+        done
       done
     done
+    benchstat -col '/source@(wal native disabled)' -row /case,/series "$results/$prefix-$cohort/"*-[1-6].txt >"$results/$prefix-$cohort.benchstat.txt"
   done
-  benchstat -col '/source@(wal native disabled)' -row /case,/series "$results/cohort-$cohort/"*-[1-6].txt >"$results/cohort-$cohort.benchstat.txt"
-done
+}
+
+run_cohorts cohort "${cases[@]}"
+# Paced and high-diversity changing traces have their own reporting groups.
+run_cohorts companion-cohort changes-distinct paced-unchanged paced-changes
 
 # These are separate diagnostic cohorts, never pooled with the primary ones.
 mkdir "$results/receiver-capacity" "$results/heap" "$results/profiles"
