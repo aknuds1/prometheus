@@ -14,6 +14,8 @@
 
 """Serial Linux study: selftest, freeze DIRECTORY, smoke DIRECTORY, run DIRECTORY, analyze DIRECTORY.
 
+continue OLD_RESULTS NEW_RESULTS finishes an interrupted schema-1 study separately.
+
 Run freeze from the repository root after validation, with go and benchstat on PATH.
 The new results directory must be outside the source tree. Run never overwrites or
 resumes partial measurements. Analyze also works on a downloaded results directory.
@@ -27,10 +29,12 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import statistics
 import subprocess
 import sys
+import tarfile
 import time
 
 
@@ -38,10 +42,16 @@ ENV = {"GOMAXPROCS": "4", "GOGC": "100", "GOMEMLIMIT": "off", "GODEBUG": "",
        "GOENV": "off", "GOTOOLCHAIN": "local", "GOWORK": "off", "GOFLAGS": "",
        "GOEXPERIMENT": "", "GOAMD64": "v1", "CGO_ENABLED": "1", "GOOS": "linux", "GOARCH": "amd64"}
 MODES = ("wal", "native", "disabled")
+POLICIES = {
+    1: dict(steal_fraction_max=.01, retries_per_block=1, benchtime="1x"),
+    2: dict(steal_action="record", steal_fraction_warning=.01, retries_per_block=1, benchtime="1x"),
+}
 
 
 def write(path, value):
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
 
 
 def sha(path):
@@ -54,7 +64,7 @@ def spec(group, case, sharing, series, mode, kind="scored", receiver=2):
                 kind=kind, receiver=receiver)
 
 
-def manifest():
+def manifest(schema=2):
     blocks = []
     permutations = list(itertools.permutations(MODES))
     for cohort in (1, 2):
@@ -87,8 +97,7 @@ def manifest():
     counts = {kind: sum(m["kind"] == kind for b in blocks for m in b["members"])
               for kind in ("scored", "heap", "capacity", "profile")}
     assert counts == dict(scored=504, heap=108, capacity=48, profile=8), counts
-    return dict(schema=1, environment=ENV, blocks=blocks, counts=counts,
-                policy=dict(steal_fraction_max=.01, retries_per_block=1, benchtime="1x"))
+    return dict(schema=schema, environment=ENV, blocks=blocks, counts=counts, policy=POLICIES[schema])
 
 
 def name(m):
@@ -190,19 +199,22 @@ def processes(exclude_group):
     return dict(time=time.time(), processes=raw, offenders=offenders)
 
 
-def noise(before, after, activity):
-    reasons = []
+def host_activity(before, after, activity, schema):
+    """Keep legacy exclusions reproducible; CPU steal is informational in schema 2."""
+    fractions, warnings = {}, []
     assert before["cpu"].keys() == after["cpu"].keys()
     for cpu in before["cpu"]:
         delta = [a-b for a, b in zip(after["cpu"][cpu], before["cpu"][cpu])]
         assert all(x >= 0 for x in delta)
-        if sum(delta) and delta[7]/sum(delta) > .01:
-            reasons.append(f"{cpu} steal {delta[7]/sum(delta):.4%}")
+        fractions[cpu] = delta[7]/sum(delta) if sum(delta) else 0
+        if fractions[cpu] > .01:
+            warnings.append(f"{cpu} steal {fractions[cpu]:.4%}")
+    reasons = warnings.copy() if schema == 1 else []
     if before["swap"] != after["swap"]:
         reasons.append("swap activity")
     if any(a["offenders"] for a in activity):
         reasons.append("overlapping compilation, tests, or package installation")
-    return reasons
+    return dict(steal_fractions=fractions, warnings=warnings, noise=reasons)
 
 
 def host_identity():
@@ -217,6 +229,7 @@ def freeze(root):
     planned = manifest()
     planned["source"] = str(source)
     planned["host"] = host_identity()
+    shutil.copyfile(__file__, root / "runner.py")
     with (root / "build.txt").open("w") as log:
         subprocess.run(["go", "test", "-p=2", "-c", "-o", str(root / "remote.test"), "./storage/remote"],
                        env=environment(), stdout=log, stderr=subprocess.STDOUT, check=True)
@@ -234,14 +247,51 @@ def freeze(root):
     (root / "expected-runs.sha256").write_text(sha(root / "expected-runs.json") + "  expected-runs.json\n")
 
 
-def load(root):
+def source_archive(root, planned):
+    """Verify archived source without depending on the original absolute checkout path."""
+    hashes = {}
+    with tarfile.open(root / "source.tar.gz") as archive:
+        for member in archive:
+            if member.isdir():
+                continue
+            path = Path(member.name)
+            assert member.isfile() and not path.is_absolute() and ".." not in path.parts
+            name = path.as_posix()
+            assert name not in hashes, name
+            hashes[name] = hashlib.file_digest(archive.extractfile(member), "sha256").hexdigest()
+    assert hashes == planned["source_hashes"], "source archive differs from source inventory"
+
+
+def inventory(root):
+    files = {}
+    for path in sorted(root.rglob("*")):
+        assert not path.is_symlink(), path
+        if path.is_file():
+            files[path.relative_to(root).as_posix()] = sha(path)
+    return files
+
+
+def load(root, execution=False):
     assert sha(root / "expected-runs.json") == (root / "expected-runs.sha256").read_text().split()[0]
     planned = json.loads((root / "expected-runs.json").read_text())
-    for key, value in manifest().items():
+    assert planned["schema"] in POLICIES, "unknown manifest schema"
+    for key, value in manifest(planned["schema"]).items():
         assert planned[key] == value, key
-    assert planned["runner_sha256"] == sha(Path(__file__))
+    assert set(planned["hashes"]) == {"remote.test", "source.tar.gz"}
     for path, digest in planned["hashes"].items():
         assert sha(root / path) == digest, path
+    source_archive(root, planned)
+    if planned["schema"] == 1:
+        assert "parent" not in planned
+        assert planned["runner_sha256"] == planned["source_hashes"]["scripts/benchmark-metadata-pipeline-scale.py"]
+    else:
+        assert planned["runner_sha256"] == sha(root / "runner.py")
+    if execution:
+        assert planned["schema"] == 2, "legacy evidence is read-only"
+        assert planned["runner_sha256"] == sha(Path(__file__)), "executing runner differs from frozen runner"
+        assert host_identity() == planned["host"], "host boot/kernel changed"
+        for path, digest in planned["source_hashes"].items():
+            assert sha(Path(planned["source"]) / path) == digest, path
     return planned
 
 
@@ -263,10 +313,10 @@ def run_one(root, folder, m, planned):
                 break
             time.sleep(.5)
     after = snapshot()
-    reasons = noise(before, after, activity)
+    assessment = host_activity(before, after, activity, planned["schema"])
     record = dict(member=m, command=command, environment={k: v for k, v in environment(m).items() if k in ENV or k.startswith("PROMETHEUS_METADATA_PIPELINE_")},
                   binary_sha256=planned["hashes"]["remote.test"], started=started, ended=time.time(), exit=p.returncode,
-                  before=before, after=after, activity=activity, noise=reasons,
+                  before=before, after=after, activity=activity, **assessment,
                   stdout_sha256=sha(folder / "stdout.txt"), stderr_sha256=sha(folder / "stderr.txt"))
     write(folder / "record.json", record)
     assert p.returncode == 0, ("benchmark failed", folder)
@@ -275,44 +325,209 @@ def run_one(root, folder, m, planned):
         for filename in ("cpu.pprof", "alloc.pprof"):
             assert (folder / filename).stat().st_size > 0
     assert host_identity() == planned["host"]
-    return reasons
+    if assessment["warnings"]:
+        print("CPU-steal warning (informational):", ", ".join(assessment["warnings"]), flush=True)
+    return assessment
+
+
+def validate_record(folder, member, planned):
+    record = json.loads((folder / "record.json").read_text())
+    assert record["member"] == member and record["exit"] == 0
+    assert record["binary_sha256"] == planned["hashes"]["remote.test"]
+    expected_env = {k: v for k, v in environment(member).items() if k in ENV or k.startswith("PROMETHEUS_METADATA_PIPELINE_")}
+    assert record["environment"] == expected_env
+    for stream in ("stdout", "stderr"):
+        assert record[stream+"_sha256"] == sha(folder / (stream+".txt"))
+    assessment = host_activity(record["before"], record["after"], record["activity"], planned["schema"])
+    assert record["noise"] == assessment["noise"]
+    if planned["schema"] == 2:
+        assert all(record[key] == assessment[key] for key in ("warnings", "steal_fractions"))
+    assert math.isfinite(record["ended"] - record["started"]) and record["ended"] >= record["started"]
+    parsed = parse_output((folder / "stdout.txt").read_text(), member)
+    if member["kind"] == "profile":
+        assert all((folder / filename).stat().st_size > 0 for filename in ("cpu.pprof", "alloc.pprof"))
+    return dict(**parsed, host=dict(**assessment, seconds=record["ended"]-record["started"]))
+
+
+def collect_block(root, block, planned, segment, stopped=False):
+    destination = root / "results" / block["id"]
+    if stopped:
+        assert not (destination / "accepted.json").exists()
+        accepted, attempts = None, range(2)
+    else:
+        accepted = json.loads((destination / "accepted.json").read_text())["attempt"]
+        assert accepted in (0, 1)
+        attempts = range(accepted+1)
+    expected = {f"attempt-{i}" for i in attempts} | ({"accepted.json"} if not stopped else set())
+    assert {p.name for p in destination.iterdir()} == expected
+    observations, excluded = [], []
+    for attempt in attempts:
+        folder = destination / f"attempt-{attempt}"
+        assert {p.name for p in folder.iterdir()} == {str(i) for i in range(len(block["members"]))} | {"block.json"}
+        reasons, warnings = [], []
+        for i, member in enumerate(block["members"]):
+            parsed = validate_record(folder / str(i), member, planned)
+            reasons += parsed["host"]["noise"]
+            warnings += parsed["host"]["warnings"]
+            if attempt == accepted:
+                observations.append(dict(block=block["id"], member=member, segment=segment, schema=planned["schema"], **parsed))
+        status = dict(block=block, attempt=attempt, noise=reasons)
+        if planned["schema"] == 2:
+            status["warnings"] = warnings
+        assert json.loads((folder / "block.json").read_text()) == status
+        assert bool(reasons) == (attempt != accepted)
+        if reasons:
+            excluded.append(dict(block=block["id"], attempt=attempt, segment=segment, reasons=reasons))
+    return observations, excluded, accepted
+
+
+def smoke_members():
+    members = [spec("equal-work", "unchanged", "shared", 100000, mode) for mode in MODES]
+    members += [spec("backlog", "changes", "distinct", 100000, mode, "heap") for mode in ("wal", "native")]
+    return members + [spec("history", "changes", "shared", 10000, "native")]
+
+
+def validate_smoke(root, planned):
+    assert (root / "SMOKE_COMPLETE").is_file()
+    members = smoke_members()
+    assert {p.name for p in (root / "smoke").iterdir()} == {str(i) for i in range(len(members))}
+    for i, member in enumerate(members):
+        validate_record(root / "smoke" / str(i), member, planned)
+
+
+def check_block_paths(root, blocks):
+    expected = {b["id"] for b in blocks}
+    results = root / "results"
+    assert {p.parent.parent.relative_to(results).as_posix() for p in results.rglob("block.json")} == expected
+    assert {p.parent.parent.parent.relative_to(results).as_posix() for p in results.rglob("record.json")} == expected
+    assert {p.parent.relative_to(results).as_posix() for p in results.rglob("accepted.json")} <= expected
+
+
+def legacy_parent(root):
+    """Validate a completed prefix and one exhausted legacy block, without changing either."""
+    planned = load(root)
+    assert planned["schema"] == 1 and not (root / "MEASUREMENT_COMPLETE").exists()
+    validate_smoke(root, planned)
+    stopped = json.loads((root / "INCONCLUSIVE.json").read_text())
+    terminal = next(i for i, block in enumerate(planned["blocks"]) if block == stopped["block"])
+    inherited, observations, excluded = [], [], []
+    for i, block in enumerate(planned["blocks"]):
+        if i > terminal:
+            assert not (root / "results" / block["id"]).exists()
+            continue
+        rows, exclusions, accepted = collect_block(root, block, planned, "original", stopped=i == terminal)
+        observations += rows
+        excluded += exclusions
+        if i < terminal:
+            inherited.append(dict(block=block["id"], attempt=accepted))
+        else:
+            assert exclusions[-1]["reasons"] == stopped["noise"]
+    check_block_paths(root, planned["blocks"][:terminal+1])
+    return planned, inherited, observations, excluded
+
+
+def parent_results(root, planned):
+    if "parent" not in planned:
+        return [], [], []
+    parent = planned["parent"]
+    assert parent["directory"] == "parent"
+    directory = root / "parent"
+    assert inventory(directory) == parent["files"], "parent evidence changed"
+    previous, inherited, observations, excluded = legacy_parent(directory)
+    assert inherited == parent["inherited"]
+    assert planned["hashes"] == previous["hashes"]
+    assert planned["host"] == previous["host"] and planned["source_hashes"] == previous["source_hashes"]
+    remaining = [b["id"] for b in planned["blocks"][len(inherited):]]
+    assert remaining == parent["remaining"]
+    return inherited, observations, excluded
+
+
+def prepare_continuation(old, root):
+    old, root = old.resolve(), root.resolve()
+    assert root != old and root not in old.parents and old not in root.parents, "overlapping results directories"
+    assert not root.exists(), "continuation destination already exists"
+    previous, inherited, _, _ = legacy_parent(old)
+    source = Path(previous["source"]).resolve()
+    assert root != source and source not in root.parents and root not in source.parents
+    assert host_identity() == previous["host"], "host boot/kernel changed"
+    for path, digest in previous["source_hashes"].items():
+        assert sha(source / path) == digest, path
+    parent_files = inventory(old)
+    root.mkdir()
+    shutil.copytree(old, root / "parent")
+    assert inventory(root / "parent") == parent_files
+    for path in previous["hashes"]:
+        shutil.copy2(old / path, root / path)
+    shutil.copyfile(__file__, root / "runner.py")
+    planned = manifest()
+    planned.update(source=previous["source"], host=previous["host"], hashes=previous["hashes"],
+                   source_hashes=previous["source_hashes"], runner_sha256=sha(root / "runner.py"),
+                   parent=dict(directory="parent", files=parent_files, inherited=inherited,
+                               remaining=[b["id"] for b in planned["blocks"][len(inherited):]]))
+    write(root / "expected-runs.json", planned)
+    (root / "expected-runs.sha256").write_text(sha(root / "expected-runs.json")+"  expected-runs.json\n")
+    load(root, execution=True)
+    parent_results(root, planned)
+
+
+def collect(root, planned):
+    inherited, observations, excluded = parent_results(root, planned)
+    validate_smoke(root, planned)
+    remaining = planned["blocks"][len(inherited):]
+    for block in remaining:
+        rows, exclusions, _ = collect_block(root, block, planned, "continuation" if inherited else "original")
+        observations += rows
+        excluded += exclusions
+    check_block_paths(root, remaining)
+    expected = {(b["id"], json.dumps(m, sort_keys=True)) for b in planned["blocks"] for m in b["members"]}
+    actual = [(o["block"], json.dumps(o["member"], sort_keys=True)) for o in observations]
+    assert len(actual) == len(set(actual)) and set(actual) == expected
+    return observations, excluded
+
+
+def complete(root, planned):
+    collect(root, planned)
+    assert not (root / "INCONCLUSIVE.json").exists()
+    marker = root / "MEASUREMENT_COMPLETE"
+    assert not marker.exists()
+    temporary = root / "MEASUREMENT_COMPLETE.tmp"
+    temporary.write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())+"\n")
+    temporary.replace(marker)
 
 
 def run(root):
-    planned = load(root)
-    assert (root / "SMOKE_COMPLETE").is_file(), "validate real trace measurements before scoring"
-    for path, digest in planned["source_hashes"].items():
-        assert sha(Path(planned["source"]) / path) == digest, path
+    planned = load(root, execution=True)
+    inherited, _, _ = parent_results(root, planned)
+    validate_smoke(root, planned)
     (root / "results").mkdir()
-    for index, block in enumerate(planned["blocks"]):
+    for index, block in enumerate(planned["blocks"][len(inherited):], start=len(inherited)):
         assert sha(root / "remote.test") == planned["hashes"]["remote.test"]
         destination = root / "results" / block["id"]
         destination.mkdir(parents=True)
         for attempt in (0, 1):
             folder = destination / f"attempt-{attempt}"
             folder.mkdir()
-            reasons = []
+            reasons, warnings = [], []
             for i, m in enumerate(block["members"]):
                 print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), f"block={index+1}/{len(planned['blocks'])}", block["id"], attempt, i, m, flush=True)
-                reasons += run_one(root, folder / str(i), m, planned)
-            write(folder / "block.json", dict(block=block, attempt=attempt, noise=reasons))
+                assessment = run_one(root, folder / str(i), m, planned)
+                reasons += assessment["noise"]
+                warnings += assessment["warnings"]
+            write(folder / "block.json", dict(block=block, attempt=attempt, noise=reasons, warnings=warnings))
             if not reasons:
                 write(destination / "accepted.json", dict(attempt=attempt))
                 break
             if attempt:
                 write(root / "INCONCLUSIVE.json", dict(block=block, noise=reasons))
                 raise RuntimeError("host interference recurred; stopped without a complete-study claim")
-    (root / "MEASUREMENT_COMPLETE").write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())+"\n")
+    complete(root, planned)
 
 
 def smoke(root):
-    planned = load(root)
+    planned = load(root, execution=True)
     destination = root / "smoke"
     destination.mkdir()
-    members = [spec("equal-work", "unchanged", "shared", 100000, mode) for mode in MODES]
-    members += [spec("backlog", "changes", "distinct", 100000, mode, "heap") for mode in ("wal", "native")]
-    members.append(spec("history", "changes", "shared", 10000, "native"))
-    for i, m in enumerate(members):
+    for i, m in enumerate(smoke_members()):
         run_one(root, destination / str(i), m, planned)
     (root / "SMOKE_COMPLETE").write_text("Six real-trace parser and measurement smoke checks passed.\n")
 
@@ -320,65 +535,51 @@ def smoke(root):
 def analyze(root):
     planned = load(root)
     assert (root / "MEASUREMENT_COMPLETE").is_file()
-    observations, excluded = [], []
-    for block in planned["blocks"]:
-        destination = root / "results" / block["id"]
-        accepted = json.loads((destination / "accepted.json").read_text())["attempt"]
-        assert accepted in (0, 1)
-        assert {p.name for p in destination.glob("attempt-*")} == {f"attempt-{i}" for i in range(accepted+1)}
-        for attempt in range(accepted+1):
-            folder = destination / f"attempt-{attempt}"
-            assert {p.name for p in folder.iterdir()} == {str(i) for i in range(len(block["members"]))} | {"block.json"}
-            reasons = []
-            for i, m in enumerate(block["members"]):
-                run_dir = folder / str(i)
-                record = json.loads((run_dir / "record.json").read_text())
-                assert record["member"] == m and record["exit"] == 0
-                assert record["binary_sha256"] == planned["hashes"]["remote.test"]
-                expected_env = {k: v for k, v in environment(m).items() if k in ENV or k.startswith("PROMETHEUS_METADATA_PIPELINE_")}
-                assert record["environment"] == expected_env
-                for stream in ("stdout", "stderr"):
-                    assert record[stream+"_sha256"] == sha(run_dir / (stream+".txt"))
-                assert record["noise"] == noise(record["before"], record["after"], record["activity"])
-                reasons += record["noise"]
-                parsed = parse_output((run_dir / "stdout.txt").read_text(), m)
-                if m["kind"] == "profile":
-                    assert all((run_dir / filename).stat().st_size > 0 for filename in ("cpu.pprof", "alloc.pprof"))
-                if attempt == accepted:
-                    observations.append(dict(block=block["id"], member=m, **parsed))
-            status = json.loads((folder / "block.json").read_text())
-            assert status == dict(block=block, attempt=attempt, noise=reasons)
-            assert bool(reasons) == (attempt != accepted)
-            if reasons:
-                excluded.append(dict(block=block["id"], attempt=attempt, reasons=reasons))
-    expected = {(b["id"], json.dumps(m, sort_keys=True)) for b in planned["blocks"] for m in b["members"]}
-    actual = [(o["block"], json.dumps(o["member"], sort_keys=True)) for o in observations]
-    assert len(actual) == len(set(actual)) and set(actual) == expected
+    observations, excluded = collect(root, planned)
     output = root / "analysis"
     output.mkdir(exist_ok=True)
     write(output / "observations.json", observations)
-    write(output / "coverage.json", dict(counts=planned["counts"], exclusions=excluded))
-    for cohort in (1, 2):
-        rows = [o for o in observations if o["block"].startswith(f"cohort-{cohort}/")]
-        text = "goos: linux\ngoarch: amd64\npkg: github.com/prometheus/prometheus/storage/remote\n"+"\n".join(o["line"] for o in rows)+"\n"
-        path = output / f"cohort-{cohort}.txt"
-        path.write_text(text)
-        with (output / f"cohort-{cohort}.benchstat.txt").open("w") as out:
-            subprocess.run(["benchstat", "-col", "/source@(wal native disabled)", "-row", "/group,/case,/values,/series", str(path)], stdout=out, check=True)
+    warnings = [dict(block=o["block"], member=o["member"], segment=o["segment"], **o["host"])
+                for o in observations if o["host"]["warnings"]]
+    write(output / "coverage.json", dict(counts=planned["counts"], exclusions=excluded, warnings=warnings,
+                                         segments={s: sum(o["segment"] == s for o in observations)
+                                                   for s in sorted({o["segment"] for o in observations})}))
+    groups = [(cohort, "all") for cohort in (1, 2)]
+    if "parent" in planned:
+        for cohort in (1, 2):
+            segments = {o["segment"] for o in observations if o["block"].startswith(f"cohort-{cohort}/")}
+            if len(segments) > 1:
+                groups += [(cohort, segment) for segment in sorted(segments)]
     summary = []
-    for cohort in (1, 2):
-        rows = [o for o in observations if o["block"].startswith(f"cohort-{cohort}/")]
+    for cohort, segment in groups:
+        rows = [o for o in observations if o["block"].startswith(f"cohort-{cohort}/")
+                and (segment == "all" or o["segment"] == segment)]
+        text = "goos: linux\ngoarch: amd64\npkg: github.com/prometheus/prometheus/storage/remote\n"+"\n".join(o["line"] for o in rows)+"\n"
+        label = f"cohort-{cohort}" + (f"-{segment}" if segment != "all" else "")
+        path = output / f"{label}.txt"
+        path.write_text(text)
+        with (output / f"{label}.benchstat.txt").open("w") as out:
+            subprocess.run(["benchstat", "-col", "/source@(wal native disabled)", "-row", "/group,/case,/values,/series", str(path)], stdout=out, check=True)
         cells = sorted({(o["member"]["group"], o["member"]["case"], o["member"]["sharing"], o["member"]["series"]) for o in rows})
         for cell in cells:
             selected = [o for o in rows if tuple(o["member"][k] for k in ("group", "case", "sharing", "series")) == cell]
             for metric in ("cpu-ns/sample", "alloc-B/sample", "samples/s"):
                 values = {mode: {o["block"]: o["metrics"][metric] for o in selected if o["member"]["mode"] == mode} for mode in MODES}
-                assert all(len(v) == 6 for v in values.values())
+                assert values["wal"].keys() == values["native"].keys() == values["disabled"].keys()
+                if segment == "all":
+                    assert all(len(v) == 6 for v in values.values())
                 ratios = [values["native"][b]/v for b, v in values["wal"].items()]
-                summary.append(dict(cohort=cohort, cell=cell, metric=metric,
+                summary.append(dict(cohort=cohort, segment=segment, n=len(ratios), cell=cell, metric=metric,
                                     medians={k: statistics.median(list(v.values())) for k, v in values.items()},
                                     native_wal_ratio=dict(median=statistics.median(ratios), minimum=min(ratios), maximum=max(ratios))))
     write(output / "summary.json", summary)
+
+
+def continue_study(old, root):
+    prepare_continuation(old, root)
+    smoke(root)
+    run(root)
+    analyze(root)
 
 
 def selftest():
@@ -421,6 +622,8 @@ if __name__ == "__main__":
         raise RuntimeError("assertions must remain enabled")
     if len(sys.argv) == 2 and sys.argv[1] == "selftest":
         selftest()
+    elif len(sys.argv) == 4 and sys.argv[1] == "continue":
+        continue_study(*(Path(arg).resolve() for arg in sys.argv[2:]))
     elif len(sys.argv) == 3 and sys.argv[1] in ("freeze", "smoke", "run", "analyze"):
         globals()[sys.argv[1]](Path(sys.argv[2]).resolve())
     else:

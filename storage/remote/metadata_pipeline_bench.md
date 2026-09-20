@@ -85,6 +85,7 @@ new results directory outside the source tree:
 
 ```sh
 python3 scripts/benchmark-metadata-pipeline-scale.py selftest
+python3 scripts/benchmark-metadata-pipeline-scale_test.py
 python3 scripts/benchmark-metadata-pipeline-scale.py freeze /absolute/path/to/new-scale-results
 python3 scripts/benchmark-metadata-pipeline-scale.py smoke /absolute/path/to/new-scale-results
 python3 scripts/benchmark-metadata-pipeline-scale.py run /absolute/path/to/new-scale-results
@@ -114,12 +115,37 @@ diversity from churn; receiver P2/P4 checks indicate capacity sensitivity, not p
 of unlimited receiver headroom.
 
 The runner freezes source/binary hashes, configuration, host boot/kernel identity,
-and raw results. It stops on correctness/provenance failure. Only overlapping
-builds/tests/package installation, swap activity, or aggregate/per-vCPU steal above
-1% reject a complete comparison block, with one replacement attempt allowed.
-Lateness and saturation are retained as results. Partial runs are not silently
-resumed or overwritten. Keep the complete results directory, runner, and validation
-evidence together in a checksummed archive.
+and raw results. In schema 2, CPU steal is informational: aggregate/per-vCPU values
+and monitoring duration are retained, with warnings above 1%, but steal never causes
+exclusion, retry, or termination. Lateness and saturation are also results, not
+exclusion reasons. Correctness/provenance failures still stop execution. Overlapping
+builds/tests/package installation or swap activity reject a whole comparison block,
+with one replacement allowed before stopping. Legacy schema-1 evidence retains its
+original CPU-steal rejection policy.
+
+An explicit continuation can finish an interrupted schema-1 study without rebuilding
+its benchmark binary or altering its evidence:
+
+```sh
+python3 scripts/benchmark-metadata-pipeline-scale.py continue /absolute/path/to/old-results /absolute/path/to/new-results
+```
+
+The destination must be new and separate from the old results and source. The runner
+validates and copies the entire parent results directory, freezes its inherited
+block/attempt mapping and remaining blocks, and repeats six smoke traces separately.
+It then reruns the entire stopped block and completes the remaining original order
+under schema 2. Old excluded attempts stay excluded. Host boot/kernel identity and
+the original source and binary must still match; the new control runner is frozen
+separately. This is not an arbitrary resume or chained-continuation mechanism.
+
+Completion requires exact combined coverage, not just the end of the new segment.
+Analysis checks legacy and new records under their respective policies, tags each
+observation's segment, and supplies separate tables for mixed cohorts' segments as
+well as the combined table. A mixed-policy cohort is not a fresh uniform-policy
+replication. CPU-steal warnings remain in analysis without filtering observations.
+Keep the entire child directory (including `parent`), runner, and validation evidence
+together in a checksummed archive. Analysis works after relocation without the live
+source checkout or access to the droplet.
 
 ### Original workloads
 
@@ -430,6 +456,9 @@ tables, and `REPORT.md`. SHA-256:
 
 ### Scale and held-backlog study: incomplete (2026-09-20)
 
+This records the original stop. The explicit continuation below supersedes its
+completion status and recommendation to restart, without changing its evidence.
+
 The bounded scale study above used the same host, boot, kernel, toolchain, and
 runtime settings, with benchmark-only additions to
 `b251931766dc2d0b6d16ba1640fa62ff42babbf1`. Production code was unchanged.
@@ -480,3 +509,98 @@ original stopped study, frozen sources/binaries, all accepted and rejected attem
 validation logs, monitoring, and an independently cross-checked partial analysis.
 SHA-256:
 `ff7a68a18bdc6b4576eec3e342043e98a052a6257ed13667cdf41d521e0b1192`.
+
+### Scale and held-backlog study: completed continuation (2026-09-20)
+
+At the user's request, CPU steal became informational: retain the measurement and
+record the warning, without rejection, retry, or interruption. An explicit
+continuation reused the exact frozen binary, source, host boot, kernel, workload
+matrix, and remaining execution order. It inherited the 414 accepted observations
+and executed the remaining 90 scored observations, 108 heap diagnostics, 48
+receiver-capacity diagnostics, and eight CPU/allocation profiles. Production and
+Go benchmark code were unchanged.
+
+All 504 scored observations and 164 diagnostics are now covered. Four new accepted
+observations had per-vCPU steal warnings of 1.85-1.92%; none caused a retry or stop.
+One six-trace heap block was repeated because an `apt-get` process overlapped it,
+under the unchanged local-process interference rule. Its replacement passed.
+The five original rejected block attempts remain excluded and archived, including
+both attempts at the original terminal block. Twelve smoke traces are separate.
+
+Cohort 1 is entirely original evidence; cohort 2 mixes original and continuation
+evidence. This completes the planned coverage, **not a fresh uniform-policy
+replication**. The archive includes combined and segment-specific cohort-2 tables;
+its continuation segment has only two observations per cell, or three for distinct
+backlog. These small segments are descriptive, not an independent confirmation.
+
+Native/WAL sender CPU/sample changes below are medians of six paired ratios per
+cohort. Each entry shows cohort 1 / cohort 2; observed paired ranges and separate
+`benchstat` tables are in the report, not confidence bounds or pooled estimates.
+
+| Workload / metadata values | 10,000 series | 100,000 series |
+| --- | ---: | ---: |
+| Paced unchanged / shared | -2.16% / -4.83% | -8.17% / -9.03% |
+| Paced unchanged / distinct | +3.72% / +5.99% | +0.41% / +0.79% |
+| Paced 1%-changing / shared | -10.86% / -9.38% | -12.02% / -11.94% |
+| Paced 1%-changing / distinct | +10.13% / +9.67% | +3.40% / +3.90% |
+| Held backlog, every observation changes / shared | -8.94% / +1.42% | +6.14% / -0.13% |
+| Held backlog, every observation changes / distinct | +138.81% / +134.30% | +138.28% / +144.61% |
+
+Equal-work, unchanged 100,000-series CPU changes are -9.61% / -5.11% with shared
+values and -2.17% / -0.37% with distinct values. Paced completion remains constrained
+by the offered schedule, not a capacity measurement. Late transactions are retained.
+
+Distinct full-churn backlog remains the clearest performance concern. At 100,000
+series, native ingestion medians are about 1.225 seconds versus 0.149 seconds WAL
+in both cohorts. Release-to-drain takes 0.80-0.85 seconds versus 0.73 seconds;
+allocation is about 459 versus 194 bytes/sample. The roughly 2.4-fold CPU cost
+includes ingestion and forwarding, not just historical metadata lookup.
+
+Heap diagnostics have three observations per cell/mode. Selected whole-process
+retained-heap medians at 100,000 series, in MiB:
+
+| State / workload | WAL | Native | Disabled |
+| --- | ---: | ---: | ---: |
+| Drained paced unchanged / shared | 165.0 | 154.6 | 144.3 |
+| Drained paced unchanged / distinct | 220.7 | 244.2 | 197.7 |
+| Drained paced 1%-changing / distinct | 221.4 | 307.5 | 197.7 |
+| Held full-churn backlog / shared | 127.9 | 123.3 | 107.2 |
+| Held full-churn backlog / distinct | 181.6 | 328.7 | 160.6 |
+| Drained full-churn backlog / distinct | 181.5 | 327.9 | 160.5 |
+
+These include live fixture descriptors, sample storage, and sender buffers, not
+isolated metadata ownership. Native retains five versions in the full-churn case;
+the WAL queue retains current metadata, so their memory semantics differ. Native
+metadata is still Head-only, whereas WAL metadata is persisted. Disabled mode
+does not transmit metadata and is diagnostic only.
+
+The receiver-capacity diagnostics used three unpaced 20-million-sample traces per
+combination. Raising receiver `GOMAXPROCS` from 2 to 4 reduced completion medians
+by 15-25% across workloads/modes. For distinct changing metadata, native completion
+was 23.89 / 20.02 seconds at receiver P2/P4, versus 21.52 / 16.77 seconds WAL.
+The receiver and shared host therefore influence observed capacity; these results
+do not establish isolated sender capacity or general forwarding parity.
+
+The profiles cover paced 100,000-series history workloads, **not full-churn
+backlog**. In the distinct-changing native CPU profile, cumulative contributions
+were 18.0% for RW2 time-series population, 16.6% for symbol-table reset, 3.6% for
+batch metadata selection, and 3.3% for native metadata commit. These overlapping,
+process-wide samples include setup/teardown and do not explain the full-churn gap.
+CPU and allocation profiles, including flat/cumulative summaries, are archived.
+
+Keep production unchanged. The next optimization investigation should profile
+append/commit and retained-history ownership under distinct full-churn backlog,
+with shared and unchanged controls, before choosing another ownership redesign.
+The evidence does not justify assuming a lookup-only change would close the gap.
+Restarts, history eviction, series replacement, sparse queries, resource attributes,
+and cardinalities beyond 100,000 remain outside this study.
+
+The archive `native-metadata-continuation.0E803L/evidence.tar.gz` preserves the
+immutable original evidence, frozen binary and both runner versions, new accepted
+and rejected attempts, validation/monitoring, profiles, segment-aware analysis,
+and `REPORT.md`. It also records the initial executable-permission startup failure,
+which occurred before any benchmark trace ran. The downloaded archive and its
+internal checksums were verified; offline analysis reproduced all JSON, the report,
+and `benchstat` tables (after normalizing relocated paths). An independent raw-trace
+cross-check also matched all observations and paired summaries. Archive SHA-256:
+`80c773b122fab46149daa518cb4b69a8be15db1f11db3148a9c98b86425b0753`.
