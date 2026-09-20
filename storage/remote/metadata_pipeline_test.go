@@ -55,6 +55,7 @@ const metadataPipelineReceiverEnv = "PROMETHEUS_METADATA_PIPELINE_RECEIVER"
 // metadataPipelineConfig describes a finite trace. Step zero seeds the warm
 // cases; cold initialization measures only step zero. IDs survive WAL ref changes.
 type metadataPipelineConfig struct {
+	Group                            string
 	Case, Source                     string
 	Series, Values, Sweeps           int
 	Writers, Shards, Batch, Capacity int
@@ -62,6 +63,7 @@ type metadataPipelineConfig struct {
 	Base                             int64
 	Mixed                            bool
 	SweepInterval                    time.Duration
+	SamplesPerSecond                 int
 }
 
 func (c metadataPipelineConfig) lastStep() int {
@@ -463,6 +465,12 @@ type metadataPipeline struct {
 }
 
 func newMetadataPipeline(ctx context.Context, c metadataPipelineConfig) (*metadataPipeline, error) {
+	if c.Series <= 0 || c.Writers <= 0 || c.CommitSize <= 0 {
+		return nil, errors.New("series, writers, and commit size must be positive")
+	}
+	if c.SamplesPerSecond < 0 || (c.SamplesPerSecond > 0 && (c.SweepInterval != 0 || c.Series%c.Writers != 0)) {
+		return nil, errors.New("transaction pacing requires equal writer partitions and no sweep pacing")
+	}
 	f := &metadataPipeline{
 		config: c, registry: prometheus.NewRegistry(), observer: prometheus.NewRegistry(), refs: make([]storage.SeriesRef, c.Series),
 		latency: make([][]time.Duration, c.Writers), peak: make([]int64, c.Writers),
@@ -470,7 +478,21 @@ func newMetadataPipeline(ctx context.Context, c metadataPipelineConfig) (*metada
 	}
 	f.labels, f.metadata = metadataPipelineInputs(c)
 	for w := range f.latency {
-		f.latency[w] = make([]time.Duration, 0, (c.Series/c.Writers/c.CommitSize+1)*(c.lastStep()+1))
+		if c.Group != "" {
+			// Keep instrumentation storage fixed across seed, backlog, and drain
+			// heap checkpoints, including the single-writer seed phase.
+			transactions := ((c.Series*(w+1)/c.Writers - c.Series*w/c.Writers + c.CommitSize - 1) / c.CommitSize) * c.Sweeps
+			capacity := transactions
+			if w == 0 {
+				capacity = max(capacity, (c.Series+c.CommitSize-1)/c.CommitSize)
+			}
+			f.latency[w] = make([]time.Duration, 0, capacity)
+			if c.SamplesPerSecond > 0 {
+				f.lateness[w] = make([]time.Duration, 0, transactions)
+			}
+		} else {
+			f.latency[w] = make([]time.Duration, 0, (c.Series/c.Writers/c.CommitSize+1)*(c.lastStep()+1))
+		}
 	}
 	var err error
 	f.receiver, err = startMetadataPipelineReceiver(ctx, c)
@@ -574,8 +596,7 @@ func (f *metadataPipeline) awaitBacklog(ctx context.Context) error {
 	}
 }
 
-// metadataPipelinePacer schedules sweeps against absolute deadlines. Late sweeps
-// catch up without dropping observations or shifting subsequent deadlines.
+// metadataPipelinePacer waits for absolute deadlines without shifting late work.
 type metadataPipelinePacer struct {
 	start    time.Time
 	interval time.Duration
@@ -583,10 +604,20 @@ type metadataPipelinePacer struct {
 }
 
 func (p *metadataPipelinePacer) wait(ctx context.Context, step int) (time.Duration, error) {
+	return p.waitUntil(ctx, p.start.Add(time.Duration(step)*p.interval))
+}
+
+// waitSamples schedules each writer's cumulative sample count at its share of the
+// aggregate rate. Integer division happens last to avoid accumulating rounding.
+func (p *metadataPipelinePacer) waitSamples(ctx context.Context, samples, writer, writers, commitSize, rate int) (time.Duration, error) {
+	offset := (time.Duration(samples)*time.Duration(writers) + time.Duration(writer)*time.Duration(commitSize)) * time.Second / time.Duration(rate)
+	return p.waitUntil(ctx, p.start.Add(offset))
+}
+
+func (p *metadataPipelinePacer) waitUntil(ctx context.Context, deadline time.Time) (time.Duration, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	deadline := p.start.Add(time.Duration(step) * p.interval)
 	if delay := time.Until(deadline); delay > 0 {
 		p.timer.Reset(delay)
 		select {
@@ -608,7 +639,7 @@ func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 		writers = 1
 	}
 	var paceStart time.Time
-	if c.SweepInterval > 0 && first > 0 {
+	if (c.SweepInterval > 0 || c.SamplesPerSecond > 0) && first > 0 {
 		paceStart = time.Now()
 	}
 	for writer := range writers {
@@ -625,7 +656,7 @@ func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 			}
 			begin, end := c.Series*writer/writers, c.Series*(writer+1)/writers
 			for step := first; step <= last; step++ {
-				if pacer != nil {
+				if pacer != nil && c.SweepInterval > 0 {
 					late, err := pacer.wait(ctx, step-first)
 					if err != nil {
 						return err
@@ -633,6 +664,14 @@ func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 					f.lateness[writer] = append(f.lateness[writer], late)
 				}
 				for offset := begin; offset < end; offset += c.CommitSize {
+					if pacer != nil && c.SamplesPerSecond > 0 {
+						scheduled := (step-first)*(end-begin) + offset - begin
+						late, err := pacer.waitSamples(ctx, scheduled, writer, writers, c.CommitSize, c.SamplesPerSecond)
+						if err != nil {
+							return err
+						}
+						f.lateness[writer] = append(f.lateness[writer], late)
+					}
 					if err := ctx.Err(); err != nil {
 						return err
 					}
@@ -768,13 +807,27 @@ func (u metadataPipelineCPUUsage) sub(before metadataPipelineCPUUsage) metadataP
 
 func TestRemoteWriteMetadataPipeline(t *testing.T) {
 	for _, mode := range []string{"disabled", "wal", "native"} {
-		for _, workload := range []string{"cold", "unchanged", "changes", "changes-distinct", "paced-unchanged", "paced-changes", "newseries", "backlog", "mixed"} {
+		for _, workload := range []string{"cold", "unchanged", "changes", "changes-distinct", "paced-unchanged", "paced-changes", "newseries", "backlog", "mixed", "scale-unchanged", "scale-distinct", "scale-changes", "scale-changes-distinct", "scale-backlog", "scale-backlog-distinct"} {
 			t.Run("source="+mode+"/case="+workload, func(t *testing.T) {
 				c := metadataPipelineConfig{Source: mode, Case: workload, Series: 300, Values: 100, Sweeps: 4, Writers: 4, Shards: 4, Batch: 20, Capacity: 100, CommitSize: 50, ReceiverProcs: 2, Base: time.Now().Add(time.Hour).UnixMilli(), Mixed: workload == "mixed"}
-				if workload == "backlog" {
+				if scaleCase, ok := strings.CutPrefix(workload, "scale-"); ok {
+					c.Group, c.Case = "history", scaleCase
+					if strings.Contains(c.Case, "distinct") {
+						c.Values = c.Series
+					}
+					if c.Case == "backlog-distinct" {
+						c.Case = "backlog"
+					}
+					if c.Case == "backlog" {
+						c.Group = "backlog"
+					} else {
+						c.SamplesPerSecond = 100000
+					}
+				}
+				if c.Case == "backlog" {
 					c.Writers, c.Shards = 1, 1
 				}
-				if workload == "changes" || workload == "changes-distinct" || workload == "paced-changes" || workload == "newseries" {
+				if c.Case == "changes" || c.Case == "changes-distinct" || c.Case == "paced-changes" || c.Case == "newseries" {
 					c.Sweeps = 101
 				}
 				if workload == "changes-distinct" {
@@ -792,12 +845,17 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 				require.NoError(t, f.append(ctx, 0, 0))
 				_, err = f.drain(ctx, f.expectedItems(1))
 				require.NoError(t, err)
+				if c.Group != "" {
+					for w := range f.latency {
+						f.latency[w] = f.latency[w][:0]
+					}
+				}
 				if workload != "cold" {
-					if workload == "backlog" {
+					if c.Case == "backlog" {
 						require.NoError(t, f.holdReceiver(ctx))
 					}
 					require.NoError(t, f.append(ctx, 1, c.Sweeps))
-					if workload == "backlog" {
+					if c.Case == "backlog" {
 						require.NoError(t, f.awaitBacklog(ctx))
 						require.Less(t, f.pending(), int64(c.Series*c.Sweeps), "must leave unread WAL work")
 						_, err = f.receiver.command(ctx, "release")
@@ -805,10 +863,24 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 					}
 					_, err = f.drain(ctx, f.expectedItems(c.Sweeps+1))
 					require.NoError(t, err)
+					if c.SamplesPerSecond > 0 {
+						for w := range c.Writers {
+							transactions := (c.Series/c.Writers + c.CommitSize - 1) / c.CommitSize * c.Sweeps
+							require.Len(t, f.latency[w], transactions)
+							capacity := transactions
+							if w == 0 {
+								capacity = max(capacity, (c.Series+c.CommitSize-1)/c.CommitSize)
+							}
+							require.Equal(t, capacity, cap(f.latency[w]), "latency buffer must not grow")
+							require.Len(t, f.lateness[w], transactions)
+							require.Equal(t, transactions, cap(f.lateness[w]), "timing buffer must not grow")
+						}
+					}
 				}
 				require.Equal(t, uint64(c.residentSeries()), f.db.Head().NumSeries())
 				metrics, err := f.metrics()
 				require.NoError(t, err)
+				require.Zero(t, metrics["prometheus_tsdb_head_native_metric_metadata_version_evictions_total"])
 				for name, value := range metrics {
 					if strings.HasPrefix(name, "prometheus_remote_storage_") && (strings.HasSuffix(name, "_failed_total") || strings.HasSuffix(name, "_dropped_total") || strings.HasSuffix(name, "_retried_total")) {
 						require.Zero(t, value, name)
@@ -915,6 +987,52 @@ func TestRemoteWriteMetadataPipelineValidation(t *testing.T) {
 }
 
 func TestMetadataPipelinePacer(t *testing.T) {
+	t.Run("transaction deadlines", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			p := metadataPipelinePacer{start: time.Now(), timer: time.NewTimer(time.Hour)}
+			p.timer.Stop()
+			defer p.timer.Stop()
+			// Four writers offer 500K samples/s, with 500-sample transactions.
+			for _, point := range []struct {
+				samples, writer int
+				deadline        time.Duration
+			}{{0, 0, 0}, {0, 1, time.Millisecond}, {0, 2, 2 * time.Millisecond}, {0, 3, 3 * time.Millisecond}, {500, 0, 4 * time.Millisecond}, {750, 0, 6 * time.Millisecond}, {1000, 0, 8 * time.Millisecond}} {
+				late, err := p.waitSamples(t.Context(), point.samples, point.writer, 4, 500, 500000)
+				require.NoError(t, err)
+				require.Zero(t, late)
+				require.Equal(t, p.start.Add(point.deadline), time.Now())
+			}
+			time.Sleep(10 * time.Millisecond)
+			late, err := p.waitSamples(t.Context(), 1500, 0, 4, 500, 500000)
+			require.NoError(t, err)
+			require.Equal(t, 6*time.Millisecond, late)
+			late, err = p.waitSamples(t.Context(), 2500, 0, 4, 500, 500000)
+			require.NoError(t, err)
+			require.Zero(t, late)
+			require.Equal(t, p.start.Add(20*time.Millisecond), time.Now())
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() {
+				_, err := p.waitSamples(ctx, 3000, 0, 4, 500, 500000)
+				done <- err
+			}()
+			synctest.Wait()
+			cancel()
+			require.ErrorIs(t, <-done, context.Canceled)
+			_, err = p.waitSamples(ctx, 0, 0, 4, 500, 500000)
+			require.ErrorIs(t, err, context.Canceled)
+		})
+	})
+	t.Run("invalid transaction pacing", func(t *testing.T) {
+		for _, c := range []metadataPipelineConfig{
+			{Series: 100, Writers: 4, CommitSize: 10, SamplesPerSecond: 500000, SweepInterval: time.Second},
+			{Series: 101, Writers: 4, CommitSize: 10, SamplesPerSecond: 500000},
+			{Series: 100, Writers: 4, CommitSize: 10, SamplesPerSecond: -1},
+		} {
+			_, err := newMetadataPipeline(t.Context(), c)
+			require.Error(t, err)
+		}
+	})
 	synctest.Test(t, func(t *testing.T) {
 		p := metadataPipelinePacer{start: time.Now().Add(5 * time.Millisecond), interval: 20 * time.Millisecond, timer: time.NewTimer(time.Hour)}
 		p.timer.Stop()

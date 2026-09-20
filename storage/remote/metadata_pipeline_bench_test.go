@@ -32,6 +32,7 @@ type metadataPipelineResult struct {
 	Diagnostic                                     bool
 	Samples                                        int64
 	Initialization, Ingestion, Drain, Shutdown     time.Duration
+	BacklogWait, ReleaseToDrain                    time.Duration
 	Completion, DBClose, Lifecycle                 time.Duration
 	CPU, LifecycleCPU, ReceiverCPU                 metadataPipelineCPUUsage
 	AllocatedBytes, Allocations                    uint64
@@ -40,28 +41,21 @@ type metadataPipelineResult struct {
 	Requests, RequestBytes, ReceiverServiceNanos   int64
 	OutstandingAtWriterEnd, PeakSampledQueue       int64
 	ResidentSeries                                 uint64
-	DrainedHeap, BacklogHeap                       uint64
+	SeededHeap, DrainedHeap, BacklogHeap           uint64
+	Transactions, ScheduledTransactions            int
 	TransactionP50, TransactionP95, TransactionP99 float64
 	ScheduleP50, ScheduleP99, ScheduleMax          float64
 	SweepsLateByInterval                           int64
+	TransactionsLateByInterval                     int64
 }
 
 // BenchmarkRemoteWriteMetadataPipeline includes ingestion, WAL reading, metadata
 // population/lookup, and acknowledged HTTP forwarding. One operation is a finite
 // trace, not a sample. See metadata_pipeline_bench.md for boundaries and controls.
 func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
-	setting := func(name string, fallback int) int {
-		if value := os.Getenv(name); value != "" {
-			n, err := strconv.Atoi(value)
-			require.NoError(b, err)
-			require.Positive(b, n)
-			return n
-		}
-		return fallback
-	}
-	series := setting("PROMETHEUS_METADATA_PIPELINE_SERIES", 10000)
-	sweeps := setting("PROMETHEUS_METADATA_PIPELINE_SWEEPS", 200)
-	receiverProcs := setting("PROMETHEUS_METADATA_PIPELINE_RECEIVER_PROCS", 2)
+	series := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_SERIES", 10000)
+	sweeps := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_SWEEPS", 200)
+	receiverProcs := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_RECEIVER_PROCS", 2)
 	require.Zero(b, series%100, "series count must be a multiple of 100")
 	require.LessOrEqual(b, sweeps, 400, "changing traces must fit the five-version native history")
 	for _, workload := range []string{"cold", "unchanged", "changes", "newseries", "backlog", "cardinality", "distinct", "changes-distinct", "paced-unchanged", "paced-changes"} {
@@ -79,39 +73,97 @@ func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
 		for _, mode := range []string{"disabled", "wal", "native"} {
 			c.Source = mode
 			b.Run(fmt.Sprintf("case=%s/series=%d/source=%s", workload, c.Series, mode), func(b *testing.B) {
-				b.ReportAllocs()
-				b.StopTimer()
-				metrics := map[string]float64{}
-				for range b.N {
-					c.Base = time.Now().Add(time.Hour).UnixMilli()
-					r := measureMetadataPipeline(b, c)
-					n := float64(r.Samples)
-					metrics["samples/s"] += n / r.Completion.Seconds()
-					metrics["samples/op"] += n
-					metrics["alloc-B/sample"] += float64(r.AllocatedBytes) / n
-					metrics["allocs/sample"] += float64(r.Allocations) / n
-					metrics["wal-B/sample"] += r.WALBytes / n
-					metrics["wire-B/sample"] += float64(r.RequestBytes) / n
-					metrics["drain-ms/op"] += float64(r.Drain) / float64(time.Millisecond)
-					metrics["txn-p99-ns"] += r.TransactionP99
-					if c.SweepInterval > 0 {
-						metrics["ingested-samples/s"] += n / r.Ingestion.Seconds()
-						metrics["schedule-p99-ns"] += r.ScheduleP99
-						metrics["schedule-max-ns"] += r.ScheduleMax
-						metrics["late-sweeps/op"] += float64(r.SweepsLateByInterval)
-					}
-					if r.CPU.Available {
-						metrics["cpu-ns/sample"] += float64(r.CPU.User+r.CPU.System) / n
-					}
-					encoded, err := json.Marshal(r)
-					require.NoError(b, err)
-					b.Logf("metadata-pipeline-result: %s", encoded)
-				}
-				for name, value := range metrics {
-					b.ReportMetric(value/float64(b.N), name)
-				}
+				benchmarkMetadataPipeline(b, c)
 			})
 		}
+	}
+}
+
+// BenchmarkRemoteWriteMetadataPipelineScale separates history-preserving,
+// equal-work, and held-backlog traces. Capacity traces are unpaced diagnostics.
+func BenchmarkRemoteWriteMetadataPipelineScale(b *testing.B) {
+	receiverProcs := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_RECEIVER_PROCS", 2)
+	for _, group := range []string{"history", "equal-work", "backlog", "capacity"} {
+		for _, workload := range []string{"unchanged", "changes"} {
+			if (group == "equal-work" && workload != "unchanged") || (group == "backlog" && workload != "changes") {
+				continue
+			}
+			for _, sharing := range []string{"shared", "distinct"} {
+				for _, series := range []int{10000, 100000} {
+					if (group == "equal-work" || group == "capacity") && series != 100000 {
+						continue
+					}
+					c := metadataPipelineConfig{Group: group, Case: workload, Series: series, Values: 100, Sweeps: 200, Writers: 4, Shards: 4, CommitSize: 500, Batch: 2000, Capacity: 10000, ReceiverProcs: receiverProcs, SamplesPerSecond: 500000}
+					if sharing == "distinct" {
+						c.Values = series
+					}
+					switch group {
+					case "equal-work":
+						c.Sweeps = 20
+					case "backlog":
+						c.Case, c.Writers, c.Shards, c.Sweeps, c.CommitSize, c.SamplesPerSecond = "backlog", 1, 1, 4, 1000, 0
+					case "capacity":
+						c.SamplesPerSecond = 0
+					}
+					for _, mode := range []string{"disabled", "wal", "native"} {
+						c.Source = mode
+						b.Run(fmt.Sprintf("group=%s/case=%s/values=%s/series=%d/source=%s", group, workload, sharing, series, mode), func(b *testing.B) {
+							benchmarkMetadataPipeline(b, c)
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+func metadataPipelineSetting(b *testing.B, name string, fallback int) int {
+	b.Helper()
+	if value := os.Getenv(name); value != "" {
+		n, err := strconv.Atoi(value)
+		require.NoError(b, err)
+		require.Positive(b, n)
+		return n
+	}
+	return fallback
+}
+
+func benchmarkMetadataPipeline(b *testing.B, c metadataPipelineConfig) {
+	b.Helper()
+	b.ReportAllocs()
+	b.StopTimer()
+	metrics := map[string]float64{}
+	for range b.N {
+		c.Base = time.Now().Add(time.Hour).UnixMilli()
+		r := measureMetadataPipeline(b, c)
+		n := float64(r.Samples)
+		metrics["samples/s"] += n / r.Completion.Seconds()
+		metrics["samples/op"] += n
+		metrics["alloc-B/sample"] += float64(r.AllocatedBytes) / n
+		metrics["allocs/sample"] += float64(r.Allocations) / n
+		metrics["wal-B/sample"] += r.WALBytes / n
+		metrics["wire-B/sample"] += float64(r.RequestBytes) / n
+		metrics["drain-ms/op"] += float64(r.Drain) / float64(time.Millisecond)
+		metrics["txn-p99-ns"] += r.TransactionP99
+		if c.SweepInterval > 0 || c.SamplesPerSecond > 0 {
+			metrics["ingested-samples/s"] += n / r.Ingestion.Seconds()
+			metrics["schedule-p99-ns"] += r.ScheduleP99
+			metrics["schedule-max-ns"] += r.ScheduleMax
+			if c.SamplesPerSecond > 0 {
+				metrics["late-transactions/op"] += float64(r.TransactionsLateByInterval)
+			} else {
+				metrics["late-sweeps/op"] += float64(r.SweepsLateByInterval)
+			}
+		}
+		if r.CPU.Available {
+			metrics["cpu-ns/sample"] += float64(r.CPU.User+r.CPU.System) / n
+		}
+		encoded, err := json.Marshal(r)
+		require.NoError(b, err)
+		b.Logf("metadata-pipeline-result: %s", encoded)
+	}
+	for name, value := range metrics {
+		b.ReportMetric(value/float64(b.N), name)
 	}
 }
 
@@ -150,6 +202,9 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 			f.latency[i] = f.latency[i][:0]
 			f.peak[i] = 0
 		}
+		if r.Diagnostic && c.Group != "" {
+			r.SeededHeap = metadataPipelineRetainedHeap(f)
+		}
 		if c.Case == "backlog" {
 			require.NoError(b, f.holdReceiver(ctx))
 		}
@@ -172,6 +227,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	stats, err := f.receiver.command(ctx, "stats")
 	require.NoError(b, err)
 	r.OutstandingAtWriterEnd = f.expectedItems(last+1) - stats.items()
+	var releaseStart time.Time
 	if c.Case == "backlog" {
 		require.NoError(b, f.awaitBacklog(ctx))
 		// More samples than the queue and one decoded WAL record can hold must
@@ -180,12 +236,18 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		if r.Diagnostic {
 			r.BacklogHeap = metadataPipelineRetainedHeap(f)
 		}
+		releaseStart = time.Now()
+		r.BacklogWait = releaseStart.Sub(writerEnd)
 		_, err = f.receiver.command(ctx, "release")
 		require.NoError(b, err)
 	}
 	stats, err = f.drain(ctx, f.expectedItems(last+1))
 	require.NoError(b, err)
-	r.Drain = time.Since(writerEnd)
+	drainEnd := time.Now()
+	r.Drain = drainEnd.Sub(writerEnd)
+	if !releaseStart.IsZero() {
+		r.ReleaseToDrain = drainEnd.Sub(releaseStart)
+	}
 	if r.Diagnostic {
 		r.DrainedHeap = metadataPipelineRetainedHeap(f)
 	}
@@ -227,11 +289,19 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	var latencies []time.Duration
 	var lateness []time.Duration
 	for i := range f.latency {
+		r.Transactions += len(f.latency[i])
 		latencies = append(latencies, f.latency[i]...)
 		r.PeakSampledQueue = max(r.PeakSampledQueue, f.peak[i])
 		lateness = append(lateness, f.lateness[i]...)
+		if c.SamplesPerSecond > 0 {
+			r.ScheduledTransactions += len(f.lateness[i])
+		}
 		for _, late := range f.lateness[i] {
-			if late >= c.SweepInterval {
+			if c.SamplesPerSecond > 0 {
+				if late >= time.Second*time.Duration(c.CommitSize)*time.Duration(c.Writers)/time.Duration(c.SamplesPerSecond) {
+					r.TransactionsLateByInterval++
+				}
+			} else if late >= c.SweepInterval {
 				r.SweepsLateByInterval++
 			}
 		}

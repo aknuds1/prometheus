@@ -50,6 +50,79 @@ these settings, so diagnostic overrides cannot silently change its workload.
 
 ## Workloads
 
+### Bounded Linux scale study
+
+`BenchmarkRemoteWriteMetadataPipelineScale` keeps the original benchmark unchanged
+and separates history-preserving, equal-work, held-backlog, and receiver-capacity
+traces. Its cardinalities and sweep counts are fixed; the original benchmark's
+`SERIES` and `SWEEPS` environment overrides do not apply.
+
+| Group | Metadata | Series | Measured sweeps |
+| --- | --- | --- | --- |
+| `history` | Unchanged/changing, each with 100 shared values or distinct values per series. | 10,000 and 100,000 | 200 |
+| `equal-work` | Unchanged, shared/distinct. | 100,000 | 20 |
+| `backlog` | Shared/distinct; every series changes each sweep. | 10,000 and 100,000 | 4 |
+| `capacity` | Unchanged/changing, shared/distinct; unpaced diagnostics. | 100,000 | 200 |
+
+History and equal-work traces offer 500,000 samples/second at absolute transaction
+deadlines, with four staggered writers. Late transactions catch up without dropping
+observations or shifting deadlines. Transactions contain 500 samples: 1,000-sample
+transactions would produce 20% more commits/sample at 10,000 series because each
+writer's 2,500-series partition ends in a half-full transaction. Capacity diagnostics
+use the same 500-sample transactions without pacing. Backlog retains the original
+one-writer/one-shard, 1,000-sample-transaction settings. Other queue settings match
+the original benchmark.
+
+History traces preserve 200 observations and, when changing, two changes per
+series. Their 2M/20M samples take about 4/40 seconds before final drain. Equal-work
+traces match the smaller trace's total samples and scheduled duration, but not its
+per-series sample/chunk history. Neither comparison isolates cardinality perfectly.
+Compare native/WAL within each cell before interpreting the scale difference.
+
+The dedicated runner uses Python 3.11+ on Linux, with Go and `benchstat` on `PATH`.
+After correctness/race/lint validation, run from the repository root, placing the
+new results directory outside the source tree:
+
+```sh
+python3 scripts/benchmark-metadata-pipeline-scale.py selftest
+python3 scripts/benchmark-metadata-pipeline-scale.py freeze /absolute/path/to/new-scale-results
+python3 scripts/benchmark-metadata-pipeline-scale.py smoke /absolute/path/to/new-scale-results
+python3 scripts/benchmark-metadata-pipeline-scale.py run /absolute/path/to/new-scale-results
+python3 scripts/benchmark-metadata-pipeline-scale.py analyze /absolute/path/to/new-scale-results
+```
+
+The frozen manifest specifies 504 scored observations across two separate cohorts
+of six fresh-process observations/cell/mode. Related cardinality and equal-work
+traces form comparison blocks, with balanced mode/trace order. Each process runs
+exactly one trace. Separate diagnostics comprise 108 heap traces, 48 receiver P2/P4
+capacity traces, and eight process-wide CPU/allocation profiles. Six real-trace smoke
+checks validate measurement/parser behavior before scoring. No results are pooled
+with another cohort, diagnostics, or an earlier harness build.
+
+Sender CPU/sample is the primary comparison; capped completion rates do not measure
+maximum throughput. JSON results include transaction counts and scheduling lateness.
+`BacklogWait` measures writer completion to receiver release; `ReleaseToDrain` starts
+immediately before issuing release and ends at acknowledged delivery with no pending
+samples. Their sum equals `Drain`; receiver-control overhead is included.
+
+Scale heap diagnostics additionally record `SeededHeap` after warm-up. Timing
+buffers are allocated before warm-up and retained across all heap checkpoints.
+The seed/backlog/drained figures still include input descriptors, sample storage,
+and live sender buffers, not isolated metadata ownership. Diagnostic GC timings are
+never performance observations. Unchanged distinct-value controls distinguish
+diversity from churn; receiver P2/P4 checks indicate capacity sensitivity, not proof
+of unlimited receiver headroom.
+
+The runner freezes source/binary hashes, configuration, host boot/kernel identity,
+and raw results. It stops on correctness/provenance failure. Only overlapping
+builds/tests/package installation, swap activity, or aggregate/per-vCPU steal above
+1% reject a complete comparison block, with one replacement attempt allowed.
+Lateness and saturation are retained as results. Partial runs are not silently
+resumed or overwritten. Keep the complete results directory, runner, and validation
+evidence together in a checksummed archive.
+
+### Original workloads
+
 Defaults are 10,000 active series, six labels, 100 shared metadata values, 64-byte
 help strings, and float samples. Each sweep appends one observation per active
 series. Logical sample timestamps advance by 15 seconds. The original workloads
@@ -354,3 +427,56 @@ patch, both source trees and binaries, validation and profile outputs, the froze
 648-run manifest and gates, monitoring, raw observations, separate `benchstat`
 tables, and `REPORT.md`. SHA-256:
 `936f76e47336f8c779ef703a1e1b9f48c2f0becae559b8a4bca0d3ab42ee85cf`.
+
+### Scale and held-backlog study: incomplete (2026-09-20)
+
+The bounded scale study above used the same host, boot, kernel, toolchain, and
+runtime settings, with benchmark-only additions to
+`b251931766dc2d0b6d16ba1640fa62ff42babbf1`. Production code was unchanged.
+It stopped at block 60/106 under the predeclared host-noise policy: per-vCPU steal
+exceeded 1% in a distinct-value backlog comparison and again in its sole replacement
+(1.92%). The threshold was not relaxed and the study was not restarted.
+
+There are 414 accepted scored observations: all 252 from cohort 1 and 162 from
+the incomplete cohort 2. Thirty other observations belong to five rejected block
+attempts, including both attempts at the terminal block. All 444 executed
+observations and six separate smoke traces passed delivery/configuration
+validation. The planned 108 heap, 48 receiver-capacity, and eight profile diagnostics
+did not run; heap-enabled smoke traces do not replace them. **The overall study is
+inconclusive**, not a completed confirmation or an adoption decision.
+
+For orientation only, the complete first cohort has these native/WAL sender
+CPU/sample changes. Entries are medians of six paired ratios, not confidence bounds
+or maximum-throughput comparisons. The archive preserves every paired range and
+separate `benchstat` tables, including the explicitly partial second cohort.
+
+| Workload / metadata values | 10,000 series | 100,000 series |
+| --- | ---: | ---: |
+| Paced unchanged / shared | -2.16% | -8.17% |
+| Paced unchanged / distinct | +3.72% | +0.41% |
+| Paced 1%-changing / shared | -10.86% | -12.02% |
+| Paced 1%-changing / distinct | +10.13% | +3.40% |
+| Held backlog, every observation changes / shared | -8.94% | +6.14% |
+| Held backlog, every observation changes / distinct | +138.81% | +138.28% |
+
+The equal-work, unchanged 100,000-series controls have first-cohort CPU changes of
+-9.61% shared and -2.17% distinct. They match the smaller trace's work/duration,
+not its per-series history. Paced traces finished ingestion near their 4/40-second
+schedule, but occasional late transactions remain in the results; they are not
+zero-lateness or unlimited-capacity evidence.
+
+Distinct full-churn backlog is the clearest provisional concern. At 100,000 series,
+first-cohort median ingestion took 1.225 seconds native versus 0.149 seconds WAL;
+release-to-drain took 0.846 versus 0.731 seconds, and allocation was 459 versus
+194 bytes/sample. This measures ingestion plus forwarding, not an isolated lookup
+penalty. It suggests profiling the changing append/commit path as well as historical
+forwarding before selecting an ownership redesign. Without the remaining diagnostics,
+these data cannot attribute the excess CPU or quantify retained-memory tradeoffs.
+
+Keep production unchanged. A follow-up needs a new frozen run with both cohorts
+and the missing diagnostics; do not fill gaps by pooling this partial run with it.
+The checksummed archive `native-metadata-scale.N2xMtZ/evidence.tar.gz` contains the
+original stopped study, frozen sources/binaries, all accepted and rejected attempts,
+validation logs, monitoring, and an independently cross-checked partial analysis.
+SHA-256:
+`ff7a68a18bdc6b4576eec3e342043e98a052a6257ed13667cdf41d521e0b1192`.
