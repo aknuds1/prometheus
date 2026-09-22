@@ -372,6 +372,63 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 		require.Equal(t, a, *historical, "retained results must not alias scratch")
 	})
 
+	t.Run("captured native state survives index unlock and deletion", func(t *testing.T) {
+		opts := newTestHeadDefaultOptions(1000, false)
+		opts.EnableNativeMetadata = true
+		head, _ := newTestHeadWithOptions(t, compression.None, opts)
+		var ref storage.SeriesRef
+		for version, m := range []metadata.Metadata{a, b} {
+			app := head.AppenderV2(t.Context())
+			var err error
+			ref, err = app.Append(ref, labels.FromStrings(labels.MetricName, "metric"), 0, int64(100+100*version), 1, nil, nil, storage.AOptions{Metadata: m})
+			require.NoError(t, err)
+			require.NoError(t, app.Commit())
+		}
+		store := head.nativeMetricMetadata
+		require.NoError(t, store.publication.Acquire(t.Context(), nativeMetricMetadataPublicationPermits))
+		released := false
+		defer func() {
+			if !released {
+				store.publication.Release(nativeMetricMetadataPublicationPermits)
+			}
+		}()
+		index := head.series.refStripe(chunks.HeadSeriesRef(ref))
+		head.series.locks[index].RLock()
+		native := &head.series.series[index][chunks.HeadSeriesRef(ref)].metadata.Load().native
+		head.series.locks[index].RUnlock()
+
+		// Exercise the lifetime contract independently of the tiny selection
+		// window, without adding scheduling hooks to the production hot path.
+		done := make(chan int, 1)
+		go func() {
+			deleted, _, _, _, _, _ := head.series.gcSeries([]storage.SeriesRef{ref}, math.MaxInt64, func(*memSeries) bool { return true })
+			store.delete(deleted)
+			done <- len(deleted)
+		}()
+		select {
+		case count := <-done:
+			require.Equal(t, 1, count)
+		case <-time.After(time.Second):
+			store.publication.Release(nativeMetricMetadataPublicationPermits)
+			released = true
+			<-done
+			t.Fatal("deletion waited for metadata publication")
+		}
+		runtime.GC()
+		require.Equal(t, &b, native.metadata)
+		require.Equal(t, int64(200), native.effectiveFrom)
+		require.Len(t, native.older, 1)
+		require.Equal(t, a, native.older[0].metadata.Value())
+		require.Equal(t, int64(100), native.older[0].effectiveFrom)
+		require.Zero(t, store.series.Load())
+		require.Zero(t, store.versions.Load())
+		store.publication.Release(nativeMetricMetadataPublicationPermits)
+		released = true
+		lookups := []storage.NativeMetricMetadataLookup{{Ref: ref, Timestamp: 200, Metadata: native.metadata}}
+		require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
+		require.Nil(t, lookups[0].Metadata, "a lookup starting after removal must miss")
+	})
+
 	t.Run("ownership eviction and deletion", func(t *testing.T) {
 		opts := newTestHeadDefaultOptions(1000, false)
 		opts.EnableNativeMetadata = true

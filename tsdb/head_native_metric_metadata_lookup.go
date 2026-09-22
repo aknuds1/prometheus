@@ -117,30 +117,34 @@ func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []st
 	for i := range lookups {
 		lookup := &lookups[i]
 		ref := chunks.HeadSeriesRef(lookup.Ref)
-		// Publication excludes native changes. The Head index protects the
-		// liveness check while we select a pointer/handle; GC never clears the
-		// retired history. Do not take a series lock under this index lock.
+		// The Head index protects membership and pointer capture, not selection.
+		// Publication excludes native changes, and GC leaves retired history
+		// unchanged. Do not take a series lock under this index lock.
 		index := h.series.refStripe(ref)
 		h.series.locks[index].RLock()
-		var selected unique.Handle[metadata.Metadata]
+		var native *nativeSeriesMetadata
 		if series := h.series.series[index][ref]; series != nil {
 			// Legacy commits may install the sidecar concurrently. Its pointer
 			// is atomic; legacy fields and packed series state are not read here.
-			if sidecar := series.metadata.Load(); sidecar != nil && sidecar.native.metadata != nil {
-				native := &sidecar.native
-				if native.effectiveFrom <= lookup.Timestamp {
-					lookup.Metadata = native.metadata
-				} else {
-					for _, point := range slices.Backward(native.older) {
-						if point.effectiveFrom <= lookup.Timestamp {
-							selected = point.metadata
-							break
-						}
-					}
-				}
+			if sidecar := series.metadata.Load(); sidecar != nil {
+				native = &sidecar.native
 			}
 		}
 		h.series.locks[index].RUnlock()
+		if native == nil || native.metadata == nil {
+			continue
+		}
+		if native.effectiveFrom <= lookup.Timestamp {
+			lookup.Metadata = native.metadata
+			continue
+		}
+		var selected unique.Handle[metadata.Metadata]
+		for _, point := range slices.Backward(native.older) {
+			if point.effectiveFrom <= lookup.Timestamp {
+				selected = point.metadata
+				break
+			}
+		}
 		if selected != (unique.Handle[metadata.Metadata]{}) {
 			if historical == nil {
 				historical = nativeMetricMetadataLookupPool.Get().(*nativeMetricMetadataLookupScratch)
