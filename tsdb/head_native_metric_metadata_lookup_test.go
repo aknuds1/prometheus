@@ -394,7 +394,7 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 		}()
 		index := head.series.refStripe(chunks.HeadSeriesRef(ref))
 		head.series.locks[index].RLock()
-		native := &head.series.series[index][chunks.HeadSeriesRef(ref)].metadata.Load().native
+		native := head.series.series[index][chunks.HeadSeriesRef(ref)].metadata.Load().native
 		head.series.locks[index].RUnlock()
 
 		// Exercise the lifetime contract independently of the tiny selection

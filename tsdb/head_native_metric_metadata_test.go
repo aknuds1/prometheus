@@ -804,19 +804,23 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 	t.Run("atomic pointer has no size overhead", func(t *testing.T) {
 		var series memSeries
 		require.Equal(t, unsafe.Sizeof((*memSeriesMetadata)(nil)), unsafe.Sizeof(series.metadata))
+		require.Equal(t, 2*unsafe.Sizeof((*metadata.Metadata)(nil)), unsafe.Sizeof(memSeriesMetadata{}))
 	})
 	t.Run("native allocation layout", func(t *testing.T) {
-		var sidecar memSeriesMetadata
-		require.Zero(t, unsafe.Offsetof(sidecar.native), "native state is inline at the start of the sidecar")
+		var allocation struct {
+			sidecar memSeriesMetadata
+			native  nativeSeriesMetadata
+		}
 		if strconv.IntSize == 64 {
-			require.Equal(t, uintptr(56), unsafe.Sizeof(sidecar.native))
-			require.Equal(t, uintptr(56), unsafe.Offsetof(sidecar.legacy))
-			require.Equal(t, uintptr(64), unsafe.Sizeof(sidecar))
+			require.Equal(t, uintptr(56), unsafe.Sizeof(allocation.native))
+			require.Equal(t, uintptr(16), unsafe.Offsetof(allocation.native))
+			require.Equal(t, uintptr(72), unsafe.Sizeof(allocation))
 		} else {
-			// On 386, 36 bytes round up to the 48-byte allocator class.
-			require.Equal(t, uintptr(32), unsafe.Sizeof(sidecar.native))
-			require.Equal(t, uintptr(32), unsafe.Offsetof(sidecar.legacy))
-			require.Equal(t, uintptr(36), unsafe.Sizeof(sidecar))
+			// On 386, combining the 8-byte and 32-byte allocations would round
+			// 40 bytes up to 48. Keep the separate-allocation path on 32-bit builds.
+			require.Equal(t, uintptr(32), unsafe.Sizeof(allocation.native))
+			require.Equal(t, uintptr(8), unsafe.Offsetof(allocation.native))
+			require.Equal(t, uintptr(40), unsafe.Sizeof(allocation))
 		}
 	})
 
@@ -847,7 +851,10 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 			case "native first":
 				require.NoError(t, native.Commit())
 				first = series.metadata.Load()
-				require.Same(t, &first.native, series.nativeMetadataLocked())
+				require.Same(t, first.native, series.nativeMetadataLocked())
+				if strconv.IntSize == 64 {
+					require.Equal(t, unsafe.Sizeof(*first), uintptr(unsafe.Pointer(first.native))-uintptr(unsafe.Pointer(first)), "native state follows the sidecar in the same allocation")
+				}
 				require.NoError(t, legacy.Commit())
 			case "legacy first":
 				require.NoError(t, legacy.Commit())
