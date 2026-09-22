@@ -24,7 +24,7 @@ import (
 const (
 	nativeMetricMetadataBitsPerWord   = 64
 	maxNativeMetricMetadataValues     = 128 // Limits raw metadata retained by a transaction.
-	maxNativeMetricMetadataBatch      = 256 // Limits series merged under one stripe lock.
+	maxNativeMetricMetadataBatch      = 256 // Bounds value preparation before merging a batch.
 	nativeMetricMetadataDirectRefMask = nativeMetricMetadataValueRef(1 << 31)
 )
 
@@ -51,16 +51,6 @@ type nativeMetricMetadataObservation struct {
 	next          nativeMetricMetadataObservationRef
 }
 
-// nativeMetricMetadataPendingCache is a nativeSeriesMetadata update waiting for
-// the stripe lock to be released.
-type nativeMetricMetadataPendingCache struct {
-	series        *memSeries
-	handle        unique.Handle[metadata.Metadata]
-	metadata      *metadata.Metadata
-	effectiveFrom int64
-	metadataRef   nativeMetricMetadataValueRef // Zero selects the committed handle rather than a transaction value.
-}
-
 // nativeMetricMetadataGroup selects one series' observations with [start, end)
 // indexes into nativeMetricMetadataAppender.sorted.
 type nativeMetricMetadataGroup struct {
@@ -83,8 +73,6 @@ type nativeMetricMetadataAppender struct {
 	points []nativeMetricMetadataPoint
 	// Changing series selected for the current batch.
 	groups []nativeMetricMetadataGroup
-	// Cache updates produced by the current batch.
-	pending []nativeMetricMetadataPendingCache
 	// Immutable cache values shared across this transaction's series.
 	shared map[unique.Handle[metadata.Metadata]]*metadata.Metadata
 	// Stripes with observations, in order of first use.
@@ -117,8 +105,8 @@ func (a *nativeMetricMetadataAppender) metadataValue(ref nativeMetricMetadataVal
 	return a.values[ref-1].metadata
 }
 
-// metadataHandle lazily interns raw values. Commit resolves all selected
-// references before taking the stripe write lock.
+// metadataHandle lazily interns raw values. Commit resolves selected references
+// before taking a series lock.
 func (a *nativeMetricMetadataAppender) metadataHandle(ref nativeMetricMetadataValueRef) unique.Handle[metadata.Metadata] {
 	if ref&nativeMetricMetadataDirectRefMask != 0 {
 		return a.directHandles[ref&^nativeMetricMetadataDirectRefMask]
@@ -134,7 +122,7 @@ func (a *nativeMetricMetadataAppender) metadataHandle(ref nativeMetricMetadataVa
 // metadataReference returns a transaction-local reference to m. It deduplicates
 // a bounded set of raw values, deferring their interning until needed. Values
 // outside that set use direct handles.
-func (a *nativeMetricMetadataAppender) metadataReference(store *nativeMetricMetadataStore, ref chunks.HeadSeriesRef, m metadata.Metadata) nativeMetricMetadataValueRef {
+func (a *nativeMetricMetadataAppender) metadataReference(series *memSeries, m metadata.Metadata) nativeMetricMetadataValueRef {
 	if valueRef, ok := a.valueRefs[m]; ok {
 		return valueRef
 	}
@@ -151,18 +139,15 @@ func (a *nativeMetricMetadataAppender) metadataReference(store *nativeMetricMeta
 		committed     unique.Handle[metadata.Metadata]
 		haveCommitted bool
 	)
-	stripe := store.stripe(ref)
-	stripe.mtx.RLock()
-	history, ok := stripe.histories[ref]
-	if ok && len(history.versions) > 0 {
-		committed = history.versions[len(history.versions)-1].metadata
+	series.Lock()
+	if native := series.nativeMetadataLocked(); native != nil {
+		committed = native.handle
 		haveCommitted = true
 	}
-	stripe.mtx.RUnlock()
+	series.Unlock()
 
 	// Compare after unlocking. The handle keeps its value alive independently
-	// of the stripe, and the comparison copies a struct and walks three
-	// strings, which is more than a read lock shared with commits should hold.
+	// of the series, and the comparison need not lengthen its critical section.
 	handle := committed
 	if !haveCommitted || committed.Value() != m {
 		handle = unique.Make(m)
@@ -191,12 +176,12 @@ func (a *nativeMetricMetadataAppender) mayHaveObservedSeries(ref chunks.HeadSeri
 
 // observe buffers m for the series at effectiveFrom without updating committed
 // metadata. Every call adds an observation, even when m is unchanged.
-func (a *nativeMetricMetadataAppender) observe(store *nativeMetricMetadataStore, s *memSeries, effectiveFrom int64, m metadata.Metadata) {
+func (a *nativeMetricMetadataAppender) observe(s *memSeries, effectiveFrom int64, m metadata.Metadata) {
 	var metadataRef nativeMetricMetadataValueRef
 	if a.haveLast && a.lastMetadata == m {
 		metadataRef = a.observations[a.lastObservation-1].metadataRef
 	} else {
-		metadataRef = a.metadataReference(store, s.ref, m)
+		metadataRef = a.metadataReference(s, m)
 	}
 
 	// Group observations by stripe for commit.
@@ -224,66 +209,25 @@ func (a *nativeMetricMetadataAppender) observe(store *nativeMetricMetadataStore,
 	a.haveLast = true
 }
 
-// selectBatchLocked selects changing groups and returns the next position.
-// The caller must hold the stripe lock. Stable groups count toward the limit.
-func (a *nativeMetricMetadataAppender) selectBatchLocked(stripe *nativeMetricMetadataStripe, position int) int {
+// selectBatch selects changing series groups and returns the next position.
+// Stable groups count toward the limit; each comparison holds only its series lock.
+func (a *nativeMetricMetadataAppender) selectBatch(position int) int {
 	a.groups = a.groups[:0]
 	for examined := 0; position < len(a.sorted) && examined < maxNativeMetricMetadataBatch; examined++ {
 		end := position + 1
-		ref := a.observations[a.sorted[position]-1].series.ref
-		for end < len(a.sorted) && a.observations[a.sorted[end]-1].series.ref == ref {
+		series := a.observations[a.sorted[position]-1].series
+		for end < len(a.sorted) && a.observations[a.sorted[end]-1].series.ref == series.ref {
 			end++
 		}
-		if !nativeMetricMetadataGroupStableLocked(stripe, a, a.sorted[position:end]) {
+		series.Lock()
+		stable := nativeMetricMetadataGroupStable(series.nativeMetadataLocked(), a, a.sorted[position:end])
+		series.Unlock()
+		if !stable {
 			a.groups = append(a.groups, nativeMetricMetadataGroup{start: position, end: end})
 		}
 		position = end
 	}
 	return position
-}
-
-// applyPendingCache publishes each series' newest committed metadata so a later
-// append carrying the same metadata can skip recording it.
-//
-// Called with no stripe lock held. Shared copies are allocated before the
-// newest store state is revalidated under stripe-before-series lock order.
-func (a *nativeMetricMetadataAppender) applyPendingCache(stripe *nativeMetricMetadataStripe) {
-	for i := range a.pending {
-		pending := &a.pending[i]
-		shared, ok := a.shared[pending.handle]
-		if !ok {
-			// Neither transaction values nor pending entries may be published:
-			// their backing storage is reused when the appender returns to its pool.
-			shared = new(metadata.Metadata)
-			if pending.metadataRef != 0 {
-				*shared = a.metadataValue(pending.metadataRef)
-			} else {
-				*shared = pending.handle.Value()
-			}
-			a.shared[pending.handle] = shared
-		}
-		pending.metadata = shared
-	}
-
-	stripe.mtx.RLock()
-	for _, pending := range a.pending {
-		history, ok := stripe.histories[pending.series.ref]
-		if !ok || len(history.versions) == 0 {
-			continue
-		}
-		newest := history.versions[len(history.versions)-1]
-		if newest.metadata != pending.handle || newest.effectiveFrom != pending.effectiveFrom {
-			continue
-		}
-		// Reuse the series' sidecar rather than replacing it. A series whose
-		// metadata changes every scrape would otherwise allocate one per commit.
-		pending.series.Lock()
-		pending.series.setNativeMetadataLocked(pending.metadata, pending.effectiveFrom)
-		pending.series.Unlock()
-	}
-	stripe.mtx.RUnlock()
-	clear(a.pending)
-	a.pending = a.pending[:0]
 }
 
 func (s *nativeMetricMetadataStore) getAppender() *nativeMetricMetadataAppender {
@@ -310,8 +254,6 @@ func (s *nativeMetricMetadataStore) putAppender(appender *nativeMetricMetadataAp
 	clear(appender.points[:cap(appender.points)])
 	appender.points = appender.points[:0]
 	appender.groups = appender.groups[:0]
-	clear(appender.pending)
-	appender.pending = appender.pending[:0]
 	clear(appender.shared)
 	appender.touched = appender.touched[:0]
 	appender.lastMetadata = metadata.Metadata{}
@@ -327,10 +269,9 @@ func (s *nativeMetricMetadataStore) commitAppender(appender *nativeMetricMetadat
 }
 
 func (s *nativeMetricMetadataStore) commitAppenderStripe(stripeIndex uint8, appender *nativeMetricMetadataAppender) {
-	stripe := &s.stripes[stripeIndex]
 	first := appender.stripeFirst[stripeIndex]
 	// Skip stable stripes before collecting and sorting observation references.
-	if nativeMetricMetadataStripeStable(stripe, appender, first) {
+	if nativeMetricMetadataStripeStable(appender, first) {
 		return
 	}
 
@@ -364,45 +305,33 @@ func (s *nativeMetricMetadataStore) commitAppenderStripe(stripeIndex uint8, appe
 		slices.SortFunc(appender.sorted, compare)
 	}
 
-	// Select changing groups before interning to avoid work for stable metadata.
-	// Release the read lock while resolving values, then recheck selected groups
-	// against current history before merging and accounting under the write lock.
+	// Prepare immutable values without a series lock, then recheck and merge
+	// under that lock. Concurrent commits may have changed the current point.
 	for position := 0; position < len(appender.sorted); {
-		stripe.mtx.RLock()
-		position = appender.selectBatchLocked(stripe, position)
-		stripe.mtx.RUnlock()
-		if len(appender.groups) == 0 {
-			continue
-		}
-
-		// Resolve handles without holding a stripe lock.
+		position = appender.selectBatch(position)
 		for _, group := range appender.groups {
 			for _, observationRef := range appender.sorted[group.start:group.end] {
 				appender.metadataHandle(appender.observations[observationRef-1].metadataRef)
 			}
+			last := appender.observations[appender.sorted[group.end-1]-1]
+			handle := appender.metadataHandle(last.metadataRef)
+			if appender.shared[handle] == nil {
+				value := appender.metadataValue(last.metadataRef)
+				appender.shared[handle] = &value
+			}
 		}
-
-		stripe.mtx.Lock()
-		s.commitBatchLocked(stripe, appender)
-		stripe.mtx.Unlock()
-		// Revalidate before publishing: another commit or GC may have changed
-		// the history since the write lock was released.
-		appender.applyPendingCache(stripe)
+		s.commitBatch(appender)
 	}
 }
 
-// commitBatchLocked applies resolved groups and accounts for their changes.
-// The caller must hold the stripe write lock until accounting is complete.
-func (s *nativeMetricMetadataStore) commitBatchLocked(stripe *nativeMetricMetadataStripe, appender *nativeMetricMetadataAppender) {
-	var addedSeries, totalVersionDelta int64
-	var evictedVersions uint64
+// commitBatch publishes complete per-series states. Head appenders retain their
+// pending-sample reservations until after all batched accounting has finished.
+func (s *nativeMetricMetadataStore) commitBatch(appender *nativeMetricMetadataAppender) {
+	var addedSeries, versionDelta int64
+	var evicted uint64
 	for _, group := range appender.groups {
 		observationRefs := appender.sorted[group.start:group.end]
 		series := appender.observations[observationRefs[0]-1].series
-		history, exists := stripe.histories[series.ref]
-		if len(history.versions) > 0 && nativeMetricMetadataGroupStableResolved(history.versions[len(history.versions)-1], appender, observationRefs) {
-			continue
-		}
 		appender.points = appender.points[:0]
 		for _, observationRef := range observationRefs {
 			observation := appender.observations[observationRef-1]
@@ -410,99 +339,104 @@ func (s *nativeMetricMetadataStore) commitBatchLocked(stripe *nativeMetricMetada
 				effectiveFrom: observation.effectiveFrom,
 				metadata:      appender.metadataHandle(observation.metadataRef),
 			}
-			if len(appender.points) > 0 && appender.points[len(appender.points)-1].effectiveFrom == point.effectiveFrom {
-				appender.points[len(appender.points)-1] = point
-				continue
+			if last := len(appender.points) - 1; last >= 0 && appender.points[last].effectiveFrom == point.effectiveFrom {
+				appender.points[last] = point
+			} else {
+				appender.points = append(appender.points, point)
 			}
-			appender.points = append(appender.points, point)
 		}
-		newest, versionDelta, evictions := mergeNativeMetricMetadataLocked(stripe, series.ref, history, appender.points)
-		if !exists {
+
+		series.Lock()
+		native := series.nativeMetadataLocked()
+		if series.isGCed() || nativeMetricMetadataGroupStableResolved(native, appender.points) {
+			series.Unlock()
+			continue
+		}
+		first := native == nil
+		if first {
+			native = &nativeSeriesMetadata{}
+			series.ensureMetadataLocked().native = native
 			addedSeries++
 		}
-		totalVersionDelta += int64(versionDelta)
-		evictedVersions += uint64(evictions)
-		// Prefer matching caller-backed strings: reusing them on a later
-		// append can avoid content comparisons. If this transaction only
-		// carries older values, fall back to the newest interned value.
-		var metadataRef nativeMetricMetadataValueRef
-		last := appender.observations[observationRefs[len(observationRefs)-1]-1]
-		if appender.metadataHandle(last.metadataRef) == newest.metadata {
-			metadataRef = last.metadataRef
+		previous := native.handle
+		delta, evictions := native.mergeLocked(appender.points)
+		versionDelta += int64(delta)
+		evicted += uint64(evictions)
+		// The resulting newest value is either the preceding newest value or
+		// the final incoming value. Reuse the former's immutable pointer.
+		if native.handle != previous {
+			native.metadata = appender.shared[native.handle]
 		}
-		appender.pending = append(appender.pending, nativeMetricMetadataPendingCache{
-			series:        series,
-			handle:        newest.metadata,
-			metadataRef:   metadataRef,
-			effectiveFrom: newest.effectiveFrom,
-		})
+		if first {
+			stripe := s.stripe(series.ref)
+			stripe.mtx.Lock()
+			stripe.series[series.ref] = series
+			stripe.mtx.Unlock()
+		}
+		series.Unlock()
 	}
-	// Account before unlocking: GC must not subtract newly committed rows
-	// before they have been counted. Batching also avoids no-op version
-	// updates and contended per-series atomic writes at the version cap.
+	// Pending samples prevent deletion until these deltas are accounted for.
+	// Avoid contended per-series atomic updates, especially at the version cap.
 	if addedSeries != 0 {
 		s.series.Add(addedSeries)
 	}
-	if totalVersionDelta != 0 {
-		s.versions.Add(totalVersionDelta)
+	if versionDelta != 0 {
+		s.versions.Add(versionDelta)
 	}
-	if evictedVersions != 0 {
-		s.evictions.Add(evictedVersions)
+	if evicted != 0 {
+		s.evictions.Add(evicted)
 	}
 }
 
-// nativeMetricMetadataObservationStable reports whether observation repeats the
-// newest committed value at the same or a later timestamp. A true result does
-// not justify skipping it independently of other observations for the series.
-// The caller must hold the stripe read or write lock protecting history.
-func nativeMetricMetadataObservationStable(history nativeMetricMetadataHistory, appender *nativeMetricMetadataAppender, observation nativeMetricMetadataObservation) bool {
-	if len(history.versions) == 0 {
+// nativeMetricMetadataGroupStable compares an entire series group against one
+// committed state. The caller must hold the series lock throughout the check.
+func nativeMetricMetadataGroupStable(native *nativeSeriesMetadata, appender *nativeMetricMetadataAppender, refs []nativeMetricMetadataObservationRef) bool {
+	if native == nil {
 		return false
 	}
-	last := history.versions[len(history.versions)-1]
-	return observation.effectiveFrom >= last.effectiveFrom && appender.metadataValue(observation.metadataRef) == last.metadata.Value()
-}
-
-// nativeMetricMetadataGroupStableLocked requires the stripe read or write lock.
-func nativeMetricMetadataGroupStableLocked(stripe *nativeMetricMetadataStripe, appender *nativeMetricMetadataAppender, observationRefs []nativeMetricMetadataObservationRef) bool {
-	first := appender.observations[observationRefs[0]-1]
-	history, ok := stripe.histories[first.series.ref]
-	if !ok {
-		return false
-	}
-	for _, observationRef := range observationRefs {
-		if !nativeMetricMetadataObservationStable(history, appender, appender.observations[observationRef-1]) {
+	for _, ref := range refs {
+		observation := appender.observations[ref-1]
+		if observation.effectiveFrom < native.effectiveFrom || appender.metadataValue(observation.metadataRef) != *native.metadata {
 			return false
 		}
 	}
 	return true
 }
 
-// nativeMetricMetadataGroupStableResolved compares already-resolved references.
-func nativeMetricMetadataGroupStableResolved(last nativeMetricMetadataPoint, appender *nativeMetricMetadataAppender, observationRefs []nativeMetricMetadataObservationRef) bool {
-	for _, observationRef := range observationRefs {
-		observation := appender.observations[observationRef-1]
-		if observation.effectiveFrom < last.effectiveFrom || appender.metadataHandle(observation.metadataRef) != last.metadata {
+func nativeMetricMetadataGroupStableResolved(native *nativeSeriesMetadata, points []nativeMetricMetadataPoint) bool {
+	if native == nil {
+		return false
+	}
+	for _, point := range points {
+		if point.effectiveFrom < native.effectiveFrom || point.metadata != native.handle {
 			return false
 		}
 	}
 	return true
 }
 
-// nativeMetricMetadataStripeStable reports whether all buffered observations
-// for stripe are stable against their series' committed histories. first must
-// identify the start of the appender's observation chain for stripe.
-// It takes the stripe read lock internally.
-func nativeMetricMetadataStripeStable(stripe *nativeMetricMetadataStripe, appender *nativeMetricMetadataAppender, first nativeMetricMetadataObservationRef) bool {
-	stripe.mtx.RLock()
-	defer stripe.mtx.RUnlock()
-	for observationRef := first; observationRef != 0; {
-		observation := appender.observations[observationRef-1]
-		history, ok := stripe.histories[observation.series.ref]
-		if !ok || !nativeMetricMetadataObservationStable(history, appender, observation) {
+// nativeMetricMetadataStripeStable skips sorting a single-series stripe when
+// all its observations repeat one committed state. Shared stripes are checked
+// as series groups after sorting; independent per-observation snapshots would
+// incorrectly allow intervening commits to make an A/B/A group appear stable.
+func nativeMetricMetadataStripeStable(appender *nativeMetricMetadataAppender, first nativeMetricMetadataObservationRef) bool {
+	series := appender.observations[first-1].series
+	stripe := uint64(series.ref) % nativeMetricMetadataStripes
+	if appender.multiSeriesStripes[stripe/nativeMetricMetadataBitsPerWord]&(uint64(1)<<(stripe%nativeMetricMetadataBitsPerWord)) != 0 {
+		return false
+	}
+	series.Lock()
+	defer series.Unlock()
+	native := series.nativeMetadataLocked()
+	if native == nil {
+		return false
+	}
+	for ref := first; ref != 0; {
+		observation := appender.observations[ref-1]
+		if observation.effectiveFrom < native.effectiveFrom || appender.metadataValue(observation.metadataRef) != *native.metadata {
 			return false
 		}
-		observationRef = observation.next
+		ref = observation.next
 	}
 	return true
 }

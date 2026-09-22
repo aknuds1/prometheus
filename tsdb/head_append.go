@@ -449,7 +449,7 @@ func (a *headAppenderBase) recordNativeMetricMetadata(s *memSeries, timestamp in
 	if a.nativeMetricMetadata == nil {
 		a.nativeMetricMetadata = a.head.nativeMetricMetadata.getAppender()
 	}
-	a.nativeMetricMetadata.observe(a.head.nativeMetricMetadata, s, timestamp, m)
+	a.nativeMetricMetadata.observe(s, timestamp, m)
 }
 
 func (a *headAppenderBase) clearNativeMetricMetadata() {

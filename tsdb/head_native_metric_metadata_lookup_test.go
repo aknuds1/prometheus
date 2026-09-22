@@ -423,12 +423,12 @@ func TestHeadLookupNativeMetricMetadataPublication(t *testing.T) {
 			}
 			_, before, err := wal.LastSegmentAndOffset()
 			require.NoError(t, err)
-			stripe := head.nativeMetricMetadata.stripe(chunks.HeadSeriesRef(ref))
-			stripe.mtx.Lock()
+			series := head.series.getByID(chunks.HeadSeriesRef(ref))
+			series.Lock()
 			locked := true
 			defer func() {
 				if locked {
-					stripe.mtx.Unlock()
+					series.Unlock()
 				}
 			}()
 			done := make(chan error, 1)
@@ -443,7 +443,7 @@ func TestHeadLookupNativeMetricMetadataPublication(t *testing.T) {
 			defer cancel()
 			require.ErrorIs(t, head.LookupNativeMetricMetadata(ctx, lookups), context.DeadlineExceeded)
 			require.Nil(t, lookups[0].Metadata)
-			stripe.mtx.Unlock()
+			series.Unlock()
 			locked = false
 			require.NoError(t, <-done)
 			require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))

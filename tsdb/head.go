@@ -120,14 +120,8 @@ type Head struct {
 	// All series addressable by their ID or hash.
 	series *stripeSeries
 
-	// Native metric metadata histories live outside memSeries. Their maps also
-	// filter out references without metadata before label sorting. Each series
-	// lazily caches committed metadata and its timestamp for append-time checks.
-	//
-	// A lazy series-owned history could also avoid enlarging memSeries and keep
-	// the unchanged-append fast path. An earlier prototype saved memory but
-	// slowed the measured sparse queries; that layout combined with a separate
-	// presence index remains untested.
+	// Native histories belong to the series' lazy sidecars. The store indexes
+	// their presence so sparse queries can filter references before label sorting.
 	nativeMetricMetadata *nativeMetricMetadataStore
 
 	walExpiriesMtx sync.Mutex
@@ -2876,7 +2870,7 @@ type memSeries struct {
 
 // memSeriesMetadata holds the independent native and legacy metadata state.
 type memSeriesMetadata struct {
-	native nativeSeriesMetadata
+	native *nativeSeriesMetadata
 	legacy *metadata.Metadata
 }
 
@@ -2903,16 +2897,10 @@ func (s *memSeries) setLegacyMetadataLocked(m *metadata.Metadata) {
 
 func (s *memSeries) nativeMetadataLocked() *nativeSeriesMetadata {
 	m := s.metadata.Load()
-	if m == nil || m.native.metadata == nil {
+	if m == nil {
 		return nil
 	}
-	return &m.native
-}
-
-func (s *memSeries) setNativeMetadataLocked(m *metadata.Metadata, effectiveFrom int64) {
-	native := &s.ensureMetadataLocked().native
-	native.metadata = m
-	native.effectiveFrom = effectiveFrom
+	return m.native
 }
 
 // Layout of memSeries.state. After construction, it is only read or written with

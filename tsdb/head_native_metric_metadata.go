@@ -60,33 +60,17 @@ type nativeMetricMetadataPoint struct {
 	metadata      unique.Handle[metadata.Metadata]
 }
 
-// nativeMetricMetadataHistory retains change points with strictly increasing
-// timestamps and distinct adjacent metadata values, capped at
-// maxNativeMetricMetadataVersions. Once set by a cap eviction, truncated stays set.
-type nativeMetricMetadataHistory struct {
-	versions  []nativeMetricMetadataPoint
-	truncated bool
-}
-
-// nativeMetricMetadataStripe holds committed metadata histories for a subset
-// of series. Its mutex protects both the histories map and its contents.
+// nativeMetricMetadataStripe indexes series with committed native history.
+// Its mutex protects membership, not the series or their metadata. Release it
+// before taking a series or Head-index lock.
 type nativeMetricMetadataStripe struct {
-	mtx       sync.RWMutex
-	histories map[chunks.HeadSeriesRef]nativeMetricMetadataHistory
+	mtx    sync.RWMutex
+	series map[chunks.HeadSeriesRef]*memSeries
 }
 
-// nativeSeriesMetadata caches committed metadata for append-time comparisons.
-// It can lag the history store until publication. The series lock protects the
-// cache; forwarding may also read it while holding the publication barrier.
-// Its immutable pointee is shared within the publishing transaction.
-type nativeSeriesMetadata struct {
-	metadata      *metadata.Metadata
-	effectiveFrom int64
-}
-
-// nativeMetricMetadataStore holds a Head's committed, in-memory metadata
-// histories, keyed by series reference. It is shared across appenders and
-// queries; each stripe's lock protects its histories.
+// nativeMetricMetadataStore indexes series-owned native histories and coordinates
+// their publication to senders. Index entries retain retired series until cleanup;
+// they are not a substitute for revalidating membership in the Head.
 type nativeMetricMetadataStore struct {
 	// Keep the 64-bit atomics first for alignment on 32-bit platforms.
 	// Stores are allocated individually by newNativeMetricMetadataStore.
@@ -105,7 +89,7 @@ type nativeMetricMetadataStore struct {
 func newNativeMetricMetadataStore() *nativeMetricMetadataStore {
 	s := &nativeMetricMetadataStore{publication: semaphore.NewWeighted(nativeMetricMetadataPublicationPermits)}
 	for i := range s.stripes {
-		s.stripes[i].histories = make(map[chunks.HeadSeriesRef]nativeMetricMetadataHistory)
+		s.stripes[i].series = make(map[chunks.HeadSeriesRef]*memSeries)
 	}
 	return s
 }
@@ -114,26 +98,16 @@ func (s *nativeMetricMetadataStore) stripe(ref chunks.HeadSeriesRef) *nativeMetr
 	return &s.stripes[uint64(ref)%nativeMetricMetadataStripes]
 }
 
-// snapshot takes the stripe read lock and copies ref's history into snapshot.
-// It reports whether the history exists, leaving snapshot unchanged on a miss.
-func (s *nativeMetricMetadataStore) snapshot(ref chunks.HeadSeriesRef, snapshot *nativeMetricMetadataSnapshot) bool {
+func (s *nativeMetricMetadataStore) indexedSeries(ref chunks.HeadSeriesRef) *memSeries {
 	stripe := s.stripe(ref)
 	stripe.mtx.RLock()
-	history, ok := stripe.histories[ref]
-	if ok {
-		snapshot.count = copy(snapshot.points[:], history.versions)
-		snapshot.truncated = history.truncated
-	}
+	series := stripe.series[ref]
 	stripe.mtx.RUnlock()
-	return ok
+	return series
 }
 
 func (s *nativeMetricMetadataStore) has(ref chunks.HeadSeriesRef) bool {
-	stripe := s.stripe(ref)
-	stripe.mtx.RLock()
-	_, ok := stripe.histories[ref]
-	stripe.mtx.RUnlock()
-	return ok
+	return s.indexedSeries(ref) != nil
 }
 
 func (s *nativeMetricMetadataStore) delete(refs map[storage.SeriesRef]struct{}) {
@@ -149,91 +123,132 @@ func (s *nativeMetricMetadataStore) delete(refs map[storage.SeriesRef]struct{}) 
 			continue
 		}
 		stripe := &s.stripes[i]
+		var retired []*memSeries
 		stripe.mtx.Lock()
 		for _, ref := range stripeRefs {
-			if history, ok := stripe.histories[ref]; ok {
-				delete(stripe.histories, ref)
-				s.series.Add(-1)
-				s.versions.Add(-int64(len(history.versions)))
+			if series := stripe.series[ref]; series != nil {
+				delete(stripe.series, ref)
+				retired = append(retired, series)
 			}
 		}
 		stripe.mtx.Unlock()
+		// Head deletion has already excluded pending commits. Never take a
+		// series lock under the index lock, and never clear retired native state:
+		// an in-flight forwarding lookup may still hold its pointer.
+		var versions int64
+		for _, series := range retired {
+			series.Lock()
+			versions += int64(len(series.nativeMetadataLocked().older) + 1)
+			series.Unlock()
+		}
+		s.series.Add(-int64(len(retired)))
+		s.versions.Add(-versions)
 	}
 }
 
-// reset clears histories and current series/version counts when rebuilding Head
-// state, while preserving cumulative evictions. The caller must exclude
+// reset clears presence and current series/version counts after replacing Head
+// series, while preserving cumulative evictions. The caller must exclude
 // concurrent store mutations.
 func (s *nativeMetricMetadataStore) reset() {
 	for i := range s.stripes {
 		stripe := &s.stripes[i]
 		stripe.mtx.Lock()
-		stripe.histories = make(map[chunks.HeadSeriesRef]nativeMetricMetadataHistory)
+		stripe.series = make(map[chunks.HeadSeriesRef]*memSeries)
 		stripe.mtx.Unlock()
 	}
 	s.series.Store(0)
 	s.versions.Store(0)
 }
 
-func appendNativeMetricMetadataPoint(versions []nativeMetricMetadataPoint, point nativeMetricMetadataPoint) ([]nativeMetricMetadataPoint, bool) {
-	if len(versions) == maxNativeMetricMetadataVersions {
-		copy(versions, versions[1:])
-		versions[len(versions)-1] = point
-		return versions, true
-	}
-
-	if len(versions) == cap(versions) {
-		newCap := 1
-		if cap(versions) > 0 {
-			newCap = min(2*cap(versions), maxNativeMetricMetadataVersions)
-		}
-		grown := make([]nativeMetricMetadataPoint, len(versions), newCap)
-		copy(grown, versions)
-		versions = grown
-	}
-	return append(versions, point), false
+// nativeSeriesMetadata owns a series' committed history, with its newest point
+// inline and up to four chronological older points. Adjacent values differ;
+// truncated remains set after an eviction, even if the history later collapses.
+// The series lock protects updates. Forwarding may read native state under the
+// publication barrier; deletion must therefore leave retired history unchanged.
+type nativeSeriesMetadata struct {
+	metadata      *metadata.Metadata
+	effectiveFrom int64
+	handle        unique.Handle[metadata.Metadata]
+	older         []nativeMetricMetadataPoint
+	truncated     bool
 }
 
-// mergeChronologicalNativeMetricMetadata merges strictly timestamp-ordered inputs.
-// Observations must be at or after the newest existing version, if any. Incoming
-// values win timestamp ties, and adjacent equal metadata values coalesce.
-// It may mutate versions' backing array and returns retained points and the
-// number evicted by the version cap.
-func mergeChronologicalNativeMetricMetadata(versions, observations []nativeMetricMetadataPoint) ([]nativeMetricMetadataPoint, int) {
-	evictions := 0
-	for _, observation := range observations {
-		if len(versions) == 0 {
-			versions, _ = appendNativeMetricMetadataPoint(versions, observation)
-			continue
-		}
-
-		last := len(versions) - 1
-		if observation.effectiveFrom == versions[last].effectiveFrom {
-			versions[last] = observation
-			if last > 0 && versions[last-1].metadata == observation.metadata {
-				versions[last] = nativeMetricMetadataPoint{}
-				versions = versions[:last]
-			}
-			continue
-		}
-		if versions[last].metadata == observation.metadata {
-			continue
-		}
-
-		var evicted bool
-		versions, evicted = appendNativeMetricMetadataPoint(versions, observation)
-		if evicted {
-			evictions++
-		}
+// mergeLocked merges non-empty, strictly timestamp-ordered observations. It
+// returns the change in retained versions and the number evicted. The caller
+// holds the series lock and must update metadata to match the resulting handle.
+func (n *nativeSeriesMetadata) mergeLocked(observations []nativeMetricMetadataPoint) (versionDelta, evictions int) {
+	oldCount := 0
+	if n.handle != (unique.Handle[metadata.Metadata]{}) {
+		oldCount = len(n.older) + 1
 	}
-	return versions, evictions
+	if oldCount == 0 || observations[0].effectiveFrom >= n.effectiveFrom {
+		for _, observation := range observations {
+			switch {
+			case n.handle == (unique.Handle[metadata.Metadata]{}):
+				n.effectiveFrom, n.handle = observation.effectiveFrom, observation.metadata
+			case observation.effectiveFrom == n.effectiveFrom:
+				n.handle = observation.metadata
+				if last := len(n.older) - 1; last >= 0 && n.older[last].metadata == n.handle {
+					n.effectiveFrom = n.older[last].effectiveFrom
+					n.older[last] = nativeMetricMetadataPoint{}
+					n.older = n.older[:last]
+				}
+			case observation.metadata == n.handle:
+				// A repeated value does not advance the change point.
+			default:
+				previous := nativeMetricMetadataPoint{effectiveFrom: n.effectiveFrom, metadata: n.handle}
+				if len(n.older) == maxNativeMetricMetadataVersions-1 {
+					copy(n.older, n.older[1:])
+					n.older[len(n.older)-1] = previous
+					evictions++
+				} else {
+					if len(n.older) == cap(n.older) {
+						grown := make([]nativeMetricMetadataPoint, len(n.older), max(1, 2*cap(n.older)))
+						copy(grown, n.older)
+						n.older = grown
+					}
+					n.older = append(n.older, previous)
+				}
+				n.effectiveFrom, n.handle = observation.effectiveFrom, observation.metadata
+			}
+		}
+	} else {
+		var existing, retained [maxNativeMetricMetadataVersions]nativeMetricMetadataPoint
+		count := copy(existing[:], n.older)
+		existing[count] = nativeMetricMetadataPoint{effectiveFrom: n.effectiveFrom, metadata: n.handle}
+		var versions []nativeMetricMetadataPoint
+		versions, evictions = mergeOverlappingNativeMetricMetadata(existing[:count+1], observations, retained[:0])
+		olderCount := len(versions) - 1
+		if cap(n.older) < olderCount {
+			capacity := 1
+			for capacity < olderCount {
+				capacity *= 2
+			}
+			n.older = make([]nativeMetricMetadataPoint, olderCount, capacity)
+		} else {
+			if len(n.older) > olderCount {
+				clear(n.older[olderCount:])
+			}
+			n.older = n.older[:olderCount]
+		}
+		copy(n.older, versions[:olderCount])
+		newest := versions[olderCount]
+		n.effectiveFrom, n.handle = newest.effectiveFrom, newest.metadata
+	}
+	if len(n.older) == 0 {
+		n.older = nil
+	}
+	if evictions > 0 {
+		n.truncated = true
+	}
+	return len(n.older) + 1 - oldCount, evictions
 }
 
 // mergeOverlappingNativeMetricMetadata merges strictly timestamp-ordered inputs,
 // preferring observations at equal timestamps and coalescing adjacent equal values.
-// It leaves both inputs unchanged and returns a separate slice of the newest
-// retained points and the number evicted by the version cap.
-func mergeOverlappingNativeMetricMetadata(existing, observations []nativeMetricMetadataPoint) ([]nativeMetricMetadataPoint, int) {
+// It leaves both inputs unchanged and appends retained points to versions,
+// returning that slice and the number evicted by the version cap.
+func mergeOverlappingNativeMetricMetadata(existing, observations, versions []nativeMetricMetadataPoint) ([]nativeMetricMetadataPoint, int) {
 	var retained [maxNativeMetricMetadataVersions]nativeMetricMetadataPoint
 	start, count, evictions := 0, 0, 0
 	var lastMetadata unique.Handle[metadata.Metadata]
@@ -277,37 +292,13 @@ func mergeOverlappingNativeMetricMetadata(existing, observations []nativeMetricM
 		}
 	}
 
-	versions := make([]nativeMetricMetadataPoint, count)
 	for i := range count {
-		versions[i] = retained[(start+i)%len(retained)]
+		versions = append(versions, retained[(start+i)%len(retained)])
 	}
 	return versions, evictions
 }
 
-// mergeNativeMetricMetadataLocked merges observations into the stored history
-// for ref. It returns the newest retained point (which may come from history),
-// the net change in retained versions, and the count evicted by the version cap.
-//
-// Observations must be non-empty and ordered by strictly increasing effectiveFrom.
-// The caller supplies history from its lookup of stripe.histories[ref] to avoid
-// a second map lookup. It must hold the stripe write lock from that lookup
-// until the returned accounting deltas have been applied.
-func mergeNativeMetricMetadataLocked(stripe *nativeMetricMetadataStripe, ref chunks.HeadSeriesRef, history nativeMetricMetadataHistory, observations []nativeMetricMetadataPoint) (newest nativeMetricMetadataPoint, versionDelta, evictions int) {
-	oldLen := len(history.versions)
-	if len(history.versions) == 0 || observations[0].effectiveFrom >= history.versions[len(history.versions)-1].effectiveFrom {
-		history.versions, evictions = mergeChronologicalNativeMetricMetadata(history.versions, observations)
-	} else {
-		history.versions, evictions = mergeOverlappingNativeMetricMetadata(history.versions, observations)
-	}
-	if evictions > 0 {
-		history.truncated = true
-	}
-
-	stripe.histories[ref] = history
-	return history.versions[len(history.versions)-1], len(history.versions) - oldLen, evictions
-}
-
-// nativeMetricMetadataSnapshot owns its points independently of the store lock.
+// nativeMetricMetadataSnapshot owns its copied points independently of the series.
 type nativeMetricMetadataSnapshot struct {
 	points    [maxNativeMetricMetadataVersions]nativeMetricMetadataPoint
 	count     int
@@ -386,17 +377,26 @@ func (h *Head) nativeMetricMetadataForPostings(ctx context.Context, p index.Post
 			return nil, false, err
 		}
 		ref := chunks.HeadSeriesRef(p.At())
-		var snapshot nativeMetricMetadataSnapshot
-		if !h.nativeMetricMetadata.snapshot(ref, &snapshot) {
-			continue
-		}
-		// Revalidate Head membership after reading metadata. labels takes the
-		// series lock only in builds whose label representation can change.
 		series := h.series.getByID(ref)
 		if series == nil {
 			continue
 		}
-		lset := series.labels()
+		// Head lookup releases its index lock before we take the series lock.
+		// GC marks a retired series under that lock, so this check revalidates
+		// liveness while copying history and labels (including dedupelabels).
+		series.Lock()
+		native := series.nativeMetadataLocked()
+		if native == nil || series.isGCed() {
+			series.Unlock()
+			continue
+		}
+		var snapshot nativeMetricMetadataSnapshot
+		snapshot.count = copy(snapshot.points[:], native.older)
+		snapshot.points[snapshot.count] = nativeMetricMetadataPoint{effectiveFrom: native.effectiveFrom, metadata: native.handle}
+		snapshot.count++
+		snapshot.truncated = native.truncated
+		lset := series.lset
+		series.Unlock()
 		// Only a live additional row proves truncation. Do not expand its metadata.
 		if limit > 0 && len(result) == limit {
 			return result, true, nil

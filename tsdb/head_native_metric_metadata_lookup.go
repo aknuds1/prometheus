@@ -15,6 +15,7 @@ package tsdb
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"unique"
 
@@ -117,47 +118,35 @@ func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []st
 		}
 		lookup := &lookups[i]
 		ref := chunks.HeadSeriesRef(lookup.Ref)
-		// The index lock prevents series deletion while copying the cache.
-		// Publication excludes native cache updates, including its timestamp.
-		// Load the sidecar atomically because legacy commits may install it;
-		// do not read their independently mutable fields or the packed series state.
+		// Publication excludes native changes. The Head index protects the
+		// liveness check while we select a pointer/handle; GC never clears the
+		// retired history. Do not take a series lock under this index lock.
 		index := h.series.refStripe(ref)
 		h.series.locks[index].RLock()
-		var native nativeSeriesMetadata
+		var selected unique.Handle[metadata.Metadata]
 		if series := h.series.series[index][ref]; series != nil {
-			if sidecar := series.metadata.Load(); sidecar != nil {
-				native = sidecar.native
+			// Legacy commits may install the sidecar concurrently. Its pointer
+			// is atomic; legacy fields and packed series state are not read here.
+			if sidecar := series.metadata.Load(); sidecar != nil && sidecar.native != nil {
+				native := sidecar.native
+				if native.effectiveFrom <= lookup.Timestamp {
+					lookup.Metadata = native.metadata
+				} else {
+					for _, point := range slices.Backward(native.older) {
+						if point.effectiveFrom <= lookup.Timestamp {
+							selected = point.metadata
+							break
+						}
+					}
+				}
 			}
 		}
 		h.series.locks[index].RUnlock()
-		// Publication has finished for every metadata commit, making the cache
-		// authoritative even when absent. An older timestamp still needs history.
-		if native.metadata == nil {
-			continue
-		}
-		if native.effectiveFrom <= lookup.Timestamp {
-			lookup.Metadata = native.metadata
-			continue
-		}
-
-		// Never hold the index lock while accessing a metadata stripe.
-		// Publication prevents version changes since the liveness check above.
-		// GC may remove history meanwhile (a miss), but any retained version was
-		// already valid at that check and can safely outlive series deletion.
-		var snapshot nativeMetricMetadataSnapshot
-		if !store.snapshot(ref, &snapshot) {
-			continue
-		}
-		for j := snapshot.count - 1; j >= 0; j-- {
-			point := snapshot.points[j]
-			if point.effectiveFrom > lookup.Timestamp {
-				continue
-			}
+		if selected != (unique.Handle[metadata.Metadata]{}) {
 			if historical == nil {
 				historical = nativeMetricMetadataLookupPool.Get().(*nativeMetricMetadataLookupScratch)
 			}
-			historical.historical[i] = point.metadata
-			break
+			historical.historical[i] = selected
 		}
 	}
 	return historical, nil
