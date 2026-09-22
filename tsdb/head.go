@@ -2869,8 +2869,9 @@ type memSeries struct {
 }
 
 // memSeriesMetadata holds the independent native and legacy metadata state.
+// A nil native.metadata means no native history has been committed.
 type memSeriesMetadata struct {
-	native *nativeSeriesMetadata
+	native nativeSeriesMetadata
 	legacy *metadata.Metadata
 }
 
@@ -2897,10 +2898,10 @@ func (s *memSeries) setLegacyMetadataLocked(m *metadata.Metadata) {
 
 func (s *memSeries) nativeMetadataLocked() *nativeSeriesMetadata {
 	m := s.metadata.Load()
-	if m == nil {
+	if m == nil || m.native.metadata == nil {
 		return nil
 	}
-	return m.native
+	return &m.native
 }
 
 // Layout of memSeries.state. After construction, it is only read or written with

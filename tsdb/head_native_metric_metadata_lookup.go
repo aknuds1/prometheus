@@ -127,8 +127,8 @@ func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []st
 		if series := h.series.series[index][ref]; series != nil {
 			// Legacy commits may install the sidecar concurrently. Its pointer
 			// is atomic; legacy fields and packed series state are not read here.
-			if sidecar := series.metadata.Load(); sidecar != nil && sidecar.native != nil {
-				native := sidecar.native
+			if sidecar := series.metadata.Load(); sidecar != nil && sidecar.native.metadata != nil {
+				native := &sidecar.native
 				if native.effectiveFrom <= lookup.Timestamp {
 					lookup.Metadata = native.metadata
 				} else {
