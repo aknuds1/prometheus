@@ -38,9 +38,78 @@ type nativeMetadataNotifyFunc func()
 
 func (f nativeMetadataNotifyFunc) Notify() { f() }
 
+// nativeMetadataCancelContext cancels when selection reaches a chosen result,
+// independently of how often the implementation checks cancellation.
+type nativeMetadataCancelContext struct {
+	context.Context
+	cancel context.CancelFunc
+	ready  func() bool
+}
+
+func (c nativeMetadataCancelContext) Err() error {
+	if c.ready() {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
 func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 	a := metadata.Metadata{Type: model.MetricTypeCounter, Help: "a", Unit: "seconds"}
 	b := metadata.Metadata{Type: model.MetricTypeGauge, Help: "b"}
+	for _, tc := range []struct {
+		name       string
+		count      int
+		after      int
+		historical bool
+	}{
+		{name: "final current result", count: 1, after: 0},
+		{name: "final full current batch", count: maxNativeMetricMetadataLookups, after: maxNativeMetricMetadataLookups - 1},
+		{name: "final partial current batch", count: maxNativeMetricMetadataLookups + 1, after: maxNativeMetricMetadataLookups},
+		{name: "between current batches", count: 2*maxNativeMetricMetadataLookups + 1, after: maxNativeMetricMetadataLookups - 1},
+		{name: "historical scratch selected", count: 3, after: 2, historical: true},
+	} {
+		t.Run("cancellation after "+tc.name, func(t *testing.T) {
+			opts := newTestHeadDefaultOptions(1000, false)
+			opts.EnableNativeMetadata = true
+			head, _ := newTestHeadWithOptions(t, compression.None, opts)
+			var ref storage.SeriesRef
+			for version, m := range []metadata.Metadata{a, b} {
+				app := head.AppenderV2(t.Context())
+				var err error
+				ref, err = app.Append(ref, labels.FromStrings(labels.MetricName, "metric"), 0, int64(100+100*version), 1, nil, nil, storage.AOptions{Metadata: m})
+				require.NoError(t, err)
+				require.NoError(t, app.Commit())
+			}
+			lookups := make([]storage.NativeMetricMetadataLookup, tc.count)
+			for i := range lookups {
+				lookups[i] = storage.NativeMetricMetadataLookup{Ref: ref, Timestamp: 200}
+			}
+			if tc.historical {
+				lookups[0].Timestamp = 100
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			cancelAtResult := nativeMetadataCancelContext{
+				Context: ctx,
+				cancel:  cancel,
+				ready:   func() bool { return lookups[tc.after].Metadata != nil },
+			}
+			require.ErrorIs(t, head.LookupNativeMetricMetadata(cancelAtResult, lookups), context.Canceled)
+			require.True(t, head.nativeMetricMetadata.publication.TryAcquire(nativeMetricMetadataPublicationPermits), "cancellation must release publication")
+			head.nativeMetricMetadata.publication.Release(nativeMetricMetadataPublicationPermits)
+			// Discard the failed call's results and reuse the buffer, including
+			// historical selection that borrowed scratch before cancellation.
+			require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
+			for i, lookup := range lookups {
+				want := b
+				if i == 0 && tc.historical {
+					want = a
+				}
+				require.Equal(t, &want, lookup.Metadata)
+			}
+		})
+	}
+
 	t.Run("lookup does not need the series mutex", func(t *testing.T) {
 		opts := newTestHeadDefaultOptions(1000, false)
 		opts.EnableNativeMetadata = true

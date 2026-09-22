@@ -98,7 +98,7 @@ func (h *Head) LookupNativeMetricMetadata(ctx context.Context, lookups []storage
 		}
 		lookups = lookups[len(batch):]
 	}
-	return nil
+	return ctx.Err()
 }
 
 // selectNativeMetricMetadataBatch freezes current pointers and historical handles
@@ -112,10 +112,9 @@ func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []st
 	defer store.publication.Release(nativeMetricMetadataPublicationPermits)
 
 	var historical *nativeMetricMetadataLookupScratch
+	// Acquisition checks cancellation before this bounded batch; check again
+	// after selection instead of checking the context for every lookup.
 	for i := range lookups {
-		if err := ctx.Err(); err != nil {
-			return historical, err
-		}
 		lookup := &lookups[i]
 		ref := chunks.HeadSeriesRef(lookup.Ref)
 		// Publication excludes native changes. The Head index protects the
@@ -149,5 +148,5 @@ func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []st
 			historical.historical[i] = selected
 		}
 	}
-	return historical, nil
+	return historical, ctx.Err()
 }
