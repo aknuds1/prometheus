@@ -15,6 +15,7 @@ package tsdb
 
 import (
 	"slices"
+	"strconv"
 	"unique"
 
 	"github.com/prometheus/prometheus/model/metadata"
@@ -354,8 +355,21 @@ func (s *nativeMetricMetadataStore) commitBatch(appender *nativeMetricMetadataAp
 		}
 		first := native == nil
 		if first {
-			native = &nativeSeriesMetadata{}
-			series.ensureMetadataLocked().native = native
+			if strconv.IntSize == 64 && series.metadata.Load() == nil {
+				// Keep native-first state next to its sidecar in one allocation.
+				// Combining them on 32-bit builds would increase allocator bytes.
+				allocation := &struct {
+					sidecar memSeriesMetadata
+					native  nativeSeriesMetadata
+				}{}
+				native = &allocation.native
+				allocation.sidecar.native = native
+				series.metadata.Store(&allocation.sidecar)
+			} else {
+				// Never replace a sidecar already published by legacy metadata.
+				native = &nativeSeriesMetadata{}
+				series.ensureMetadataLocked().native = native
+			}
 			addedSeries++
 		}
 		previous := native.handle

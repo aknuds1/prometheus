@@ -1,7 +1,8 @@
 # Series-owned native metadata history experiment
 
-Status: isolated prototype; Linux comparison pending. No adoption decision has
-been made, and the forwarding branch remains unchanged.
+Status: isolated prototype. The completed three-arm Linux study improved churn
+CPU but failed its protected performance and memory gates. The forwarding branch
+remains unchanged; a focused current-value allocation experiment follows below.
 
 ## Question and controls
 
@@ -23,7 +24,7 @@ add/update that map and use it for presence checks; it retains baseline history
 ownership, merging, cache publication, and forwarding. Frozen source archives
 preserve this diagnostic arm; it is not a second candidate implementation.
 
-The candidate leaves `memSeries` itself unchanged. Its two-pointer metadata
+The original candidate leaves `memSeries` itself unchanged. Its two-pointer metadata
 sidecar allocates native history independently from legacy WAL metadata. Native
 state holds the newest point inline and allocates older points lazily, growing
 through capacities one, two, and four. Histories still retain at most five
@@ -132,5 +133,161 @@ The repair removes only that nonexistent case, strengthens selection regression
 coverage and diagnostics, and starts a fresh frozen study. The original attempt
 is preserved and its smoke measurements are not pooled into scored results.
 
-Pending the complete frozen comparison. Baseline profiles are diagnostic evidence
-only; neither smoke runs nor partial cohorts establish an optimization win.
+The repaired comparison completed on 2026-09-22. Median paired series/baseline
+changes, reported separately for its two cohorts, include:
+
+| Measurement | Cohort 1 | Cohort 2 |
+| --- | ---: | ---: |
+| 100k distinct-value churn pipeline CPU/sample | -18.26% | -13.56% |
+| Current unchanged lookup/append, one destination, GOMAXPROCS 8 | +21.30% | +20.22% |
+| Shared current sequential lookup, GOMAXPROCS 2 | +12.37% | +13.75% |
+| Full historical sequential lookup, GOMAXPROCS 2 | -28.09% | -29.33% |
+| Native sparse-change append, GOMAXPROCS 2 | +6.88% | +6.81% |
+| 100k shared-value churn pipeline completion time | +9.79% | +7.94% |
+
+Head rows use stringlabels. Current lookup/append regresses across all label
+builds, while the index-only control stays close to baseline. Stable incremental
+native-minus-disabled retained heap increases from about 96.4 to 105 B/series;
+four observed versions increase from about 150 to 175 B/series. Total retained
+heap is within budget, but this does not erase the incremental metadata cost.
+The primary CPU objective passes; the full frozen gate verdict remains failed.
+
+The complete report, verified raw archive, matching sources/binaries, profiles,
+and reproducible analysis are retained under
+`../benchmark-results/native-metadata/20260922-linux-series-owned-history/`.
+Checkpoint `f97b4151ecfd3c10114c1880419c0dca62c6d150` preserves the experimental
+source used by that study. Its source hashes, not a moving branch name, identify
+the measured implementation.
+
+## Current-value co-allocation experiment
+
+This follow-up tests one representation change: on 64-bit targets, the first
+native publication may allocate the two-pointer sidecar and native state in one
+object, with the sidecar first. A pre-existing legacy sidecar must be retained,
+using a separate native allocation. Publication initializes the internal pointer
+before storing the atomic sidecar pointer; synchronization and lifetime contracts
+above remain unchanged. No fields are added to `memSeries` or its sidecar.
+
+For the measured Go layouts, the combined object is 72 bytes, rounded to 80,
+versus separate 16-byte and 56-byte objects, rounded to 16 and 64. It saves an
+object, not allocator bytes, and retains the logical pointer indirection.
+Improved locality is a hypothesis, not an established consequence. On 386,
+combining 8 and 32 bytes would round 40 to 48, so 32-bit builds retain separate
+allocation. Older-history capacities, interning, the presence index, and all
+lookup/query algorithms are unchanged. The build-mode experiment stays deferred.
+
+Run the focused study in two fresh directories; neither mutates the completed
+study or pools measurements with it:
+
+```sh
+python3 scripts/benchmark-metadata-history-current_test.py
+python3 scripts/benchmark-metadata-history-current.py freeze-profiles PROFILES COMPLETED_STUDY
+python3 PROFILES/benchmark-metadata-history-current.py smoke PROFILES
+python3 PROFILES/benchmark-metadata-history-current.py run PROFILES
+python3 PROFILES/benchmark-metadata-history-current.py analyze PROFILES
+# Inspect control profiles before changing the candidate representation.
+python3 scripts/benchmark-metadata-history-current.py freeze-trial TRIAL PROFILES CANDIDATE_SOURCE
+python3 TRIAL/benchmark-metadata-history-current.py smoke TRIAL
+python3 TRIAL/benchmark-metadata-history-current.py run TRIAL
+python3 TRIAL/benchmark-metadata-history-current.py analyze TRIAL
+```
+
+The first stage imports the three original source archives and matching binaries
+and collects 36 diagnostic runs. Six stringlabels configurations cover current
+sequential lookup, unchanged lookup/append and fixed-concurrency append at
+GOMAXPROCS 2 and 8, and sparse-change append. Each configuration has a 30-second
+CPU/allocation capture and a separate 30-second mutex/block capture per arm.
+
+The second stage adds the coallocated arm, checking identical benchmark fixtures
+and dependencies before building it. It freezes two cohorts of six fresh
+processes across four arms, balanced candidate/control order, and all three label
+builds. The 6,444 observations comprise:
+
+- 3,168 Head timings protecting current, historical, missing, sparse-query,
+  unchanged/changed append, series churn, and disabled/legacy controls.
+- 2,880 retained-heap observations: stable/shared/unique values, two through six
+  observed versions, collapsed history, and series without metadata.
+- 288 fixed-work allocation diagnostics for parallel current lookup, using
+  10,000 iterations so worker-buffer allocation is not confounded by calibration.
+- 96 native-only cold-init and 100k distinct-churn pipeline observations.
+- 12 additional CPU/allocation and mutex/block captures for the new arm.
+
+Smoke sets contain 36 and 548 observations respectively, excluded from results.
+Profiles, calibrated timings, and fixed-work allocation diagnostics remain
+separate. Captures include fixture setup and calibration; do not treat total
+profile samples as a scored steady-state measurement or infer cache misses from
+source attribution alone. CPU steal continues to be recorded, not rejected.
+
+The primary target is at least 5% paired median improvement versus the original
+series arm in current unchanged lookup/append, one destination, stringlabels,
+GOMAXPROCS 8, with all six pairs favorable in each cohort. Report protected
+timing and total/incremental heap regressions above 5%, and stable allocations
+separately from calibrated parallel-buffer effects. Always also report both
+series arms versus baseline. Passing this focused comparison cannot reverse
+the original full-study verdict or authorize adoption. Preserve the prototype
+even if its performance target fails.
+
+### Stringlabels optimization screen
+
+The broad trial is retained as a superseded, incomplete run while optimization
+work focuses on stringlabels. The screen imports its frozen sources and matching
+stringlabels TSDB/remote binaries without recompilation, but never imports smoke
+checks or measurements. The parent manifest is pinned by checksum and included
+for provenance; offline analysis does not need the parent directory. This input
+import deliberately permits an incomplete parent without relaxing measurement
+completeness checks.
+
+```sh
+python3 scripts/benchmark-metadata-history-current.py freeze-screen SCREEN FROZEN_TRIAL
+python3 SCREEN/benchmark-metadata-history-current.py smoke SCREEN
+python3 SCREEN/benchmark-metadata-history-current.py run SCREEN
+python3 SCREEN/benchmark-metadata-history-current.py analyze SCREEN
+```
+
+The exact stringlabels projection retains all four arms, the two separate
+six-process cohorts, paired ordering, workloads, benchtimes, and assessment
+thresholds. Its 564 blocks contain 2,220 observations: 1,056 Head timings, 960
+retained-heap measurements, 96 fixed-work allocation diagnostics, 96 pipeline
+measurements, and 12 profile captures. All 196 smoke observations are fresh.
+CPU steal remains recorded and never triggers rejection or stopping.
+
+The scope-change decision uses only progress, not performance: if at least 1,072
+of the broad trial's 1,608 non-profile blocks are already accepted immediately
+before cutover, let it finish instead. Otherwise stop the validated runner and
+its separate benchmark/receiver process group, preserve partial output, and
+archive/checksum the stopped run before measuring the screen. Record the scope
+change separately rather than marking the old run complete or performance-failed.
+No compilation or archival runs alongside replacement measurements.
+
+A screen result cannot establish other label-build performance or authorize
+adoption. The completed screen finished on 2026-09-22 at 11:27:21 UTC: all 196
+smoke checks and 564 measurement blocks passed, with no exclusions or retries.
+CPU-steal warnings in 16 measured observations remain included. The full archive,
+verified sources/binaries, matched profiles, reproduced analysis and report are
+retained under
+`../benchmark-results/native-metadata/20260922-linux-current-value-coallocation/`.
+
+The primary paired median improvement versus series-owned history is 4.45% and
+4.54% in the separate cohorts, with all six pairs favorable in each. Benchstat
+also finds a significant improvement (p=0.002/0.004), but neither cohort reaches
+the frozen 5% target. The candidate remains 13.45%/14.11% slower than the native
+forwarding baseline; this screen is not a native-versus-WAL comparison.
+
+Co-allocation saves about one retained object per native-first series, not
+bytes. Stable incremental heap remains about 105 B/series versus 96.4 in the
+baseline. Cold pipeline allocations fall about 4.25%, but pipeline CPU results
+are variable. No protected timing/heap or incremental-heap flags are raised
+versus the original series arm. All 12 allocation flags remain recorded:
+calibrated append iteration counts and chunk lifecycle differ, so nonsignificant
+allocation comparisons do not establish parity. Fixed-iteration append
+diagnostics remain follow-up work; frozen classifications are not changed.
+
+Matched profiles are consistent with cheaper unchanged-append metadata checks,
+but current sequential lookup still trails baseline by about 12%. The dependent
+native-state read remains, and reference-index lock atomics are substantial in
+both designs. Mutex profiles do not identify a large new blocking bottleneck.
+Whole-process captures include setup, calibration and cleanup, with different
+iteration counts; sample percentages are diagnostic, not measured speedups or
+proof of cache misses. The report records bounded read-path/layout experiments
+for future work. Preserve this candidate in a separate signed/DCO follow-up;
+the original failed adoption gates remain unchanged.

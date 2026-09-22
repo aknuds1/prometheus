@@ -806,8 +806,99 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 		require.Equal(t, unsafe.Sizeof((*memSeriesMetadata)(nil)), unsafe.Sizeof(series.metadata))
 		require.Equal(t, 2*unsafe.Sizeof((*metadata.Metadata)(nil)), unsafe.Sizeof(memSeriesMetadata{}))
 	})
+	t.Run("native allocation layout", func(t *testing.T) {
+		var allocation struct {
+			sidecar memSeriesMetadata
+			native  nativeSeriesMetadata
+		}
+		if strconv.IntSize == 64 {
+			require.Equal(t, uintptr(56), unsafe.Sizeof(allocation.native))
+			require.Equal(t, uintptr(16), unsafe.Offsetof(allocation.native))
+			require.Equal(t, uintptr(72), unsafe.Sizeof(allocation))
+		} else {
+			// On 386, combining the 8-byte and 32-byte allocations would round
+			// 40 bytes up to 48. Keep the separate-allocation path on 32-bit builds.
+			require.Equal(t, uintptr(32), unsafe.Sizeof(allocation.native))
+			require.Equal(t, uintptr(8), unsafe.Offsetof(allocation.native))
+			require.Equal(t, uintptr(40), unsafe.Sizeof(allocation))
+		}
+	})
 
 	meta := metadata.Metadata{Type: model.MetricTypeCounter, Unit: "requests", Help: "requests"}
+	for _, order := range []string{"native first", "legacy first", "concurrent"} {
+		t.Run("initialization order "+order, func(t *testing.T) {
+			opts := newTestHeadDefaultOptions(1000, false)
+			opts.EnableNativeMetadata = true
+			head, _ := newTestHeadWithOptions(t, compression.None, opts)
+			seed := head.AppenderV2(t.Context())
+			ref, err := seed.Append(0, labels.FromStrings(labels.MetricName, "initialization_order"), 0, 100, 1, nil, nil, storage.AOptions{})
+			require.NoError(t, err)
+			require.NoError(t, seed.Commit())
+			series := head.series.getByID(chunks.HeadSeriesRef(ref))
+			require.Nil(t, series.metadata.Load())
+
+			legacyValue := metadata.Metadata{Type: model.MetricTypeGauge, Help: "legacy"}
+			legacy := head.Appender(t.Context())
+			_, err = legacy.UpdateMetadata(ref, labels.EmptyLabels(), legacyValue)
+			require.NoError(t, err)
+			native := head.AppenderV2(t.Context())
+			_, err = native.Append(ref, labels.EmptyLabels(), 0, 200, 2, nil, nil, storage.AOptions{Metadata: meta})
+			require.NoError(t, err)
+			require.Nil(t, series.metadata.Load(), "preparing either transaction must remain lazy")
+
+			var first *memSeriesMetadata
+			switch order {
+			case "native first":
+				require.NoError(t, native.Commit())
+				first = series.metadata.Load()
+				if strconv.IntSize == 64 {
+					require.Equal(t, unsafe.Sizeof(*first), uintptr(unsafe.Pointer(first.native))-uintptr(unsafe.Pointer(first)), "native state follows the sidecar in the same allocation")
+				}
+				require.NoError(t, legacy.Commit())
+			case "legacy first":
+				require.NoError(t, legacy.Commit())
+				first = series.metadata.Load()
+				require.Nil(t, first.native)
+				require.NoError(t, native.Commit())
+			case "concurrent":
+				start := make(chan struct{})
+				done := make(chan error, 2)
+				go func() { <-start; done <- legacy.Commit() }()
+				go func() { <-start; done <- native.Commit() }()
+				close(start)
+				// Join both writers before assertions can end the subtest.
+				firstErr, secondErr := <-done, <-done
+				require.NoError(t, firstErr)
+				require.NoError(t, secondErr)
+			}
+			if first != nil {
+				require.Same(t, first, series.metadata.Load(), "adding the other mode must not replace the sidecar")
+			}
+			require.Equal(t, legacyValue, *legacyMetadataForTest(series))
+			lookups := []storage.NativeMetricMetadataLookup{{Ref: ref, Timestamp: 200}}
+			require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
+			require.Equal(t, &meta, lookups[0].Metadata)
+			retained := lookups[0].Metadata
+			first = series.metadata.Load()
+			series.Lock()
+			backing := series.nativeMetadataLocked()
+			series.Unlock()
+
+			legacy = head.Appender(t.Context())
+			legacyValue.Help = "updated legacy"
+			_, err = legacy.UpdateMetadata(ref, labels.EmptyLabels(), legacyValue)
+			require.NoError(t, err)
+			require.NoError(t, legacy.Commit())
+			require.Same(t, first, series.metadata.Load())
+			series.Lock()
+			unchanged := backing == series.nativeMetadataLocked()
+			series.Unlock()
+			require.True(t, unchanged, "legacy updates must retain the native backing")
+			require.Equal(t, legacyValue, *legacyMetadataForTest(series))
+			require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
+			require.Same(t, retained, lookups[0].Metadata)
+		})
+	}
 	for _, tc := range []struct {
 		name   string
 		legacy bool
