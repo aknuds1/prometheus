@@ -75,10 +75,11 @@ type nativeMetricMetadataStore struct {
 	versions  atomic.Int64
 	evictions atomic.Uint64
 
-	// directory maps full-width references to series with initialized native state.
-	// Presence is only a candidate filter; forwarding also checks retirement.
-	directory    sync.Map
-	appenderPool sync.Pool
+	// directory maps full-width page keys to singleton series or typed pages.
+	// Membership implies initialized native state, but forwarding checks retirement.
+	directory      sync.Map
+	directoryLocks [nativeMetricMetadataStripes]sync.Mutex
+	appenderPool   sync.Pool
 	// Commits hold one permit from before WAL logging through cache publication.
 	// Senders acquire all permits for a bounded lookup batch. FIFO acquisition
 	// prevents a steady stream of commits from starving senders.
@@ -89,41 +90,13 @@ func newNativeMetricMetadataStore() *nativeMetricMetadataStore {
 	return &nativeMetricMetadataStore{publication: semaphore.NewWeighted(nativeMetricMetadataPublicationPermits)}
 }
 
-// publishLocked makes fully initialized native state visible before releasing
-// the series lock. Existing histories never republish directory membership.
-func (s *nativeMetricMetadataStore) publishLocked(series *memSeries) {
-	s.directory.Store(series.ref, series)
-}
-
 func (s *nativeMetricMetadataStore) indexedSeries(ref chunks.HeadSeriesRef) *memSeries {
-	series, ok := s.directory.Load(ref)
-	if !ok {
-		return nil
-	}
-	return series.(*memSeries)
+	page, _ := s.directory.Load(uint64(ref) >> nativeMetadataPageBits)
+	return nativeMetadataDirectorySeries(page, ref)
 }
 
 func (s *nativeMetricMetadataStore) has(ref chunks.HeadSeriesRef) bool {
 	return s.indexedSeries(ref) != nil
-}
-
-func (s *nativeMetricMetadataStore) delete(refs map[storage.SeriesRef]struct{}) {
-	var removed, versions int64
-	for ref := range refs {
-		value, ok := s.directory.LoadAndDelete(chunks.HeadSeriesRef(ref))
-		if !ok {
-			continue
-		}
-		// Head deletion has excluded pending commits. Account outside directory
-		// synchronization, leaving captured history unchanged.
-		series := value.(*memSeries)
-		series.Lock()
-		versions += int64(len(series.nativeMetadataLocked().older) + 1)
-		series.Unlock()
-		removed++
-	}
-	s.series.Add(-removed)
-	s.versions.Add(-versions)
 }
 
 // reset clears presence and current series/version counts after replacing Head

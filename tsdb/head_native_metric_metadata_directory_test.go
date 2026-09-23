@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/atomic"
 
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/storage"
@@ -27,6 +28,137 @@ import (
 )
 
 func TestNativeMetricMetadataDirectory(t *testing.T) {
+	t.Run("representation growth demotion and detached readers", func(t *testing.T) {
+		store := newNativeMetricMetadataStore()
+		point := makeNativeMetricMetadataPoint(100, metadata.Metadata{Help: "test"})
+		var captured any
+		for ref := range nativeMetadataPageSize {
+			before, _ := store.directory.Load(uint64(0))
+			commitNativeMetricMetadata(store, chunks.HeadSeriesRef(ref), point)
+			value, ok := store.directory.Load(uint64(0))
+			require.True(t, ok)
+			if ref == 0 {
+				require.IsType(t, &memSeries{}, value)
+				continue
+			}
+			page := value.(*nativeMetricMetadataPage)
+			capacity := 4
+			for (ref+1)*4 > capacity*3 && capacity < nativeMetadataPageSize {
+				capacity *= 2
+			}
+			require.Len(t, page.slots, capacity)
+			require.Equal(t, capacity == nativeMetadataPageSize, page.dense)
+			require.Equal(t, ref+1, page.live)
+			if previous, ok := before.(*nativeMetricMetadataPage); ok && len(previous.slots) == capacity {
+				require.Same(t, previous, page, "ordinary insertion must not copy a sparse page")
+			}
+			if ref == 10 {
+				captured = page
+			}
+		}
+		for count := nativeMetadataPageSize; count > 0; count-- {
+			ref := chunks.HeadSeriesRef(count - 1)
+			series := store.indexedSeries(ref)
+			series.Lock()
+			series.setGCed()
+			series.Unlock()
+			store.delete(map[storage.SeriesRef]struct{}{storage.SeriesRef(ref): {}})
+			require.Nil(t, store.indexedSeries(ref))
+			require.Equal(t, int64(count-1), store.series.Load())
+			value, exists := store.directory.Load(uint64(0))
+			switch count - 1 {
+			case 0:
+				require.False(t, exists)
+			case 1:
+				require.IsType(t, &memSeries{}, value)
+			case 2:
+				require.Len(t, value.(*nativeMetricMetadataPage).slots, 4)
+			case 4:
+				require.Len(t, value.(*nativeMetricMetadataPage).slots, 8)
+			case 8:
+				require.Len(t, value.(*nativeMetricMetadataPage).slots, 16)
+			case 16:
+				require.Len(t, value.(*nativeMetricMetadataPage).slots, 32)
+			case 32:
+				require.Len(t, value.(*nativeMetricMetadataPage).slots, 64)
+			case 80:
+				require.Len(t, value.(*nativeMetricMetadataPage).slots, 128)
+			case 81:
+				require.True(t, value.(*nativeMetricMetadataPage).dense)
+			}
+		}
+		// This descriptor was detached by growth. Later deletion affects newer
+		// pages, so forwarding must check retirement even after resolving a pointer.
+		series := nativeMetadataDirectorySeries(captured, 0)
+		require.NotNil(t, series)
+		require.NotZero(t, series.metadata.Load().native.flags.Load()&nativeMetadataRetired)
+		require.Equal(t, "test", series.metadata.Load().native.metadata.Help)
+		require.Zero(t, store.versions.Load())
+	})
+
+	t.Run("probe chains tombstones and bounded misses", func(t *testing.T) {
+		page := &nativeMetricMetadataPage{slots: make([]atomic.Pointer[memSeries], 8)}
+		for ref := range 6 {
+			page.insert(&memSeries{ref: chunks.HeadSeriesRef(ref)})
+		}
+		first := page.slot(0)
+		page.slots[first].Store(nativeMetadataDirectoryTombstone)
+		page.live--
+		for ref := 1; ref < 6; ref++ {
+			require.Equal(t, chunks.HeadSeriesRef(ref), page.lookup(chunks.HeadSeriesRef(ref)).ref)
+		}
+		page.insert(&memSeries{ref: 0})
+		require.Equal(t, 6, page.live)
+		require.Equal(t, 6, page.used, "reusing a tombstone does not increase used occupancy")
+		require.Equal(t, first, page.slot(0))
+		require.Nil(t, page.lookup(100))
+		for i := range page.slots {
+			page.slots[i].Store(nativeMetadataDirectoryTombstone)
+		}
+		require.Nil(t, page.lookup(0), "even an all-tombstone table must terminate")
+		require.GreaterOrEqual(t, page.slot(0), 0)
+	})
+
+	t.Run("readers survive concurrent page replacement", func(t *testing.T) {
+		store := newNativeMetricMetadataStore()
+		point := makeNativeMetricMetadataPoint(100, metadata.Metadata{Help: "test"})
+		done := make(chan struct{})
+		var readers sync.WaitGroup
+		for range 4 {
+			readers.Go(func() {
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+					for ref := range nativeMetadataPageSize {
+						if series := store.indexedSeries(chunks.HeadSeriesRef(ref)); series != nil && series.ref != chunks.HeadSeriesRef(ref) {
+							t.Errorf("wrong reference: %d for %d", series.ref, ref)
+							return
+						}
+					}
+				}
+			})
+		}
+		for range 10 {
+			refs := make(map[storage.SeriesRef]struct{})
+			for ref := range nativeMetadataPageSize {
+				commitNativeMetricMetadata(store, chunks.HeadSeriesRef(ref), point)
+				refs[storage.SeriesRef(ref)] = struct{}{}
+			}
+			for ref := range refs {
+				series := store.indexedSeries(chunks.HeadSeriesRef(ref))
+				series.Lock()
+				series.setGCed()
+				series.Unlock()
+			}
+			store.delete(refs)
+			require.Zero(t, store.series.Load())
+		}
+		close(done)
+		readers.Wait()
+	})
 	t.Run("random membership matches full width map", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		want := map[chunks.HeadSeriesRef]*memSeries{}

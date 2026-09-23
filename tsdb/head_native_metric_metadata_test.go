@@ -1664,11 +1664,16 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 			orphans []chunks.HeadSeriesRef
 			stored  int64
 		)
-		head.nativeMetricMetadata.directory.Range(func(key, _ any) bool {
-			ref := key.(chunks.HeadSeriesRef)
-			stored++
-			if head.series.getByID(ref) == nil {
-				orphans = append(orphans, ref)
+		head.nativeMetricMetadata.directory.Range(func(key, value any) bool {
+			first := chunks.HeadSeriesRef(key.(uint64) << nativeMetadataPageBits)
+			for offset := range nativeMetadataPageSize {
+				ref := first + chunks.HeadSeriesRef(offset)
+				if nativeMetadataDirectorySeries(value, ref) != nil {
+					stored++
+					if head.series.getByID(ref) == nil {
+						orphans = append(orphans, ref)
+					}
+				}
 			}
 			return true
 		})

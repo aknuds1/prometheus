@@ -112,12 +112,21 @@ func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []st
 	defer store.publication.Release(nativeMetricMetadataPublicationPermits)
 
 	var historical *nativeMetricMetadataLookupScratch
+	var page any
+	lastPage := ^uint64(0)
 	// Acquisition checks cancellation before this bounded batch; check again
 	// after selection instead of checking the context for every lookup.
 	for i := range lookups {
 		lookup := &lookups[i]
 		ref := chunks.HeadSeriesRef(lookup.Ref)
-		series := store.indexedSeries(ref)
+		key := uint64(ref) >> nativeMetadataPageBits
+		if key != lastPage {
+			page, _ = store.directory.Load(key)
+			lastPage = key
+		}
+		// Only cache within this publication-protected batch. GC may detach a
+		// page, but its pointers remain safe and retirement is checked below.
+		series := nativeMetadataDirectorySeries(page, ref)
 		if series == nil {
 			continue
 		}
