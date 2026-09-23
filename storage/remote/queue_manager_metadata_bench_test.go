@@ -44,7 +44,16 @@ func BenchmarkQueueManagerMetadataAppend(b *testing.B) {
 		for _, source := range []string{"legacy", "native"} {
 			b.Run(kind+"/source="+source, func(b *testing.B) {
 				m := metadata.Metadata{Type: model.MetricTypeCounter, Help: "fixed metadata", Unit: "seconds"}
-				qm := newTestQueueManager(b, config.DefaultQueueConfig, config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType)
+				var reader storage.NativeMetricMetadataReader
+				if source == "native" {
+					reader = nativeMetadataReaderFunc(func(_ context.Context, lookups []storage.NativeMetricMetadataLookup) error {
+						for i := range lookups {
+							lookups[i].Metadata = &m
+						}
+						return nil
+					})
+				}
+				qm := newMetadataBenchmarkQueueManager(b, config.DefaultQueueConfig, config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, reader)
 				qm.sendExemplars, qm.sendNativeHistograms = true, true
 				series := make([]record.RefSeries, numSeries)
 				legacy := make([]record.RefMetadata, numSeries)
@@ -62,15 +71,7 @@ func BenchmarkQueueManagerMetadataAppend(b *testing.B) {
 					floatHistograms[i] = record.RefFloatHistogramSample{Ref: ref, ST: 100, T: 200, FH: &histogram.FloatHistogram{Count: 1, Sum: float64(i)}}
 				}
 				qm.StoreSeries(series, 0)
-				if source == "native" {
-					qm.metadataContext = b.Context()
-					qm.metadataReader = nativeMetadataReaderFunc(func(_ context.Context, lookups []storage.NativeMetricMetadataLookup) error {
-						for i := range lookups {
-							lookups[i].Metadata = &m
-						}
-						return nil
-					})
-				} else {
+				if source == "legacy" {
 					qm.StoreMetadata(legacy)
 				}
 				appendItems := map[string]func() bool{
@@ -140,13 +141,13 @@ func BenchmarkQueueManagerMetadataAppendEncode(b *testing.B) {
 						}
 						require.NoError(b, app.Commit())
 					}
-					qm := newTestQueueManager(b, config.DefaultQueueConfig, config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType)
-					qm.StoreSeries(series, 0)
+					var reader storage.NativeMetricMetadataReader
 					if source == "native" {
-						qm.metadataReader = head
-						qm.metadataContext, qm.cancelMetadata = context.WithCancel(b.Context())
-						b.Cleanup(qm.cancelMetadata)
-					} else if state == "current" || state == "historical" {
+						reader = head
+					}
+					qm := newMetadataBenchmarkQueueManager(b, config.DefaultQueueConfig, config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, reader)
+					qm.StoreSeries(series, 0)
+					if source == "legacy" && (state == "current" || state == "historical") {
 						qm.StoreMetadata(legacy)
 					}
 					q := newQueue(numSeries+1, numSeries+1)

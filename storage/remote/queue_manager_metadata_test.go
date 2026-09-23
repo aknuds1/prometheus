@@ -22,11 +22,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	remoteapi "github.com/prometheus/client_golang/exp/api/remote"
+	client_testutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/atomic"
@@ -70,9 +72,9 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 			c := NewTestWriteClient(remoteapi.WriteV2MessageType)
 			cfg := testDefaultQueueConfig()
 			cfg.MaxSamplesPerSend = 10
-			qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, defaultFlushDeadline, c, remoteapi.WriteV2MessageType)
-			qm.metadataContext, qm.cancelMetadata = context.WithCancel(t.Context())
-			defer qm.cancelMetadata()
+			var lookup nativeMetadataReaderFunc
+			reader := nativeMetadataReaderFunc(func(ctx context.Context, batch []storage.NativeMetricMetadataLookup) error { return lookup(ctx, batch) })
+			qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, defaultFlushDeadline, c, remoteapi.WriteV2MessageType, reader)
 			qm.sendExemplars, qm.sendNativeHistograms = true, true
 			series := []record.RefSeries{{Ref: 1, Labels: labels.FromStrings(labels.MetricName, "metric")}}
 			qm.StoreSeries(series, 0)
@@ -89,7 +91,7 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 							clear(q.batch)
 							q.batch = q.batch[:0]
 							calls, seen := 0, 0
-							qm.metadataReader = nativeMetadataReaderFunc(func(_ context.Context, lookups []storage.NativeMetricMetadataLookup) error {
+							lookup = nativeMetadataReaderFunc(func(_ context.Context, lookups []storage.NativeMetricMetadataLookup) error {
 								calls++
 								require.LessOrEqual(t, len(lookups), nativeMetadataBatchSize)
 								for i := range lookups {
@@ -147,7 +149,7 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 					}
 				})
 			}
-			qm.metadataReader = nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error {
+			lookup = nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error {
 				t.Fatal("unknown series and old samples must be filtered before lookup")
 				return nil
 			})
@@ -158,14 +160,13 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 	}
 
 	t.Run("staging batch reuse", func(t *testing.T) {
-		qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType)
-		qm.metadataContext = t.Context()
-		qm.metadataReader = nativeMetadataReaderFunc(func(_ context.Context, lookups []storage.NativeMetricMetadataLookup) error {
+		reader := nativeMetadataReaderFunc(func(_ context.Context, lookups []storage.NativeMetricMetadataLookup) error {
 			for i := range lookups {
 				lookups[i].Metadata = &native
 			}
 			return nil
 		})
+		qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, reader)
 		qm.shards.queues = []*queue{newQueue(2*nativeMetadataBatchSize, 2*nativeMetadataBatchSize)}
 		// Keep ownership of one object throughout; pool reuse is not guaranteed.
 		batch := new(nativeMetadataBatch)
@@ -187,20 +188,40 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 		}
 	})
 
-	t.Run("RW1 ignores native reader", func(t *testing.T) {
+	t.Run("mixed destinations and protocol replacement", func(t *testing.T) {
 		reader := nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error {
-			t.Fatal("RW1 must not look up native metadata")
+			t.Fatal("no samples should be appended in this configuration test")
 			return nil
 		})
 		s := NewWriteStorage(nil, nil, t.TempDir(), defaultFlushDeadline, nil, false, reader)
-		defer s.Close()
-		rw := baseRemoteWriteConfig("http://test-storage.com")
-		rw.ProtobufMessage = remoteapi.WriteV1MessageType
-		rw.MetadataConfig.Send = false
-		require.NoError(t, s.ApplyConfig(&config.Config{RemoteWriteConfigs: []*config.RemoteWriteConfig{rw}}))
+		t.Cleanup(func() { require.NoError(t, s.Close()) })
+		rw1, rw2 := baseRemoteWriteConfig("http://rw1.test"), baseRemoteWriteConfig("http://rw2.test")
+		rw1.ProtobufMessage, rw2.ProtobufMessage = remoteapi.WriteV1MessageType, remoteapi.WriteV2MessageType
+		rw1.MetadataConfig.Send, rw2.MetadataConfig.Send = false, false
+		cfg := &config.Config{RemoteWriteConfigs: []*config.RemoteWriteConfig{rw1, rw2}}
+		require.NoError(t, s.ApplyConfig(cfg))
+		original := make(map[*QueueManager]bool)
 		for _, qm := range s.queues {
-			require.Nil(t, qm.metadataReader)
-			require.Nil(t, qm.metadataContext)
+			original[qm] = true
+			native := qm.protoMsg == remoteapi.WriteV2MessageType
+			require.Equal(t, native, qm.metadataReader != nil)
+			require.Equal(t, native, qm.metadataContext != nil)
+			require.Equal(t, native, qm.shards.nextReady != nil)
+			for _, q := range qm.shards.queues {
+				require.Equal(t, native, q.notifyCapacity)
+			}
+		}
+		rw1.ProtobufMessage, rw2.ProtobufMessage = rw2.ProtobufMessage, rw1.ProtobufMessage
+		require.NoError(t, s.ApplyConfig(cfg))
+		require.Len(t, s.queues, 2)
+		for _, qm := range s.queues {
+			require.False(t, original[qm], "protocol changes must create a new fixed policy")
+			native := qm.protoMsg == remoteapi.WriteV2MessageType
+			require.Equal(t, native, qm.metadataReader != nil)
+			require.Equal(t, native, qm.shards.nextReady != nil)
+			for _, q := range qm.shards.queues {
+				require.Equal(t, native, q.notifyCapacity)
+			}
 		}
 	})
 }
@@ -269,17 +290,15 @@ func TestQueueManagerNativeMetadataRetryAndReshard(t *testing.T) {
 	}
 	cfg := testDefaultQueueConfig()
 	cfg.MaxSamplesPerSend = 1
-	qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, defaultFlushDeadline, client, remoteapi.WriteV2MessageType)
-	qm.metadataContext, qm.cancelMetadata = context.WithCancel(t.Context())
-	defer qm.cancelMetadata()
 	lookups := 0
-	qm.metadataReader = nativeMetadataReaderFunc(func(_ context.Context, batch []storage.NativeMetricMetadataLookup) error {
+	reader := nativeMetadataReaderFunc(func(_ context.Context, batch []storage.NativeMetricMetadataLookup) error {
 		lookups++
 		for i := range batch {
 			batch[i].Metadata = current.Load()
 		}
 		return nil
 	})
+	qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, defaultFlushDeadline, client, remoteapi.WriteV2MessageType, reader)
 	qm.StoreSeries([]record.RefSeries{{Ref: 1, Labels: labels.FromStrings(labels.MetricName, "metric")}}, 0)
 	qm.shards.start(1)
 	defer qm.shards.stop()
@@ -319,32 +338,44 @@ func TestQueueManagerNativeMetadataRetryAndReshard(t *testing.T) {
 }
 
 func TestQueueManagerAppendBackpressure(t *testing.T) {
-	for _, mode := range []string{"RW1", "RW2 WAL", "RW2 native"} {
+	for _, mode := range []string{"RW1", "RW1 with reader", "RW2 disabled", "RW2 WAL", "native hit", "native miss", "native error"} {
 		for _, kind := range []string{"sample", "exemplar", "histogram", "float histogram"} {
 			t.Run(mode+"/"+kind, func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					protoMsg := remoteapi.WriteV2MessageType
-					if mode == "RW1" {
+					if strings.HasPrefix(mode, "RW1") {
 						protoMsg = remoteapi.WriteV1MessageType
 					}
-					qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), protoMsg)
-					qm.sendExemplars, qm.sendNativeHistograms = true, true
-					qm.StoreSeries([]record.RefSeries{{Ref: 1, Labels: labels.FromStrings("__name__", "test")}}, 0)
-					q := newQueue(1, 1)
-					qm.shards.queues = []*queue{q}
-					require.Nil(t, q.Append(timeSeries{}))
+					native := strings.HasPrefix(mode, "native")
 					old, newest := &metadata.Metadata{Help: "old"}, &metadata.Metadata{Help: "new"}
 					current, lookups := old, 0
-					if mode == "RW2 native" {
-						qm.metadataContext = t.Context()
-						qm.metadataReader = nativeMetadataReaderFunc(func(_ context.Context, batch []storage.NativeMetricMetadataLookup) error {
+					var reader storage.NativeMetricMetadataReader
+					if native || mode == "RW1 with reader" {
+						reader = nativeMetadataReaderFunc(func(_ context.Context, batch []storage.NativeMetricMetadataLookup) error {
 							lookups++
 							for i := range batch {
-								batch[i].Metadata = current
+								if mode != "native miss" {
+									batch[i].Metadata = current
+								}
+							}
+							if mode == "native error" {
+								return errors.New("lookup failed")
 							}
 							return nil
 						})
 					}
+					cfg := testDefaultQueueConfig()
+					cfg.MinBackoff = model.Duration(20 * time.Millisecond)
+					qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), protoMsg, reader)
+					qm.sendExemplars, qm.sendNativeHistograms = true, true
+					qm.StoreSeries([]record.RefSeries{{Ref: 1, Labels: labels.FromStrings("__name__", "test")}}, 0)
+					if mode == "RW2 WAL" || native {
+						qm.StoreMetadata([]record.RefMetadata{{Ref: 1, Type: record.GetMetricType(model.MetricTypeGauge), Help: "fallback"}})
+					}
+					q := newQueue(1, 1)
+					q.notifyCapacity = qm.shards.nextReady != nil
+					qm.shards.queues = []*queue{q}
+					require.True(t, q.Append(timeSeries{}))
 					done := make(chan bool, 1)
 					go func() {
 						switch kind {
@@ -360,19 +391,94 @@ func TestQueueManagerAppendBackpressure(t *testing.T) {
 					}()
 					synctest.Wait()
 					require.Empty(t, done)
+					require.Equal(t, 1.0, client_testutil.ToFloat64(qm.metrics.enqueueRetriesTotal))
 					current = newest
 					q.Batch()
 					synctest.Wait()
+					if !native {
+						require.Nil(t, q.spaceAvailable)
+						require.Nil(t, qm.shards.nextReady)
+						require.Empty(t, done, "legacy producers retain their original backoff after capacity returns")
+						backoff := 5 * time.Millisecond
+						if kind == "exemplar" {
+							backoff = time.Duration(cfg.MinBackoff)
+						}
+						time.Sleep(backoff - time.Nanosecond)
+						synctest.Wait()
+						require.Empty(t, done)
+						time.Sleep(time.Nanosecond)
+						synctest.Wait()
+					}
 					require.Len(t, done, 1)
 					require.True(t, <-done)
 					queued := q.Batch()
 					require.Len(t, queued, 1)
 					require.Equal(t, int64(1000), queued[0].timestamp)
-					if mode == "RW2 native" {
-						require.Equal(t, 1, lookups, "enqueue retries must not resolve metadata again")
-						require.Same(t, old, queued[0].metadata)
+					if native {
+						require.Equal(t, 1, lookups, "retries must not resolve metadata again")
 					} else {
+						require.Zero(t, lookups)
+					}
+					switch mode {
+					case "native hit":
+						require.Same(t, old, queued[0].metadata)
+					case "RW2 WAL", "native miss", "native error":
+						require.Equal(t, "fallback", queued[0].metadata.Help)
+					default:
 						require.Nil(t, queued[0].metadata)
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestQueueManagerCapacityPolicy(t *testing.T) {
+	for _, protoMsg := range []remoteapi.WriteMessageType{remoteapi.WriteV1MessageType, remoteapi.WriteV2MessageType} {
+		for _, withReader := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reader=%t", protoMsg, withReader), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					var reader storage.NativeMetricMetadataReader
+					if withReader {
+						reader = nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error { return nil })
+					}
+					native := withReader && protoMsg == remoteapi.WriteV2MessageType
+					entered := make(chan struct{}, 1)
+					client := &MockWriteClient{
+						NameFunc: func() string { return "test" }, EndpointFunc: func() string { return "http://test" },
+						StoreFunc: func(context.Context, []byte, int) (WriteResponseStats, error) {
+							entered <- struct{}{}
+							return WriteResponseStats{Samples: 1, Confirmed: true}, nil
+						},
+					}
+					cfg := testDefaultQueueConfig()
+					cfg.MaxSamplesPerSend, cfg.Capacity = 1, 1
+					cfg.BatchSendDeadline = model.Duration(time.Hour)
+					qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, defaultFlushDeadline, client, protoMsg, reader)
+					for _, shards := range []int{1, 2} {
+						qm.shards.start(shards)
+						require.Equal(t, native, qm.shards.nextReady != nil)
+						for _, q := range qm.shards.queues {
+							require.Equal(t, native, q.notifyCapacity)
+							require.Nil(t, q.spaceAvailable)
+						}
+						q := qm.shards.queues[0]
+						// Legacy receives must reach HTTP without taking batchMtx.
+						if !native {
+							q.batchMtx.Lock()
+						}
+						qm.metrics.pendingSamples.Inc()
+						qm.shards.enqueuedSamples.Inc()
+						q.batchQueue <- []timeSeries{{seriesLabels: labels.FromStrings("__name__", "test"), timestamp: 1000}}
+						synctest.Wait()
+						require.Len(t, entered, 1)
+						if !native {
+							q.batchMtx.Unlock()
+						}
+						synctest.Wait()
+						require.Len(t, entered, 1)
+						<-entered
+						qm.shards.stop()
 					}
 				})
 			})

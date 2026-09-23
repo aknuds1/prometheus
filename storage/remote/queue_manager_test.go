@@ -47,6 +47,7 @@ import (
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	"github.com/prometheus/prometheus/schema"
 	"github.com/prometheus/prometheus/scrape"
+	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/util/compression"
@@ -303,10 +304,17 @@ func newTestClientAndQueueManager(t testing.TB, flushDeadline time.Duration, pro
 	return c, newTestQueueManager(t, cfg, mcfg, flushDeadline, c, protoMsg)
 }
 
-func newTestQueueManager(t testing.TB, cfg config.QueueConfig, mcfg config.MetadataConfig, deadline time.Duration, c WriteClient, protoMsg remoteapi.WriteMessageType) *QueueManager {
+func newTestQueueManager(t testing.TB, cfg config.QueueConfig, mcfg config.MetadataConfig, deadline time.Duration, c WriteClient, protoMsg remoteapi.WriteMessageType, readers ...storage.NativeMetricMetadataReader) *QueueManager {
+	var reader storage.NativeMetricMetadataReader
+	if len(readers) > 0 {
+		reader = readers[0]
+	}
 	dir := t.TempDir()
 	metrics := newQueueManagerMetrics(nil, "", "")
-	m := NewQueueManager(metrics, nil, nil, nil, dir, newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, labels.EmptyLabels(), nil, c, deadline, newPool(), newHighestTimestampMetric(), nil, false, false, false, protoMsg, record.NewBuffersPool(), false, nil)
+	m := NewQueueManager(metrics, nil, nil, nil, dir, newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, labels.EmptyLabels(), nil, c, deadline, newPool(), newHighestTimestampMetric(), nil, false, false, false, protoMsg, record.NewBuffersPool(), false, reader)
+	if m.cancelMetadata != nil {
+		t.Cleanup(m.cancelMetadata)
+	}
 
 	return m
 }
@@ -1770,12 +1778,13 @@ func TestQueueCapacityNotification(t *testing.T) {
 	for _, consume := range []string{"channel", "deadline full batch", "deadline partial batch"} {
 		t.Run(consume, func(t *testing.T) {
 			q := newQueue(2, 2)
+			q.notifyCapacity = true
 			for i := range 3 {
-				require.Nil(t, q.Append(timeSeries{timestamp: int64(i)}))
+				require.Nil(t, q.appendOrWait(timeSeries{timestamp: int64(i)}))
 			}
-			wait := q.Append(timeSeries{timestamp: 3})
+			wait := q.appendOrWait(timeSeries{timestamp: 3})
 			require.NotNil(t, wait)
-			require.Equal(t, wait, q.Append(timeSeries{timestamp: 4}), "producers share the broadcast")
+			require.Equal(t, wait, q.appendOrWait(timeSeries{timestamp: 4}), "producers share the broadcast")
 			require.Len(t, q.batch, 1, "failed appends must not consume capacity")
 			switch consume {
 			case "channel":
@@ -1797,19 +1806,20 @@ func TestQueueCapacityNotification(t *testing.T) {
 				t.Fatal("missed capacity notification")
 			}
 			require.Nil(t, q.spaceAvailable)
-			require.Nil(t, q.Append(timeSeries{timestamp: 3}))
+			require.Nil(t, q.appendOrWait(timeSeries{timestamp: 3}))
 		})
 	}
 
 	t.Run("multiple producers retry without reservations", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType)
+			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error { return nil }))
 			q := newQueue(1, 1)
+			q.notifyCapacity = true
 			qm.shards.queues = []*queue{q}
-			require.True(t, qm.shards.enqueue(1, timeSeries{timestamp: 0}))
+			require.True(t, qm.shards.enqueueNative(1, timeSeries{timestamp: 0}))
 			done := make(chan bool, 2)
 			for i := range 2 {
-				go func() { done <- qm.shards.enqueue(1, timeSeries{timestamp: int64(i + 1)}) }()
+				go func() { done <- qm.shards.enqueueNative(1, timeSeries{timestamp: int64(i + 1)}) }()
 			}
 			synctest.Wait()
 			require.Empty(t, done)
@@ -1828,11 +1838,11 @@ func TestQueueCapacityNotification(t *testing.T) {
 func TestShardsEnqueueWakeup(t *testing.T) {
 	t.Run("quit while waiting for replacement", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType)
+			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error { return nil }))
 			qm.shards.softShutdown = make(chan struct{})
 			close(qm.shards.softShutdown)
 			done := make(chan bool, 1)
-			go func() { done <- qm.shards.enqueue(1, timeSeries{}) }()
+			go func() { done <- qm.shards.enqueueNative(1, timeSeries{}) }()
 			synctest.Wait()
 			require.Empty(t, done)
 			close(qm.quit)
@@ -1841,84 +1851,82 @@ func TestShardsEnqueueWakeup(t *testing.T) {
 			require.False(t, <-done)
 		})
 	})
-	for _, protoMsg := range []remoteapi.WriteMessageType{remoteapi.WriteV1MessageType, remoteapi.WriteV2MessageType} {
-		for _, event := range []string{"capacity before HTTP completion", "quit", "reshard", "hard shutdown"} {
-			t.Run(fmt.Sprintf("%s/%s", protoMsg, event), func(t *testing.T) {
-				synctest.Test(t, func(t *testing.T) {
-					entered, release := make(chan struct{}, 4), make(chan struct{}, 4)
-					client := &MockWriteClient{
-						NameFunc: func() string { return "test" }, EndpointFunc: func() string { return "http://test" },
-						StoreFunc: func(ctx context.Context, _ []byte, _ int) (WriteResponseStats, error) {
-							entered <- struct{}{}
-							select {
-							case <-release:
-								return WriteResponseStats{Samples: 1, Confirmed: true}, nil
-							case <-ctx.Done():
-								return WriteResponseStats{}, ctx.Err()
-							}
-						},
-					}
-					cfg := testDefaultQueueConfig()
-					cfg.MaxSamplesPerSend, cfg.Capacity = 1, 1
-					cfg.BatchSendDeadline = model.Duration(time.Hour)
-					qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, time.Second, client, protoMsg)
-					qm.shards.start(1)
-					data := timeSeries{seriesLabels: labels.FromStrings("__name__", "test"), timestamp: 1000}
-					require.True(t, qm.shards.enqueue(1, data))
+	for _, event := range []string{"capacity before HTTP completion", "quit", "reshard", "hard shutdown"} {
+		t.Run(event, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				entered, release := make(chan struct{}, 4), make(chan struct{}, 4)
+				client := &MockWriteClient{
+					NameFunc: func() string { return "test" }, EndpointFunc: func() string { return "http://test" },
+					StoreFunc: func(ctx context.Context, _ []byte, _ int) (WriteResponseStats, error) {
+						entered <- struct{}{}
+						select {
+						case <-release:
+							return WriteResponseStats{Samples: 1, Confirmed: true}, nil
+						case <-ctx.Done():
+							return WriteResponseStats{}, ctx.Err()
+						}
+					},
+				}
+				cfg := testDefaultQueueConfig()
+				cfg.MaxSamplesPerSend, cfg.Capacity = 1, 1
+				cfg.BatchSendDeadline = model.Duration(time.Hour)
+				qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, time.Second, client, remoteapi.WriteV2MessageType, nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error { return nil }))
+				qm.shards.start(1)
+				data := timeSeries{seriesLabels: labels.FromStrings("__name__", "test"), timestamp: 1000}
+				require.True(t, qm.shards.enqueueNative(1, data))
+				<-entered
+				require.True(t, qm.shards.enqueueNative(1, data))
+				done := make(chan bool, 1)
+				go func() { done <- qm.shards.enqueueNative(1, data) }()
+				synctest.Wait()
+				require.Empty(t, done)
+				switch event {
+				case "capacity before HTTP completion":
+					release <- struct{}{}
 					<-entered
-					require.True(t, qm.shards.enqueue(1, data))
-					done := make(chan bool, 1)
-					go func() { done <- qm.shards.enqueue(1, data) }()
 					synctest.Wait()
-					require.Empty(t, done)
-					switch event {
-					case "capacity before HTTP completion":
+					require.Len(t, done, 1, "capacity must wake producers before the next HTTP request completes")
+					require.True(t, <-done)
+					release <- struct{}{}
+					release <- struct{}{}
+					qm.shards.stop()
+				case "quit":
+					close(qm.quit)
+					synctest.Wait()
+					require.Len(t, done, 1)
+					require.False(t, <-done)
+					release <- struct{}{}
+					release <- struct{}{}
+					qm.shards.stop()
+				case "reshard", "hard shutdown":
+					oldQueue := qm.shards.queues[0]
+					stopped := make(chan struct{})
+					go func() { qm.shards.stop(); close(stopped) }()
+					synctest.Wait()
+					if event == "reshard" {
 						release <- struct{}{}
-						<-entered
-						synctest.Wait()
-						require.Len(t, done, 1, "capacity must wake producers before the next HTTP request completes")
-						require.True(t, <-done)
 						release <- struct{}{}
-						release <- struct{}{}
-						qm.shards.stop()
-					case "quit":
-						close(qm.quit)
-						synctest.Wait()
-						require.Len(t, done, 1)
-						require.False(t, <-done)
-						release <- struct{}{}
-						release <- struct{}{}
-						qm.shards.stop()
-					case "reshard", "hard shutdown":
-						oldQueue := qm.shards.queues[0]
-						stopped := make(chan struct{})
-						go func() { qm.shards.stop(); close(stopped) }()
-						synctest.Wait()
-						if event == "reshard" {
-							release <- struct{}{}
-							release <- struct{}{}
-						} else {
-							time.Sleep(2 * time.Second)
-						}
-						<-stopped
-						synctest.Wait()
-						require.Empty(t, done, "soft shutdown must wait for replacement readiness")
-						qm.shards.start(2)
-						<-entered
-						synctest.Wait()
-						require.Len(t, done, 1)
-						require.True(t, <-done)
-						_, ok := <-oldQueue.Chan()
-						// Hard shutdown may leave an accepted batch for dropping.
-						if event == "reshard" {
-							require.False(t, ok)
-						}
-						release <- struct{}{}
-						qm.shards.stop()
+					} else {
+						time.Sleep(2 * time.Second)
 					}
-				})
+					<-stopped
+					synctest.Wait()
+					require.Empty(t, done, "soft shutdown must wait for replacement readiness")
+					qm.shards.start(2)
+					<-entered
+					synctest.Wait()
+					require.Len(t, done, 1)
+					require.True(t, <-done)
+					_, ok := <-oldQueue.Chan()
+					// Hard shutdown may leave an accepted batch for dropping.
+					if event == "reshard" {
+						require.False(t, ok)
+					}
+					release <- struct{}{}
+					qm.shards.stop()
+				}
 			})
-		}
+		})
 	}
 }
 

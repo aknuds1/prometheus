@@ -78,7 +78,7 @@ func (b *nativeMetadataBatch) flush(t *QueueManager) bool {
 		if lookup.Metadata != nil {
 			b.series[i].metadata = lookup.Metadata
 		}
-		if !t.shards.enqueue(chunks.HeadSeriesRef(lookup.Ref), b.series[i]) {
+		if !t.shards.enqueueNative(chunks.HeadSeriesRef(lookup.Ref), b.series[i]) {
 			return false
 		}
 	}
