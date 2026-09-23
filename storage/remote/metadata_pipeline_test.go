@@ -151,6 +151,7 @@ type metadataPipelineReceiverStats struct {
 	Samples, Histograms, Exemplars              int64
 	Requests, Bytes, HeldRequests, ServiceNanos int64
 	CPU                                         metadataPipelineCPUUsage
+	Memory                                      *metadataPipelineMemory `json:",omitempty"`
 }
 
 func (s metadataPipelineReceiverStats) items() int64 {
@@ -325,7 +326,7 @@ func TestRemoteWriteMetadataPipelineReceiver(t *testing.T) {
 				close(r.gate)
 				r.gate = nil
 			}
-		case "stats":
+		case "stats", "accounting":
 		default:
 			r.stats.Error = "unknown control command: " + command
 		}
@@ -334,6 +335,10 @@ func TestRemoteWriteMetadataPipelineReceiver(t *testing.T) {
 		var err error
 		stats.CPU, err = metadataPipelineCPU()
 		require.NoError(t, err)
+		if command == "accounting" {
+			memory := metadataPipelineReadMemory()
+			stats.Memory = &memory
+		}
 		require.NoError(t, encoder.Encode(stats))
 		if command == "stop" {
 			return
@@ -462,6 +467,7 @@ type metadataPipeline struct {
 	peak                     []int64
 	lateness                 [][]time.Duration
 	enqueueRetriesBeforeHold float64
+	diagnostics              *metadataPipelineDiagnostics
 }
 
 func newMetadataPipeline(ctx context.Context, c metadataPipelineConfig) (*metadataPipeline, error) {
@@ -539,7 +545,11 @@ func (f *metadataPipeline) open(dir string) error {
 	if c.Source == "native" {
 		reader = f.db
 	}
-	f.sender = NewStorage(nil, f.registry, f.db.StartTime, dir, 5*time.Second, nil, false, reader)
+	var reg prometheus.Registerer = f.registry
+	if f.diagnostics != nil && f.diagnostics.Accounting {
+		reg = &metadataPipelineDiagnosticRegisterer{Registerer: reg, watcher: f.diagnostics.watcher}
+	}
+	f.sender = NewStorage(nil, reg, f.db.StartTime, dir, 5*time.Second, nil, false, reader)
 	rw := baseRemoteWriteConfig(f.receiver.address)
 	rw.ProtobufMessage = remoteapi.WriteV2MessageType
 	rw.SendExemplars, rw.SendNativeHistograms = c.Mixed, c.Mixed
@@ -547,6 +557,10 @@ func (f *metadataPipeline) open(dir string) error {
 	rw.QueueConfig.MinShards, rw.QueueConfig.MaxShards = c.Shards, c.Shards
 	rw.QueueConfig.MaxSamplesPerSend, rw.QueueConfig.Capacity = c.Batch, c.Capacity
 	rw.QueueConfig.BatchSendDeadline = model.Duration(100 * time.Millisecond)
+	if f.diagnostics != nil && f.diagnostics.BackoffCap != 0 {
+		rw.QueueConfig.MinBackoff = model.Duration(f.diagnostics.BackoffCap)
+		rw.QueueConfig.MaxBackoff = model.Duration(f.diagnostics.BackoffCap)
+	}
 	if err := f.sender.ApplyConfig(&config.Config{RemoteWriteConfigs: []*config.RemoteWriteConfig{rw}}); err != nil {
 		return err
 	}
@@ -730,6 +744,9 @@ func (f *metadataPipeline) drain(ctx context.Context, expected int64) (metadataP
 	for {
 		stats, err := f.receiver.command(ctx, "stats")
 		if err != nil {
+			return stats, err
+		}
+		if err := f.diagnostics.progress(f, stats); err != nil {
 			return stats, err
 		}
 		if stats.items() > expected {

@@ -150,3 +150,9 @@ The completed-evidence archive SHA256 is
 Run the archived driver's `analyze` command on a separate extracted copy to
 reproduce its analysis without altering the retained evidence. No production
 change, promotion, amendment or push is part of this study.
+
+The subsequent [cold-start and backlog phase study](metadata_history_pipeline_phases.md)
+completed the pipeline follow-up. It identifies a substantial enqueue-backoff
+component in the longer backlog tail, while cold CPU remains variable. The results
+above, the fixed-work allocation warning and the other representation tradeoffs
+remain unchanged; the follow-up is not a promotion or native/WAL parity verdict.

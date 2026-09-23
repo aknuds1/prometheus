@@ -175,6 +175,10 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	require.NoError(b, err)
 	defer func() { require.NoError(b, f.close()) }()
 	defer b.StopTimer()
+	d, err := metadataPipelineDiagnosticsFromEnv(c)
+	require.NoError(b, err)
+	f.diagnostics = d
+	defer func() { require.NoError(b, d.close()) }()
 	r := metadataPipelineResult{Config: c, Diagnostic: os.Getenv("PROMETHEUS_METADATA_PIPELINE_HEAP") == "1"}
 	beforeReceiver, err := f.receiver.command(ctx, "stats")
 	require.NoError(b, err)
@@ -185,6 +189,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	lifecycleStart := time.Now()
 	phaseStart, phaseCPU := lifecycleStart, lifecycleCPU
 	beforeMemory = lifecycleMemory
+	require.NoError(b, d.begin(ctx, f, "initialization"))
 	if c.Case == "cold" {
 		b.StartTimer()
 	}
@@ -219,11 +224,16 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	if c.Case == "cold" {
 		first, last = 0, 0
 	}
+	require.NoError(b, d.end(ctx, f, "initialization"))
 	r.Samples = int64(c.Series) * int64(last-first+1)
+	require.NoError(b, d.begin(ctx, f, "ingestion"))
 	ingestStart := time.Now()
 	require.NoError(b, f.append(ctx, first, last))
 	writerEnd := time.Now()
 	r.Ingestion = writerEnd.Sub(ingestStart)
+	d.mark(ctx, "writer-complete")
+	require.NoError(b, d.end(ctx, f, "ingestion"))
+	require.NoError(b, d.begin(ctx, f, "backlog-wait"))
 	stats, err := f.receiver.command(ctx, "stats")
 	require.NoError(b, err)
 	r.OutstandingAtWriterEnd = f.expectedItems(last+1) - stats.items()
@@ -236,10 +246,17 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		if r.Diagnostic {
 			r.BacklogHeap = metadataPipelineRetainedHeap(f)
 		}
+		require.NoError(b, d.end(ctx, f, "backlog-wait"))
+		require.NoError(b, d.begin(ctx, f, "drain"))
 		releaseStart = time.Now()
 		r.BacklogWait = releaseStart.Sub(writerEnd)
+		d.mark(ctx, "release-command-start")
 		_, err = f.receiver.command(ctx, "release")
 		require.NoError(b, err)
+		d.mark(ctx, "release-command-complete")
+	} else {
+		require.NoError(b, d.end(ctx, f, "backlog-wait"))
+		require.NoError(b, d.begin(ctx, f, "drain"))
 	}
 	stats, err = f.drain(ctx, f.expectedItems(last+1))
 	require.NoError(b, err)
@@ -248,12 +265,16 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	if !releaseStart.IsZero() {
 		r.ReleaseToDrain = drainEnd.Sub(releaseStart)
 	}
+	d.mark(ctx, "drain-complete")
+	require.NoError(b, d.end(ctx, f, "drain"))
 	if r.Diagnostic {
 		r.DrainedHeap = metadataPipelineRetainedHeap(f)
 	}
+	require.NoError(b, d.begin(ctx, f, "shutdown"))
 	stopStart := time.Now()
 	require.NoError(b, f.closeSender())
 	r.Shutdown = time.Since(stopStart)
+	require.NoError(b, d.end(ctx, f, "shutdown"))
 	r.Completion = time.Since(phaseStart)
 	phaseEndCPU, err := metadataPipelineCPU()
 	require.NoError(b, err)
@@ -276,10 +297,12 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 			require.Zero(b, value, name)
 		}
 	}
+	require.NoError(b, d.begin(ctx, f, "db-close"))
 	closeStart := time.Now()
 	require.NoError(b, f.db.Close())
 	f.db = nil
 	r.DBClose = time.Since(closeStart)
+	require.NoError(b, d.end(ctx, f, "db-close"))
 	r.Lifecycle = time.Since(lifecycleStart)
 	lifecycleEndCPU, err := metadataPipelineCPU()
 	require.NoError(b, err)
@@ -312,5 +335,11 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	r.ScheduleP50 = metadataPipelinePercentile(lateness, 50)
 	r.ScheduleP99 = metadataPipelinePercentile(lateness, 99)
 	r.ScheduleMax = metadataPipelinePercentile(lateness, 100)
+	if d != nil {
+		require.NoError(b, d.close())
+		encoded, err := json.Marshal(d)
+		require.NoError(b, err)
+		b.Logf("metadata-pipeline-diagnostics: %s", encoded)
+	}
 	return r
 }
