@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	remoteapi "github.com/prometheus/client_golang/exp/api/remote"
@@ -179,7 +180,7 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 					histogram: &histogram.Histogram{}, floatHistogram: &histogram.FloatHistogram{},
 				}
 			}
-			require.True(t, batch.flush(qm, 0))
+			require.True(t, batch.flush(qm))
 			require.Zero(t, batch.count)
 			require.Equal(t, [nativeMetadataBatchSize]storage.NativeMetricMetadataLookup{}, batch.lookups)
 			require.Equal(t, [nativeMetadataBatchSize]timeSeries{}, batch.series)
@@ -315,6 +316,68 @@ func TestQueueManagerNativeMetadataRetryAndReshard(t *testing.T) {
 		t.Fatal("missing delivery after resharding")
 	}
 	require.Equal(t, 2, lookups)
+}
+
+func TestQueueManagerAppendBackpressure(t *testing.T) {
+	for _, mode := range []string{"RW1", "RW2 WAL", "RW2 native"} {
+		for _, kind := range []string{"sample", "exemplar", "histogram", "float histogram"} {
+			t.Run(mode+"/"+kind, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					protoMsg := remoteapi.WriteV2MessageType
+					if mode == "RW1" {
+						protoMsg = remoteapi.WriteV1MessageType
+					}
+					qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), protoMsg)
+					qm.sendExemplars, qm.sendNativeHistograms = true, true
+					qm.StoreSeries([]record.RefSeries{{Ref: 1, Labels: labels.FromStrings("__name__", "test")}}, 0)
+					q := newQueue(1, 1)
+					qm.shards.queues = []*queue{q}
+					require.Nil(t, q.Append(timeSeries{}))
+					old, newest := &metadata.Metadata{Help: "old"}, &metadata.Metadata{Help: "new"}
+					current, lookups := old, 0
+					if mode == "RW2 native" {
+						qm.metadataContext = t.Context()
+						qm.metadataReader = nativeMetadataReaderFunc(func(_ context.Context, batch []storage.NativeMetricMetadataLookup) error {
+							lookups++
+							for i := range batch {
+								batch[i].Metadata = current
+							}
+							return nil
+						})
+					}
+					done := make(chan bool, 1)
+					go func() {
+						switch kind {
+						case "sample":
+							done <- qm.Append([]record.RefSample{{Ref: 1, T: 1000}})
+						case "exemplar":
+							done <- qm.AppendExemplars([]record.RefExemplar{{Ref: 1, T: 1000}})
+						case "histogram":
+							done <- qm.AppendHistograms([]record.RefHistogramSample{{Ref: 1, T: 1000, H: &histogram.Histogram{}}})
+						case "float histogram":
+							done <- qm.AppendFloatHistograms([]record.RefFloatHistogramSample{{Ref: 1, T: 1000, FH: &histogram.FloatHistogram{}}})
+						}
+					}()
+					synctest.Wait()
+					require.Empty(t, done)
+					current = newest
+					q.Batch()
+					synctest.Wait()
+					require.Len(t, done, 1)
+					require.True(t, <-done)
+					queued := q.Batch()
+					require.Len(t, queued, 1)
+					require.Equal(t, int64(1000), queued[0].timestamp)
+					if mode == "RW2 native" {
+						require.Equal(t, 1, lookups, "enqueue retries must not resolve metadata again")
+						require.Same(t, old, queued[0].metadata)
+					} else {
+						require.Nil(t, queued[0].metadata)
+					}
+				})
+			})
+		}
+	}
 }
 
 func TestNativeMetadataWALDelivery(t *testing.T) {

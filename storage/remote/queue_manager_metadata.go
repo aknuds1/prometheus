@@ -15,9 +15,6 @@ package remote
 
 import (
 	"sync"
-	"time"
-
-	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
@@ -55,13 +52,13 @@ func (b *nativeMetadataBatch) release() {
 
 // Callers must initialize b.series[b.count] before append and must not retain
 // the slot across this call.
-func (b *nativeMetadataBatch) append(t *QueueManager, ref chunks.HeadSeriesRef, backoff model.Duration) bool {
+func (b *nativeMetadataBatch) append(t *QueueManager, ref chunks.HeadSeriesRef) bool {
 	b.lookups[b.count] = storage.NativeMetricMetadataLookup{Ref: storage.SeriesRef(ref), Timestamp: b.series[b.count].timestamp}
 	b.count++
-	return b.count < len(b.series) || b.flush(t, backoff)
+	return b.count < len(b.series) || b.flush(t)
 }
 
-func (b *nativeMetadataBatch) flush(t *QueueManager, initialBackoff model.Duration) bool {
+func (b *nativeMetadataBatch) flush(t *QueueManager) bool {
 	if b == nil || b.count == 0 {
 		return true
 	}
@@ -81,23 +78,8 @@ func (b *nativeMetadataBatch) flush(t *QueueManager, initialBackoff model.Durati
 		if lookup.Metadata != nil {
 			b.series[i].metadata = lookup.Metadata
 		}
-		backoff := initialBackoff
-		for {
-			select {
-			case <-t.quit:
-				return false
-			default:
-			}
-			if t.shards.enqueue(chunks.HeadSeriesRef(lookup.Ref), b.series[i]) {
-				break
-			}
-			t.metrics.enqueueRetriesTotal.Inc()
-			select {
-			case <-t.quit:
-				return false
-			case <-time.After(time.Duration(backoff)):
-			}
-			backoff = min(backoff*2, t.cfg.MaxBackoff)
+		if !t.shards.enqueue(chunks.HeadSeriesRef(lookup.Ref), b.series[i]) {
+			return false
 		}
 	}
 	clear(lookups)

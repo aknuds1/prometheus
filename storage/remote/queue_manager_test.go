@@ -1766,6 +1766,162 @@ func TestQueue_FlushAndShutdownDoesNotDeadlock(t *testing.T) {
 	}
 }
 
+func TestQueueCapacityNotification(t *testing.T) {
+	for _, consume := range []string{"channel", "deadline full batch", "deadline partial batch"} {
+		t.Run(consume, func(t *testing.T) {
+			q := newQueue(2, 2)
+			for i := range 3 {
+				require.Nil(t, q.Append(timeSeries{timestamp: int64(i)}))
+			}
+			wait := q.Append(timeSeries{timestamp: 3})
+			require.NotNil(t, wait)
+			require.Equal(t, wait, q.Append(timeSeries{timestamp: 4}), "producers share the broadcast")
+			require.Len(t, q.batch, 1, "failed appends must not consume capacity")
+			switch consume {
+			case "channel":
+				<-q.Chan()
+				q.batchMtx.Lock()
+				q.notifyAvailableLocked()
+				q.batchMtx.Unlock()
+			case "deadline full batch":
+				require.Len(t, q.Batch(), 2)
+			case "deadline partial batch":
+				// Isolate partial extraction from the channel-receive notification.
+				<-q.Chan()
+				require.Len(t, q.Batch(), 1)
+			}
+			// Notification before entering select must not be lost.
+			select {
+			case <-wait:
+			default:
+				t.Fatal("missed capacity notification")
+			}
+			require.Nil(t, q.spaceAvailable)
+			require.Nil(t, q.Append(timeSeries{timestamp: 3}))
+		})
+	}
+
+	t.Run("multiple producers retry without reservations", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType)
+			q := newQueue(1, 1)
+			qm.shards.queues = []*queue{q}
+			require.True(t, qm.shards.enqueue(1, timeSeries{timestamp: 0}))
+			done := make(chan bool, 2)
+			for i := range 2 {
+				go func() { done <- qm.shards.enqueue(1, timeSeries{timestamp: int64(i + 1)}) }()
+			}
+			synctest.Wait()
+			require.Empty(t, done)
+			for range 2 {
+				require.Len(t, q.Batch(), 1)
+				synctest.Wait()
+				require.Len(t, done, 1, "one slot can only accept one producer")
+				require.True(t, <-done)
+			}
+			require.Equal(t, int64(3), qm.shards.enqueuedSamples.Load())
+			require.Equal(t, 3.0, client_testutil.ToFloat64(qm.metrics.pendingSamples))
+		})
+	})
+}
+
+func TestShardsEnqueueWakeup(t *testing.T) {
+	t.Run("quit while waiting for replacement", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType)
+			qm.shards.softShutdown = make(chan struct{})
+			close(qm.shards.softShutdown)
+			done := make(chan bool, 1)
+			go func() { done <- qm.shards.enqueue(1, timeSeries{}) }()
+			synctest.Wait()
+			require.Empty(t, done)
+			close(qm.quit)
+			synctest.Wait()
+			require.Len(t, done, 1)
+			require.False(t, <-done)
+		})
+	})
+	for _, protoMsg := range []remoteapi.WriteMessageType{remoteapi.WriteV1MessageType, remoteapi.WriteV2MessageType} {
+		for _, event := range []string{"capacity before HTTP completion", "quit", "reshard", "hard shutdown"} {
+			t.Run(fmt.Sprintf("%s/%s", protoMsg, event), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					entered, release := make(chan struct{}, 4), make(chan struct{}, 4)
+					client := &MockWriteClient{
+						NameFunc: func() string { return "test" }, EndpointFunc: func() string { return "http://test" },
+						StoreFunc: func(ctx context.Context, _ []byte, _ int) (WriteResponseStats, error) {
+							entered <- struct{}{}
+							select {
+							case <-release:
+								return WriteResponseStats{Samples: 1, Confirmed: true}, nil
+							case <-ctx.Done():
+								return WriteResponseStats{}, ctx.Err()
+							}
+						},
+					}
+					cfg := testDefaultQueueConfig()
+					cfg.MaxSamplesPerSend, cfg.Capacity = 1, 1
+					cfg.BatchSendDeadline = model.Duration(time.Hour)
+					qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, time.Second, client, protoMsg)
+					qm.shards.start(1)
+					data := timeSeries{seriesLabels: labels.FromStrings("__name__", "test"), timestamp: 1000}
+					require.True(t, qm.shards.enqueue(1, data))
+					<-entered
+					require.True(t, qm.shards.enqueue(1, data))
+					done := make(chan bool, 1)
+					go func() { done <- qm.shards.enqueue(1, data) }()
+					synctest.Wait()
+					require.Empty(t, done)
+					switch event {
+					case "capacity before HTTP completion":
+						release <- struct{}{}
+						<-entered
+						synctest.Wait()
+						require.Len(t, done, 1, "capacity must wake producers before the next HTTP request completes")
+						require.True(t, <-done)
+						release <- struct{}{}
+						release <- struct{}{}
+						qm.shards.stop()
+					case "quit":
+						close(qm.quit)
+						synctest.Wait()
+						require.Len(t, done, 1)
+						require.False(t, <-done)
+						release <- struct{}{}
+						release <- struct{}{}
+						qm.shards.stop()
+					case "reshard", "hard shutdown":
+						oldQueue := qm.shards.queues[0]
+						stopped := make(chan struct{})
+						go func() { qm.shards.stop(); close(stopped) }()
+						synctest.Wait()
+						if event == "reshard" {
+							release <- struct{}{}
+							release <- struct{}{}
+						} else {
+							time.Sleep(2 * time.Second)
+						}
+						<-stopped
+						synctest.Wait()
+						require.Empty(t, done, "soft shutdown must wait for replacement readiness")
+						qm.shards.start(2)
+						<-entered
+						synctest.Wait()
+						require.Len(t, done, 1)
+						require.True(t, <-done)
+						_, ok := <-oldQueue.Chan()
+						// Hard shutdown may leave an accepted batch for dropping.
+						if event == "reshard" {
+							require.False(t, ok)
+						}
+						release <- struct{}{}
+						qm.shards.stop()
+					}
+				})
+			})
+		}
+	}
+}
+
 func createDummyTimeSeries(instances int) []timeSeries {
 	metrics := []labels.Labels{
 		labels.FromStrings("__name__", "go_gc_duration_seconds", "quantile", "0"),

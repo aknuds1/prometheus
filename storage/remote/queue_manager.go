@@ -739,7 +739,6 @@ func (t *QueueManager) Append(samples []record.RefSample) bool {
 	batch := t.getNativeMetadataBatch()
 	defer batch.release()
 	currentTime := time.Now()
-outer:
 	for _, s := range samples {
 		if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), s.T) {
 			t.metrics.droppedSamplesTotal.WithLabelValues(reasonTooOld).Inc()
@@ -767,40 +766,19 @@ outer:
 				seriesLabels: lbls, metadata: meta, startTimestamp: s.ST,
 				timestamp: s.T, value: s.V, sType: tSample,
 			}
-			if !batch.append(t, s.Ref, model.Duration(5*time.Millisecond)) {
+			if !batch.append(t, s.Ref) {
 				return false
 			}
 			continue
 		}
-		// Start with a very small backoff. This should not be t.cfg.MinBackoff
-		// as it can happen without errors, and we want to pickup work after
-		// filling a queue/resharding as quickly as possible.
-		// TODO: Consider using the average duration of a request as the backoff.
-		backoff := model.Duration(5 * time.Millisecond)
-		for {
-			select {
-			case <-t.quit:
-				return false
-			default:
-			}
-			if t.shards.enqueue(s.Ref, timeSeries{
-				seriesLabels: lbls, metadata: meta, startTimestamp: s.ST,
-				timestamp: s.T, value: s.V, sType: tSample,
-			}) {
-				continue outer
-			}
-
-			t.metrics.enqueueRetriesTotal.Inc()
-			time.Sleep(time.Duration(backoff))
-			backoff *= 2
-			// It is reasonable to use t.cfg.MaxBackoff here, as if we have hit
-			// the full backoff we are likely waiting for external resources.
-			if backoff > t.cfg.MaxBackoff {
-				backoff = t.cfg.MaxBackoff
-			}
+		if !t.shards.enqueue(s.Ref, timeSeries{
+			seriesLabels: lbls, metadata: meta, startTimestamp: s.ST,
+			timestamp: s.T, value: s.V, sType: tSample,
+		}) {
+			return false
 		}
 	}
-	return batch.flush(t, model.Duration(5*time.Millisecond))
+	return batch.flush(t)
 }
 
 func (t *QueueManager) AppendExemplars(exemplars []record.RefExemplar) bool {
@@ -810,7 +788,6 @@ func (t *QueueManager) AppendExemplars(exemplars []record.RefExemplar) bool {
 	batch := t.getNativeMetadataBatch()
 	defer batch.release()
 	currentTime := time.Now()
-outer:
 	for _, e := range exemplars {
 		if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), e.T) {
 			t.metrics.droppedExemplarsTotal.WithLabelValues(reasonTooOld).Inc()
@@ -837,35 +814,19 @@ outer:
 				seriesLabels: lbls, metadata: meta, timestamp: e.T, value: e.V,
 				exemplarLabels: e.Labels, sType: tExemplar,
 			}
-			if !batch.append(t, e.Ref, t.cfg.MinBackoff) {
+			if !batch.append(t, e.Ref) {
 				return false
 			}
 			continue
 		}
-		// This will only loop if the queues are being resharded.
-		backoff := t.cfg.MinBackoff
-		for {
-			select {
-			case <-t.quit:
-				return false
-			default:
-			}
-			if t.shards.enqueue(e.Ref, timeSeries{
-				seriesLabels: lbls, metadata: meta, timestamp: e.T, value: e.V,
-				exemplarLabels: e.Labels, sType: tExemplar,
-			}) {
-				continue outer
-			}
-
-			t.metrics.enqueueRetriesTotal.Inc()
-			time.Sleep(time.Duration(backoff))
-			backoff *= 2
-			if backoff > t.cfg.MaxBackoff {
-				backoff = t.cfg.MaxBackoff
-			}
+		if !t.shards.enqueue(e.Ref, timeSeries{
+			seriesLabels: lbls, metadata: meta, timestamp: e.T, value: e.V,
+			exemplarLabels: e.Labels, sType: tExemplar,
+		}) {
+			return false
 		}
 	}
-	return batch.flush(t, t.cfg.MinBackoff)
+	return batch.flush(t)
 }
 
 func (t *QueueManager) AppendHistograms(histograms []record.RefHistogramSample) bool {
@@ -875,7 +836,6 @@ func (t *QueueManager) AppendHistograms(histograms []record.RefHistogramSample) 
 	batch := t.getNativeMetadataBatch()
 	defer batch.release()
 	currentTime := time.Now()
-outer:
 	for _, h := range histograms {
 		if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), h.T) {
 			t.metrics.droppedHistogramsTotal.WithLabelValues(reasonTooOld).Inc()
@@ -907,35 +867,20 @@ outer:
 				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
 				timestamp: h.T, histogram: h.H, sType: tHistogram,
 			}
-			if !batch.append(t, h.Ref, model.Duration(5*time.Millisecond)) {
+			if !batch.append(t, h.Ref) {
 				return false
 			}
 			continue
 		}
 
-		backoff := model.Duration(5 * time.Millisecond)
-		for {
-			select {
-			case <-t.quit:
-				return false
-			default:
-			}
-			if t.shards.enqueue(h.Ref, timeSeries{
-				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
-				timestamp: h.T, histogram: h.H, sType: tHistogram,
-			}) {
-				continue outer
-			}
-
-			t.metrics.enqueueRetriesTotal.Inc()
-			time.Sleep(time.Duration(backoff))
-			backoff *= 2
-			if backoff > t.cfg.MaxBackoff {
-				backoff = t.cfg.MaxBackoff
-			}
+		if !t.shards.enqueue(h.Ref, timeSeries{
+			seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
+			timestamp: h.T, histogram: h.H, sType: tHistogram,
+		}) {
+			return false
 		}
 	}
-	return batch.flush(t, model.Duration(5*time.Millisecond))
+	return batch.flush(t)
 }
 
 func (t *QueueManager) AppendFloatHistograms(floatHistograms []record.RefFloatHistogramSample) bool {
@@ -945,7 +890,6 @@ func (t *QueueManager) AppendFloatHistograms(floatHistograms []record.RefFloatHi
 	batch := t.getNativeMetadataBatch()
 	defer batch.release()
 	currentTime := time.Now()
-outer:
 	for _, h := range floatHistograms {
 		if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), h.T) {
 			t.metrics.droppedHistogramsTotal.WithLabelValues(reasonTooOld).Inc()
@@ -977,35 +921,20 @@ outer:
 				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
 				timestamp: h.T, floatHistogram: h.FH, sType: tFloatHistogram,
 			}
-			if !batch.append(t, h.Ref, model.Duration(5*time.Millisecond)) {
+			if !batch.append(t, h.Ref) {
 				return false
 			}
 			continue
 		}
 
-		backoff := model.Duration(5 * time.Millisecond)
-		for {
-			select {
-			case <-t.quit:
-				return false
-			default:
-			}
-			if t.shards.enqueue(h.Ref, timeSeries{
-				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
-				timestamp: h.T, floatHistogram: h.FH, sType: tFloatHistogram,
-			}) {
-				continue outer
-			}
-
-			t.metrics.enqueueRetriesTotal.Inc()
-			time.Sleep(time.Duration(backoff))
-			backoff *= 2
-			if backoff > t.cfg.MaxBackoff {
-				backoff = t.cfg.MaxBackoff
-			}
+		if !t.shards.enqueue(h.Ref, timeSeries{
+			seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
+			timestamp: h.T, floatHistogram: h.FH, sType: tFloatHistogram,
+		}) {
+			return false
 		}
 	}
-	return batch.flush(t, model.Duration(5*time.Millisecond))
+	return batch.flush(t)
 }
 
 // Start the queue manager sending samples to the remote storage.
@@ -1293,8 +1222,9 @@ func (t *QueueManager) reshardLoop() {
 
 func (t *QueueManager) newShards() *shards {
 	s := &shards{
-		qm:   t,
-		done: make(chan struct{}),
+		qm:        t,
+		done:      make(chan struct{}),
+		nextReady: make(chan struct{}),
 	}
 	return s
 }
@@ -1316,6 +1246,8 @@ type shards struct {
 
 	// Soft shutdown context will prevent new enqueues and deadlocks.
 	softShutdown chan struct{}
+	// nextReady closes only after replacement queues have been installed.
+	nextReady chan struct{}
 
 	// Hard shutdown context is used to terminate outgoing HTTP connections
 	// after giving them a chance to terminate.
@@ -1356,9 +1288,11 @@ func (s *shards) start(n int) {
 	for i := range n {
 		go s.runShard(hardShutdownCtx, i, newQueues[i])
 	}
+	close(s.nextReady)
+	s.nextReady = make(chan struct{})
 }
 
-// stop the shards; subsequent call to enqueue will return false.
+// stop the shards; subsequent enqueues wait for replacement shards or shutdown.
 func (s *shards) stop() {
 	// Attempt a clean shutdown, but only wait flushDeadline for all the shards
 	// to cleanly exit. As we're doing RPCs, enqueue can block indefinitely.
@@ -1397,38 +1331,59 @@ func (s *shards) stop() {
 	logDroppedError("histograms", s.histogramsDroppedOnHardShutdown)
 }
 
-// enqueue data (sample or exemplar). If the shard is full, shutting down, or
-// resharding, it will return false; in this case, you should back off and
-// retry. A shard is full when its configured capacity has been reached,
-// specifically, when s.queues[shard] has filled its batchQueue channel and the
-// partial batch has also been filled.
+// enqueue waits for capacity or replacement shards. It returns false on shutdown.
+// A notification permits a retry, not a reservation in the previously full queue.
 func (s *shards) enqueue(ref chunks.HeadSeriesRef, data timeSeries) bool {
-	s.mtx.RLock()
-	defer s.mtx.RUnlock()
-	shard := uint64(ref) % uint64(len(s.queues))
-	select {
-	case <-s.softShutdown:
-		return false
-	default:
-		appended := s.queues[shard].Append(data)
-		if !appended {
+	for {
+		select {
+		case <-s.qm.quit:
 			return false
-		}
-		switch data.sType {
-		case tSample:
-			s.qm.metrics.pendingSamples.Inc()
-			s.enqueuedSamples.Inc()
-		case tExemplar:
-			s.qm.metrics.pendingExemplars.Inc()
-			s.enqueuedExemplars.Inc()
-		case tHistogram, tFloatHistogram:
-			s.qm.metrics.pendingHistograms.Inc()
-			s.enqueuedHistograms.Inc()
 		default:
+		}
+		s.mtx.RLock()
+		stopping, ready := s.softShutdown, s.nextReady
+		var wait <-chan struct{}
+		select {
+		case <-stopping:
+			// Do not spin on a closed soft-shutdown channel while old shards drain.
+			wait, stopping = ready, nil
+		default:
+			shard := uint64(ref) % uint64(len(s.queues))
+			wait = s.queues[shard].Append(data)
+			if wait == nil {
+				switch data.sType {
+				case tSample:
+					s.qm.metrics.pendingSamples.Inc()
+					s.enqueuedSamples.Inc()
+				case tExemplar:
+					s.qm.metrics.pendingExemplars.Inc()
+					s.enqueuedExemplars.Inc()
+				case tHistogram, tFloatHistogram:
+					s.qm.metrics.pendingHistograms.Inc()
+					s.enqueuedHistograms.Inc()
+				}
+				if data.sType != tMetadata {
+					s.qm.metrics.highestTimestamp.Set(float64(data.timestamp / 1000))
+				}
+			}
+		}
+		s.mtx.RUnlock()
+		if wait == nil {
 			return true
 		}
-		s.qm.metrics.highestTimestamp.Set(float64(data.timestamp / 1000))
-		return true
+		s.qm.metrics.enqueueRetriesTotal.Inc()
+		select {
+		case <-s.qm.quit:
+			return false
+		case <-wait:
+		case <-stopping:
+			select {
+			case <-s.qm.quit:
+				return false
+			case <-ready:
+			}
+		}
+		// Re-resolve the shard after every wake-up; resharding may have won the race.
 	}
 }
 
@@ -1437,6 +1392,8 @@ type queue struct {
 	batchMtx   sync.Mutex
 	batch      []timeSeries
 	batchQueue chan []timeSeries
+	// spaceAvailable is allocated only when an append needs to wait.
+	spaceAvailable chan struct{}
 
 	// Since we know there are a limited number of batches out, using a stack
 	// is easy and safe so a sync.Pool is not necessary.
@@ -1483,9 +1440,9 @@ func newQueue(batchSize, capacity int) *queue {
 	}
 }
 
-// Append the timeSeries to the buffered batch. Returns false if it
-// cannot be added and must be retried.
-func (q *queue) Append(datum timeSeries) bool {
+// Append returns nil when datum was accepted, otherwise a capacity notification.
+// Registration and the failed append are atomic with respect to notification.
+func (q *queue) Append(datum timeSeries) <-chan struct{} {
 	q.batchMtx.Lock()
 	defer q.batchMtx.Unlock()
 	// TODO(cstyan): Check if metadata now means we've reduced the total # of samples
@@ -1497,14 +1454,25 @@ func (q *queue) Append(datum timeSeries) bool {
 		select {
 		case q.batchQueue <- q.batch:
 			q.batch = q.newBatch(cap(q.batch))
-			return true
+			return nil
 		default:
 			// Remove the sample we just appended. It will get retried.
 			q.batch = q.batch[:len(q.batch)-1]
-			return false
+			if q.spaceAvailable == nil {
+				q.spaceAvailable = make(chan struct{})
+			}
+			return q.spaceAvailable
 		}
 	}
-	return true
+	return nil
+}
+
+// notifyAvailableLocked wakes all producers to retry against current shards.
+func (q *queue) notifyAvailableLocked() {
+	if q.spaceAvailable != nil {
+		close(q.spaceAvailable)
+		q.spaceAvailable = nil
+	}
 }
 
 func (q *queue) Chan() <-chan []timeSeries {
@@ -1515,6 +1483,7 @@ func (q *queue) Chan() <-chan []timeSeries {
 func (q *queue) Batch() []timeSeries {
 	q.batchMtx.Lock()
 	defer q.batchMtx.Unlock()
+	defer q.notifyAvailableLocked()
 	select {
 	case batch := <-q.batchQueue:
 		return batch
@@ -1679,6 +1648,10 @@ func (s *shards) runShard(ctx context.Context, shardID int, queue *queue) {
 			if !ok {
 				return
 			}
+			// Receiving creates capacity even when the ensuing HTTP request blocks.
+			queue.batchMtx.Lock()
+			queue.notifyAvailableLocked()
+			queue.batchMtx.Unlock()
 
 			sendBatch(batch, s.qm.protoMsg, s.qm.compr, false)
 			// TODO(bwplotka): Previously the return was between popular and send.
