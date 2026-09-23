@@ -56,6 +56,46 @@ func (c nativeMetadataCancelContext) Err() error {
 func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 	a := metadata.Metadata{Type: model.MetricTypeCounter, Help: "a", Unit: "seconds"}
 	b := metadata.Metadata{Type: model.MetricTypeGauge, Help: "b"}
+	for _, deletion := range []string{"GC", "selected GC", "WAL replay", "reset"} {
+		t.Run("retirement before directory cleanup/"+deletion, func(t *testing.T) {
+			opts := newTestHeadDefaultOptions(1000, false)
+			opts.EnableNativeMetadata = true
+			head, _ := newTestHeadWithOptions(t, compression.None, opts)
+			app := head.AppenderV2(t.Context())
+			ref, err := app.Append(0, labels.FromStrings(labels.MetricName, "metric"), 0, 100, 1, nil, nil, storage.AOptions{Metadata: a})
+			require.NoError(t, err)
+			require.NoError(t, app.Commit())
+			store := head.nativeMetricMetadata
+			series := store.indexedSeries(chunks.HeadSeriesRef(ref))
+			native := series.metadata.Load().native
+			var deleted map[storage.SeriesRef]struct{}
+			switch deletion {
+			case "GC":
+				deleted, _, _, _, _, _, _, _, _ = head.series.gc(math.MaxInt64, 0)
+			case "selected GC":
+				deleted, _, _, _, _, _ = head.series.gcSeries([]storage.SeriesRef{ref}, math.MaxInt64, func(*memSeries) bool { return true })
+			case "WAL replay":
+				head.deleteSeriesByID([]chunks.HeadSeriesRef{chunks.HeadSeriesRef(ref)})
+			case "reset":
+				require.NoError(t, head.resetInMemoryState())
+			}
+			require.NotZero(t, native.flags.Load()&nativeMetadataRetired)
+			require.Equal(t, a, *native.metadata, "retirement must not change captured immutable history")
+			if deleted != nil {
+				require.Len(t, deleted, 1)
+				require.True(t, store.has(chunks.HeadSeriesRef(ref)), "exercise the cleanup window")
+			}
+			lookups := []storage.NativeMetricMetadataLookup{{Ref: ref, Timestamp: 100}}
+			require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
+			require.Nil(t, lookups[0].Metadata)
+			if deleted != nil {
+				store.delete(deleted)
+				store.delete(deleted)
+			}
+			require.Zero(t, store.series.Load())
+			require.Zero(t, store.versions.Load())
+		})
+	}
 	for _, tc := range []struct {
 		name       string
 		count      int

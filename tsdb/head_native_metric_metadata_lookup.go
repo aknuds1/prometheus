@@ -117,21 +117,14 @@ func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []st
 	for i := range lookups {
 		lookup := &lookups[i]
 		ref := chunks.HeadSeriesRef(lookup.Ref)
-		// The Head index protects membership and pointer capture, not selection.
-		// Publication excludes native changes, and GC leaves retired history
-		// unchanged. Do not take a series lock under this index lock.
-		index := h.series.refStripe(ref)
-		h.series.locks[index].RLock()
-		var native *nativeSeriesMetadata
-		if series := h.series.series[index][ref]; series != nil {
-			// Legacy commits may install the sidecar concurrently. Its pointer
-			// is atomic; legacy fields and packed series state are not read here.
-			if sidecar := series.metadata.Load(); sidecar != nil {
-				native = sidecar.native
-			}
+		series := store.indexedSeries(ref)
+		if series == nil {
+			continue
 		}
-		h.series.locks[index].RUnlock()
-		if native == nil || native.metadata == nil {
+		// Publication excludes changes. Directory publication guarantees native
+		// initialization, but Head removal may precede directory cleanup.
+		native := series.metadata.Load().native
+		if native.flags.Load()&nativeMetadataRetired != 0 {
 			continue
 		}
 		if native.effectiveFrom <= lookup.Timestamp {

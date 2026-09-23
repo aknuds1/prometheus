@@ -82,8 +82,12 @@ func nativeMetadataForTest(s *memSeries) *nativeSeriesMetadata {
 	if native == nil {
 		return nil
 	}
-	nativeCopy := *native
-	return &nativeCopy
+	nativeCopy := &nativeSeriesMetadata{
+		metadata: native.metadata, effectiveFrom: native.effectiveFrom,
+		handle: native.handle, older: slices.Clone(native.older),
+	}
+	nativeCopy.flags.Store(native.flags.Load())
+	return nativeCopy
 }
 
 // snapshot copies ref's series-owned history while holding its series lock.
@@ -98,7 +102,7 @@ func (s *nativeMetricMetadataStore) snapshot(ref chunks.HeadSeriesRef, snapshot 
 	snapshot.count = copy(snapshot.points[:], native.older)
 	snapshot.points[snapshot.count] = nativeMetricMetadataPoint{effectiveFrom: native.effectiveFrom, metadata: native.handle}
 	snapshot.count++
-	snapshot.truncated = native.truncated
+	snapshot.truncated = native.flags.Load()&nativeMetadataTruncated != 0
 	series.Unlock()
 	return true
 }
@@ -264,7 +268,7 @@ func TestNativeMetricMetadataStore(t *testing.T) {
 			point.effectiveFrom++
 			point.metadata, previous = previous, point.metadata
 		}))
-		require.True(t, native.truncated)
+		require.NotZero(t, native.flags.Load()&nativeMetadataTruncated)
 	})
 }
 
@@ -756,7 +760,7 @@ func TestNativeMetricMetadataStoreCapsVersions(t *testing.T) {
 	series := store.indexedSeries(ref)
 	backing := series.nativeMetadataLocked()
 	require.Nil(t, backing.older, "one version needs no older-point allocation")
-	require.False(t, backing.truncated)
+	require.Zero(t, backing.flags.Load()&nativeMetadataTruncated)
 	require.Zero(t, store.evictions.Load())
 
 	commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(observations, a))
@@ -1660,17 +1664,14 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 			orphans []chunks.HeadSeriesRef
 			stored  int64
 		)
-		for i := range head.nativeMetricMetadata.stripes {
-			stripe := &head.nativeMetricMetadata.stripes[i]
-			stripe.mtx.RLock()
-			for ref := range stripe.series {
-				stored++
-				if head.series.getByID(ref) == nil {
-					orphans = append(orphans, ref)
-				}
+		head.nativeMetricMetadata.directory.Range(func(key, _ any) bool {
+			ref := key.(chunks.HeadSeriesRef)
+			stored++
+			if head.series.getByID(ref) == nil {
+				orphans = append(orphans, ref)
 			}
-			stripe.mtx.RUnlock()
-		}
+			return true
+		})
 		require.Empty(t, orphans, "metadata retained for series the Head no longer has")
 		require.Positive(t, stored)
 		require.Equal(t, stored, head.nativeMetricMetadata.series.Load())

@@ -36,6 +36,11 @@ const (
 	nativeMetricMetadataPublicationPermits = math.MaxInt64
 )
 
+const (
+	nativeMetadataTruncated uint32 = 1 << iota
+	nativeMetadataRetired
+)
+
 // ErrNativeMetadataDisabled is returned when native metadata storage is not enabled.
 var ErrNativeMetadataDisabled = errors.New("native metadata is disabled; enable with --enable-feature=native-metadata")
 
@@ -60,14 +65,6 @@ type nativeMetricMetadataPoint struct {
 	metadata      unique.Handle[metadata.Metadata]
 }
 
-// nativeMetricMetadataStripe indexes series with committed native history.
-// Its mutex protects membership, not the series or their metadata. Release it
-// before taking a series or Head-index lock.
-type nativeMetricMetadataStripe struct {
-	mtx    sync.RWMutex
-	series map[chunks.HeadSeriesRef]*memSeries
-}
-
 // nativeMetricMetadataStore indexes series-owned native histories and coordinates
 // their publication to senders. Index entries retain retired series until cleanup;
 // they are not a substitute for revalidating membership in the Head.
@@ -78,7 +75,9 @@ type nativeMetricMetadataStore struct {
 	versions  atomic.Int64
 	evictions atomic.Uint64
 
-	stripes      [nativeMetricMetadataStripes]nativeMetricMetadataStripe
+	// directory maps full-width references to series with initialized native state.
+	// Presence is only a candidate filter; forwarding also checks retirement.
+	directory    sync.Map
 	appenderPool sync.Pool
 	// Commits hold one permit from before WAL logging through cache publication.
 	// Senders acquire all permits for a bounded lookup batch. FIFO acquisition
@@ -87,23 +86,21 @@ type nativeMetricMetadataStore struct {
 }
 
 func newNativeMetricMetadataStore() *nativeMetricMetadataStore {
-	s := &nativeMetricMetadataStore{publication: semaphore.NewWeighted(nativeMetricMetadataPublicationPermits)}
-	for i := range s.stripes {
-		s.stripes[i].series = make(map[chunks.HeadSeriesRef]*memSeries)
-	}
-	return s
+	return &nativeMetricMetadataStore{publication: semaphore.NewWeighted(nativeMetricMetadataPublicationPermits)}
 }
 
-func (s *nativeMetricMetadataStore) stripe(ref chunks.HeadSeriesRef) *nativeMetricMetadataStripe {
-	return &s.stripes[uint64(ref)%nativeMetricMetadataStripes]
+// publishLocked makes fully initialized native state visible before releasing
+// the series lock. Existing histories never republish directory membership.
+func (s *nativeMetricMetadataStore) publishLocked(series *memSeries) {
+	s.directory.Store(series.ref, series)
 }
 
 func (s *nativeMetricMetadataStore) indexedSeries(ref chunks.HeadSeriesRef) *memSeries {
-	stripe := s.stripe(ref)
-	stripe.mtx.RLock()
-	series := stripe.series[ref]
-	stripe.mtx.RUnlock()
-	return series
+	series, ok := s.directory.Load(ref)
+	if !ok {
+		return nil
+	}
+	return series.(*memSeries)
 }
 
 func (s *nativeMetricMetadataStore) has(ref chunks.HeadSeriesRef) bool {
@@ -111,58 +108,36 @@ func (s *nativeMetricMetadataStore) has(ref chunks.HeadSeriesRef) bool {
 }
 
 func (s *nativeMetricMetadataStore) delete(refs map[storage.SeriesRef]struct{}) {
-	var byStripe [nativeMetricMetadataStripes][]chunks.HeadSeriesRef
+	var removed, versions int64
 	for ref := range refs {
-		headRef := chunks.HeadSeriesRef(ref)
-		stripe := uint64(headRef) % nativeMetricMetadataStripes
-		byStripe[stripe] = append(byStripe[stripe], headRef)
-	}
-	for i := range nativeMetricMetadataStripes {
-		stripeRefs := byStripe[i]
-		if len(stripeRefs) == 0 {
+		value, ok := s.directory.LoadAndDelete(chunks.HeadSeriesRef(ref))
+		if !ok {
 			continue
 		}
-		stripe := &s.stripes[i]
-		var retired []*memSeries
-		stripe.mtx.Lock()
-		for _, ref := range stripeRefs {
-			if series := stripe.series[ref]; series != nil {
-				delete(stripe.series, ref)
-				retired = append(retired, series)
-			}
-		}
-		stripe.mtx.Unlock()
-		// Head deletion has already excluded pending commits. Never take a
-		// series lock under the index lock, and never clear retired native state:
-		// an in-flight forwarding lookup may still hold its pointer.
-		var versions int64
-		for _, series := range retired {
-			series.Lock()
-			versions += int64(len(series.nativeMetadataLocked().older) + 1)
-			series.Unlock()
-		}
-		s.series.Add(-int64(len(retired)))
-		s.versions.Add(-versions)
+		// Head deletion has excluded pending commits. Account outside directory
+		// synchronization, leaving captured history unchanged.
+		series := value.(*memSeries)
+		series.Lock()
+		versions += int64(len(series.nativeMetadataLocked().older) + 1)
+		series.Unlock()
+		removed++
 	}
+	s.series.Add(-removed)
+	s.versions.Add(-versions)
 }
 
 // reset clears presence and current series/version counts after replacing Head
 // series, while preserving cumulative evictions. The caller must exclude
 // concurrent store mutations.
 func (s *nativeMetricMetadataStore) reset() {
-	for i := range s.stripes {
-		stripe := &s.stripes[i]
-		stripe.mtx.Lock()
-		stripe.series = make(map[chunks.HeadSeriesRef]*memSeries)
-		stripe.mtx.Unlock()
-	}
+	s.directory.Clear()
 	s.series.Store(0)
 	s.versions.Store(0)
 }
 
 // nativeSeriesMetadata owns a series' committed history, with its newest point
 // inline and up to four chronological older points. Adjacent values differ;
-// truncated remains set after an eviction, even if the history later collapses.
+// Truncation remains set after an eviction, even if the history later collapses.
 // The series lock protects updates. Forwarding may read native state under the
 // publication barrier; deletion must therefore leave retired history unchanged.
 type nativeSeriesMetadata struct {
@@ -170,7 +145,25 @@ type nativeSeriesMetadata struct {
 	effectiveFrom int64
 	handle        unique.Handle[metadata.Metadata]
 	older         []nativeMetricMetadataPoint
-	truncated     bool
+	// Retirement is also visible to readers holding a detached directory page.
+	flags atomic.Uint32
+}
+
+// retireNativeMetadata invalidates future lookups without changing captured history.
+// Callers hold the series lock, except mutation-quiescent reset and WAL replay.
+func (s *memSeries) retireNativeMetadata() {
+	if sidecar := s.metadata.Load(); sidecar != nil && sidecar.native != nil {
+		sidecar.native.setFlag(nativeMetadataRetired)
+	}
+}
+
+func (n *nativeSeriesMetadata) setFlag(flag uint32) {
+	for {
+		old := n.flags.Load()
+		if old&flag != 0 || n.flags.CompareAndSwap(old, old|flag) {
+			return
+		}
+	}
 }
 
 // mergeLocked merges non-empty, strictly timestamp-ordered observations. It
@@ -239,7 +232,7 @@ func (n *nativeSeriesMetadata) mergeLocked(observations []nativeMetricMetadataPo
 		n.older = nil
 	}
 	if evictions > 0 {
-		n.truncated = true
+		n.setFlag(nativeMetadataTruncated)
 	}
 	return len(n.older) + 1 - oldCount, evictions
 }
@@ -394,7 +387,7 @@ func (h *Head) nativeMetricMetadataForPostings(ctx context.Context, p index.Post
 		snapshot.count = copy(snapshot.points[:], native.older)
 		snapshot.points[snapshot.count] = nativeMetricMetadataPoint{effectiveFrom: native.effectiveFrom, metadata: native.handle}
 		snapshot.count++
-		snapshot.truncated = native.truncated
+		snapshot.truncated = native.flags.Load()&nativeMetadataTruncated != 0
 		lset := series.lset
 		series.Unlock()
 		// Only a live additional row proves truncation. Do not expand its metadata.

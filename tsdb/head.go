@@ -388,6 +388,8 @@ func (h *Head) resetInMemoryState() error {
 		// reset the existing series to make sure we call the appropriated hooks
 		// and increment the series removed metrics
 		fs := h.series.iterForDeletion(func(_ int, _ uint64, s *memSeries, flushedForCallback map[chunks.HeadSeriesRef]labels.Labels) {
+			// Reset excludes mutations; retire native state before replacing Head membership.
+			s.retireNativeMetadata()
 			// All series should be flushed
 			flushedForCallback[s.ref] = s.lset
 		})
@@ -2522,6 +2524,8 @@ func (h *Head) deleteSeriesByID(refs []chunks.HeadSeriesRef) {
 			h.series.locks[stripe].Unlock()
 			continue
 		}
+		// Replay excludes mutations, so retirement needs no series lock here.
+		series.retireNativeMetadata()
 		delete(h.series.series[stripe], series.ref)
 		h.series.locks[stripe].Unlock()
 
@@ -2945,6 +2949,7 @@ func (s *memSeries) isGCed() bool {
 
 func (s *memSeries) setGCed() {
 	s.state |= seriesGCedFlag
+	s.retireNativeMetadata()
 }
 
 func (s *memSeries) hasComputedHistogramChunkEndTime() bool {

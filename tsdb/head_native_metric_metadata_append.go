@@ -382,10 +382,7 @@ func (s *nativeMetricMetadataStore) commitBatch(appender *nativeMetricMetadataAp
 			native.metadata = appender.shared[native.handle]
 		}
 		if first {
-			stripe := s.stripe(series.ref)
-			stripe.mtx.Lock()
-			stripe.series[series.ref] = series
-			stripe.mtx.Unlock()
+			s.publishLocked(series)
 		}
 		series.Unlock()
 	}
