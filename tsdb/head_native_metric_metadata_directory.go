@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	nativeMetadataPageBits = 8
-	nativeMetadataPageSize = 1 << nativeMetadataPageBits
+	nativeMetadataPageBits                = 8
+	nativeMetadataPageSize                = 1 << nativeMetadataPageBits
+	nativeMetadataDirectoryHashMultiplier = uint64(0x9e3779b97f4a7c15)
 )
 
 // The sentinel reserves pointer identity, not a series reference (including zero).
@@ -36,10 +37,20 @@ var nativeMetadataDirectoryTombstone = new(memSeries)
 // write lock protects live/used counts and all mutations; replacements are never
 // pooled, so captured pages remain safe until Go's GC reclaims them.
 type nativeMetricMetadataPage struct {
-	slots []atomic.Pointer[memSeries]
-	dense bool
-	live  int
-	used  int
+	slots     []atomic.Pointer[memSeries]
+	dense     bool
+	hashShift uint8
+	live      int
+	used      int
+}
+
+func newNativeMetricMetadataPage(capacity int) *nativeMetricMetadataPage {
+	return &nativeMetricMetadataPage{
+		slots: make([]atomic.Pointer[memSeries], capacity),
+		dense: capacity == nativeMetadataPageSize,
+		// Use high product bits to spread both adjacent and strided references.
+		hashShift: uint8(64 - bits.TrailingZeros(uint(capacity))),
+	}
 }
 
 func (p *nativeMetricMetadataPage) lookup(ref chunks.HeadSeriesRef) *memSeries {
@@ -47,7 +58,7 @@ func (p *nativeMetricMetadataPage) lookup(ref chunks.HeadSeriesRef) *memSeries {
 		return p.slots[uint8(ref)].Load()
 	}
 	mask := len(p.slots) - 1
-	start := int(bits.Reverse8(uint8(ref)))
+	start := int((uint64(ref) * nativeMetadataDirectoryHashMultiplier) >> p.hashShift)
 	for probe := range len(p.slots) {
 		series := p.slots[(start+probe)&mask].Load()
 		if series == nil {
@@ -68,7 +79,7 @@ func (p *nativeMetricMetadataPage) slot(ref chunks.HeadSeriesRef) int {
 	}
 	firstTombstone := -1
 	mask := len(p.slots) - 1
-	start := int(bits.Reverse8(uint8(ref)))
+	start := int((uint64(ref) * nativeMetadataDirectoryHashMultiplier) >> p.hashShift)
 	for probe := range len(p.slots) {
 		index := (start + probe) & mask
 		series := p.slots[index].Load()
@@ -104,9 +115,7 @@ func (p *nativeMetricMetadataPage) insert(series *memSeries) {
 }
 
 func (p *nativeMetricMetadataPage) rebuild(capacity int) *nativeMetricMetadataPage {
-	replacement := &nativeMetricMetadataPage{
-		slots: make([]atomic.Pointer[memSeries], capacity), dense: capacity == nativeMetadataPageSize,
-	}
+	replacement := newNativeMetricMetadataPage(capacity)
 	for i := range p.slots {
 		series := p.slots[i].Load()
 		if series != nil && series != nativeMetadataDirectoryTombstone {
@@ -146,7 +155,7 @@ func (s *nativeMetricMetadataStore) publishLocked(series *memSeries) {
 			s.directory.Store(key, series)
 			return
 		}
-		replacement := &nativeMetricMetadataPage{slots: make([]atomic.Pointer[memSeries], 4)}
+		replacement := newNativeMetricMetadataPage(4)
 		replacement.insert(page)
 		replacement.insert(series)
 		s.directory.Store(key, replacement)

@@ -14,10 +14,12 @@
 package tsdb
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/atomic"
@@ -28,6 +30,38 @@ import (
 )
 
 func TestNativeMetricMetadataDirectory(t *testing.T) {
+	t.Run("hash shift occupies existing page padding", func(t *testing.T) {
+		type originalPage struct {
+			_ []atomic.Pointer[memSeries]
+			_ bool
+			_ int
+			_ int
+		}
+		require.Equal(t, unsafe.Sizeof(originalPage{}), unsafe.Sizeof(nativeMetricMetadataPage{}))
+	})
+	t.Run("patterned full width references at every capacity", func(t *testing.T) {
+		for _, capacity := range []int{4, 8, 16, 32, 64, 128, 256} {
+			for _, key := range []uint64{0, 1, 1 << 24, math.MaxUint64 >> nativeMetadataPageBits} {
+				for _, stride := range []int{1, 4, 16, 64} {
+					t.Run(fmt.Sprintf("capacity=%d/page=%d/stride=%d", capacity, key, stride), func(t *testing.T) {
+						page := newNativeMetricMetadataPage(capacity)
+						want := map[chunks.HeadSeriesRef]*memSeries{}
+						for residue := range stride {
+							for offset := residue; offset < nativeMetadataPageSize && len(want) < capacity*3/4; offset += stride {
+								ref := chunks.HeadSeriesRef(key<<nativeMetadataPageBits | uint64(offset))
+								want[ref] = &memSeries{ref: ref}
+								page.insert(want[ref])
+							}
+						}
+						for offset := range nativeMetadataPageSize {
+							ref := chunks.HeadSeriesRef(key<<nativeMetadataPageBits | uint64(offset))
+							require.Same(t, want[ref], page.lookup(ref))
+						}
+					})
+				}
+			}
+		}
+	})
 	t.Run("representation growth demotion and detached readers", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		point := makeNativeMetricMetadataPoint(100, metadata.Metadata{Help: "test"})
@@ -97,21 +131,25 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 	})
 
 	t.Run("probe chains tombstones and bounded misses", func(t *testing.T) {
-		page := &nativeMetricMetadataPage{slots: make([]atomic.Pointer[memSeries], 8)}
-		for ref := range 6 {
-			page.insert(&memSeries{ref: chunks.HeadSeriesRef(ref)})
+		page := newNativeMetricMetadataPage(8)
+		var refs []chunks.HeadSeriesRef
+		for ref := chunks.HeadSeriesRef(0); len(refs) < 6; ref++ {
+			if (uint64(ref)*nativeMetadataDirectoryHashMultiplier)>>page.hashShift == 0 {
+				refs = append(refs, ref)
+				page.insert(&memSeries{ref: ref})
+			}
 		}
-		first := page.slot(0)
+		first := page.slot(refs[0])
 		page.slots[first].Store(nativeMetadataDirectoryTombstone)
 		page.live--
-		for ref := 1; ref < 6; ref++ {
-			require.Equal(t, chunks.HeadSeriesRef(ref), page.lookup(chunks.HeadSeriesRef(ref)).ref)
+		for _, ref := range refs[1:] {
+			require.Equal(t, ref, page.lookup(ref).ref)
 		}
-		page.insert(&memSeries{ref: 0})
+		page.insert(&memSeries{ref: refs[0]})
 		require.Equal(t, 6, page.live)
 		require.Equal(t, 6, page.used, "reusing a tombstone does not increase used occupancy")
-		require.Equal(t, first, page.slot(0))
-		require.Nil(t, page.lookup(100))
+		require.Equal(t, first, page.slot(refs[0]))
+		require.Nil(t, page.lookup(1<<32))
 		for i := range page.slots {
 			page.slots[i].Store(nativeMetadataDirectoryTombstone)
 		}
