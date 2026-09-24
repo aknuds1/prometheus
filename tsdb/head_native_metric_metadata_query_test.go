@@ -105,6 +105,92 @@ func TestHeadNativeMetricMetadataQueryConcurrentDeletion(t *testing.T) {
 }
 
 func TestNativeMetricMetadataPostings(t *testing.T) {
+	t.Run("cached pages follow completed mutations", func(t *testing.T) {
+		for _, tc := range []struct {
+			name                    string
+			seed                    int
+			add, remove             []int
+			reset, update           bool
+			target                  int
+			want, generationChanged bool
+		}{
+			{name: "absent page published", add: []int{0}, want: true, generationChanged: true},
+			{name: "singleton grows", seed: 1, add: []int{1}, target: 1, want: true, generationChanged: true},
+			{name: "sparse slot inserted", seed: 2, add: []int{2}, target: 2, want: true},
+			{name: "sparse page replaced", seed: 3, add: []int{3}, target: 3, want: true, generationChanged: true},
+			{name: "dense slot inserted", seed: 97, add: []int{97}, target: 97, want: true},
+			{name: "sparse slot removed", seed: 3, remove: []int{2}, target: 2},
+			{name: "dense slot removed", seed: 100, remove: []int{99}, target: 99},
+			{name: "dense page demoted", seed: 97, remove: []int{80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96}, target: 79, want: true, generationChanged: true},
+			{name: "page becomes singleton", seed: 2, remove: []int{1}, want: true, generationChanged: true},
+			{name: "last member removed", seed: 1, remove: []int{0}, generationChanged: true},
+			{name: "reset", seed: 2, reset: true, generationChanged: true},
+			{name: "reset and recreate", seed: 2, reset: true, add: []int{0}, want: true, generationChanged: true},
+			{name: "history update", seed: 3, update: true, want: true},
+			{name: "last full width reference", seed: 1, add: []int{255}, target: 255, want: true, generationChanged: true},
+		} {
+			for _, seek := range []bool{false, true} {
+				t.Run(tc.name+"/seek="+strconv.FormatBool(seek), func(t *testing.T) {
+					store := newNativeMetricMetadataStore()
+					base := chunks.HeadSeriesRef(math.MaxUint64 & ^uint64(nativeMetadataPageSize-1))
+					for offset := range tc.seed {
+						commitNativeMetricMetadata(store, base+chunks.HeadSeriesRef(offset), makeNativeMetricMetadataPoint(100, metadata.Metadata{Help: "initial"}))
+					}
+					p := &nativeMetricMetadataPostings{store: store}
+					require.Equal(t, tc.seed > 0, p.has(base))
+					before := store.directoryGeneration.Load()
+					if tc.reset {
+						store.reset()
+					}
+					if len(tc.remove) > 0 {
+						refs := map[storage.SeriesRef]struct{}{}
+						for _, offset := range tc.remove {
+							ref := base + chunks.HeadSeriesRef(offset)
+							series := store.indexedSeries(ref)
+							series.Lock()
+							series.setGCed()
+							series.Unlock()
+							refs[storage.SeriesRef(ref)] = struct{}{}
+						}
+						store.delete(refs)
+					}
+					for _, offset := range tc.add {
+						commitNativeMetricMetadata(store, base+chunks.HeadSeriesRef(offset), makeNativeMetricMetadataPoint(200, metadata.Metadata{Help: "new"}))
+					}
+					if tc.update {
+						commitNativeMetricMetadata(store, base, makeNativeMetricMetadataPoint(200, metadata.Metadata{Help: "changed"}))
+					}
+					require.Equal(t, tc.generationChanged, store.directoryGeneration.Load() != before)
+					ref := base + chunks.HeadSeriesRef(tc.target)
+					p.Postings = index.NewListPostings([]storage.SeriesRef{storage.SeriesRef(ref)})
+					var got bool
+					if seek {
+						got = p.Seek(storage.SeriesRef(ref))
+					} else {
+						got = p.Next()
+					}
+					require.Equal(t, tc.want, got)
+					if got {
+						require.Equal(t, storage.SeriesRef(ref), p.At())
+						require.Same(t, store.indexedSeries(ref), nativeMetadataDirectorySeries(p.page, ref))
+					}
+				})
+			}
+		}
+	})
+	t.Run("capture racing replacement retains the earlier generation", func(t *testing.T) {
+		store := newNativeMetricMetadataStore()
+		point := makeNativeMetricMetadataPoint(100, metadata.Metadata{Help: "initial"})
+		commitNativeMetricMetadata(store, 0, point)
+		generation := store.directoryGeneration.Load()
+		page, _ := store.directory.Load(uint64(0))
+		commitNativeMetricMetadata(store, 1, point)
+		p := &nativeMetricMetadataPostings{store: store, page: page, pageKey: 0, pageGeneration: generation, pageCached: true}
+		require.True(t, p.has(1))
+		require.Equal(t, store.directoryGeneration.Load(), p.pageGeneration)
+		require.False(t, p.has(256), "a different page must not reuse the cached value")
+		require.True(t, p.has(0), "returning to page zero must reload it")
+	})
 	t.Run("Next and Seek filter refs", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		commitNativeMetricMetadata(store, 1, makeNativeMetricMetadataPoint(1, metadata.Metadata{Help: "one"}))

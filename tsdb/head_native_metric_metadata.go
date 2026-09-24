@@ -74,6 +74,8 @@ type nativeMetricMetadataStore struct {
 	series    atomic.Int64
 	versions  atomic.Int64
 	evictions atomic.Uint64
+	// Directory identity changes invalidate query-local page caches.
+	directoryGeneration atomic.Uint64
 
 	// directory maps full-width page keys to singleton series or typed pages.
 	// Membership implies initialized native state, but forwarding checks retirement.
@@ -104,6 +106,7 @@ func (s *nativeMetricMetadataStore) has(ref chunks.HeadSeriesRef) bool {
 // concurrent store mutations.
 func (s *nativeMetricMetadataStore) reset() {
 	s.directory.Clear()
+	s.directoryGeneration.Inc()
 	s.series.Store(0)
 	s.versions.Store(0)
 }
@@ -281,12 +284,28 @@ func (s *nativeMetricMetadataSnapshot) expand() []NativeMetricMetadataVersion {
 
 type nativeMetricMetadataPostings struct {
 	index.Postings
-	store *nativeMetricMetadataStore
+	store          *nativeMetricMetadataStore
+	page           any
+	pageKey        uint64
+	pageGeneration uint64
+	pageCached     bool
+}
+
+func (p *nativeMetricMetadataPostings) has(ref chunks.HeadSeriesRef) bool {
+	key := uint64(ref) >> nativeMetadataPageBits
+	// Capture before Load: a replacement racing with Load must invalidate the
+	// captured value, not let it inherit the replacement's newer generation.
+	generation := p.store.directoryGeneration.Load()
+	if !p.pageCached || key != p.pageKey || generation != p.pageGeneration {
+		p.page, _ = p.store.directory.Load(key)
+		p.pageKey, p.pageGeneration, p.pageCached = key, generation, true
+	}
+	return nativeMetadataDirectorySeries(p.page, ref) != nil
 }
 
 func (p *nativeMetricMetadataPostings) Next() bool {
 	for p.Postings.Next() {
-		if p.store.has(chunks.HeadSeriesRef(p.At())) {
+		if p.has(chunks.HeadSeriesRef(p.At())) {
 			return true
 		}
 	}
@@ -297,7 +316,7 @@ func (p *nativeMetricMetadataPostings) Seek(ref storage.SeriesRef) bool {
 	if !p.Postings.Seek(ref) {
 		return false
 	}
-	if p.store.has(chunks.HeadSeriesRef(p.At())) {
+	if p.has(chunks.HeadSeriesRef(p.At())) {
 		return true
 	}
 	return p.Next()

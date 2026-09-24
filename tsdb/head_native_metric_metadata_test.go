@@ -137,6 +137,7 @@ func TestNativeMetricMetadataStore(t *testing.T) {
 			{name: "series", pointer: unsafe.Pointer(&store.series)},
 			{name: "versions", pointer: unsafe.Pointer(&store.versions)},
 			{name: "evictions", pointer: unsafe.Pointer(&store.evictions)},
+			{name: "directory generation", pointer: unsafe.Pointer(&store.directoryGeneration)},
 		} {
 			require.Zero(t, uintptr(tc.pointer)%8, "%s counter must be 64-bit aligned", tc.name)
 		}

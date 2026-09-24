@@ -139,6 +139,20 @@ func nativeMetadataDirectorySeries(value any, ref chunks.HeadSeriesRef) *memSeri
 	return nil
 }
 
+// storeDirectoryPage publishes a directory value under its page-key write lock.
+func (s *nativeMetricMetadataStore) storeDirectoryPage(key uint64, value any) {
+	s.directory.Store(key, value)
+	// Invalidate after publication and before releasing the writer's lock.
+	// In-place atomic slot updates need no invalidation of a captured page.
+	s.directoryGeneration.Inc()
+}
+
+// deleteDirectoryPage removes a directory value under its page-key write lock.
+func (s *nativeMetricMetadataStore) deleteDirectoryPage(key uint64) {
+	s.directory.Delete(key)
+	s.directoryGeneration.Inc()
+}
+
 // publishLocked publishes initialized state before releasing the series lock.
 // Directory writers never acquire a series or Head-index lock while locked.
 func (s *nativeMetricMetadataStore) publishLocked(series *memSeries) {
@@ -149,16 +163,16 @@ func (s *nativeMetricMetadataStore) publishLocked(series *memSeries) {
 	value, _ := s.directory.Load(key)
 	switch page := value.(type) {
 	case nil:
-		s.directory.Store(key, series)
+		s.storeDirectoryPage(key, series)
 	case *memSeries:
 		if page.ref == series.ref {
-			s.directory.Store(key, series)
+			s.storeDirectoryPage(key, series)
 			return
 		}
 		replacement := newNativeMetricMetadataPage(4)
 		replacement.insert(page)
 		replacement.insert(series)
-		s.directory.Store(key, replacement)
+		s.storeDirectoryPage(key, replacement)
 	case *nativeMetricMetadataPage:
 		if page.dense || page.lookup(series.ref) != nil {
 			page.insert(series)
@@ -173,7 +187,7 @@ func (s *nativeMetricMetadataStore) publishLocked(series *memSeries) {
 		}
 		replacement.insert(series)
 		if replacement != page {
-			s.directory.Store(key, replacement)
+			s.storeDirectoryPage(key, replacement)
 		}
 	}
 }
@@ -192,7 +206,7 @@ func (s *nativeMetricMetadataStore) delete(refs map[storage.SeriesRef]struct{}) 
 		switch page := value.(type) {
 		case *memSeries:
 			if slices.Contains(refs, page.ref) {
-				s.directory.Delete(key)
+				s.deleteDirectoryPage(key)
 				retired = append(retired, page)
 			}
 		case *nativeMetricMetadataPage:
@@ -216,24 +230,24 @@ func (s *nativeMetricMetadataStore) delete(refs map[storage.SeriesRef]struct{}) 
 			}
 			switch {
 			case page.live == 0:
-				s.directory.Delete(key)
+				s.deleteDirectoryPage(key)
 			case page.live == 1:
 				for i := range page.slots {
 					if series := page.slots[i].Load(); series != nil && series != nativeMetadataDirectoryTombstone {
-						s.directory.Store(key, series)
+						s.storeDirectoryPage(key, series)
 						break
 					}
 				}
 			case page.dense && page.live <= 80:
-				s.directory.Store(key, page.rebuild(128))
+				s.storeDirectoryPage(key, page.rebuild(128))
 			case !page.dense && page.live <= len(page.slots)/4:
 				capacity := 4
 				for page.live*4 > capacity*3 {
 					capacity *= 2
 				}
-				s.directory.Store(key, page.rebuild(capacity))
+				s.storeDirectoryPage(key, page.rebuild(capacity))
 			case !page.dense && page.used-page.live > page.live:
-				s.directory.Store(key, page.rebuild(len(page.slots)))
+				s.storeDirectoryPage(key, page.rebuild(len(page.slots)))
 			}
 		}
 		lock.Unlock()

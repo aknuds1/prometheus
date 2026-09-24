@@ -164,6 +164,7 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 		var readers sync.WaitGroup
 		for range 4 {
 			readers.Go(func() {
+				postings := &nativeMetricMetadataPostings{store: store}
 				for {
 					select {
 					case <-done:
@@ -171,6 +172,7 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 					default:
 					}
 					for ref := range nativeMetadataPageSize {
+						postings.has(chunks.HeadSeriesRef(ref))
 						if series := store.indexedSeries(chunks.HeadSeriesRef(ref)); series != nil && series.ref != chunks.HeadSeriesRef(ref) {
 							t.Errorf("wrong reference: %d for %d", series.ref, ref)
 							return
