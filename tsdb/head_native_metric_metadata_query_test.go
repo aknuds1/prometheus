@@ -121,7 +121,7 @@ func TestNativeMetricMetadataPostings(t *testing.T) {
 			{name: "dense slot inserted", seed: 97, add: []int{97}, target: 97, want: true},
 			{name: "sparse slot removed", seed: 3, remove: []int{2}, target: 2},
 			{name: "dense slot removed", seed: 100, remove: []int{99}, target: 99},
-			{name: "dense page demoted", seed: 97, remove: []int{80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96}, target: 79, want: true, generationChanged: true},
+			{name: "dense page retained", seed: 97, remove: []int{80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96}, target: 79, want: true},
 			{name: "page becomes singleton", seed: 2, remove: []int{1}, want: true, generationChanged: true},
 			{name: "last member removed", seed: 1, remove: []int{0}, generationChanged: true},
 			{name: "reset", seed: 2, reset: true, generationChanged: true},

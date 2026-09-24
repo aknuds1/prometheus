@@ -115,9 +115,7 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 				require.Len(t, value.(*nativeMetricMetadataPage).slots, 32)
 			case 32:
 				require.Len(t, value.(*nativeMetricMetadataPage).slots, 64)
-			case 80:
-				require.Len(t, value.(*nativeMetricMetadataPage).slots, 128)
-			case 81:
+			case 33, 64, 80, 81:
 				require.True(t, value.(*nativeMetricMetadataPage).dense)
 			}
 		}
@@ -128,6 +126,80 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 		require.NotZero(t, series.metadata.Load().native.flags.Load()&nativeMetadataRetired)
 		require.Equal(t, "test", series.metadata.Load().native.metadata.Help)
 		require.Zero(t, store.versions.Load())
+	})
+
+	t.Run("bulk and staged deletion retain membership through regrowth", func(t *testing.T) {
+		for _, live := range []int{0, 1, 2, 31, 32, 33, 64, 80, 81, 96, 97, 256} {
+			for _, staged := range []bool{false, true} {
+				t.Run(fmt.Sprintf("live=%d/staged=%t", live, staged), func(t *testing.T) {
+					store := newNativeMetricMetadataStore()
+					base := chunks.HeadSeriesRef(math.MaxUint64 & ^uint64(nativeMetadataPageSize-1))
+					point := makeNativeMetricMetadataPoint(100, metadata.Metadata{Help: "initial"})
+					for offset := range nativeMetadataPageSize {
+						commitNativeMetricMetadata(store, base+chunks.HeadSeriesRef(offset), point)
+					}
+					captured, _ := store.directory.Load(uint64(base) >> nativeMetadataPageBits)
+					postings := &nativeMetricMetadataPostings{store: store}
+					require.True(t, postings.has(base))
+					remaining := nativeMetadataPageSize
+					targets := []int{live}
+					if staged && live < 64 {
+						targets = []int{64, live}
+					}
+					for _, target := range targets {
+						deleted := map[storage.SeriesRef]struct{}{}
+						for offset := target; offset < remaining; offset++ {
+							ref := base + chunks.HeadSeriesRef(offset)
+							series := store.indexedSeries(ref)
+							series.Lock()
+							series.setGCed()
+							series.Unlock()
+							deleted[storage.SeriesRef(ref)] = struct{}{}
+						}
+						store.delete(deleted)
+						remaining = target
+					}
+					value, exists := store.directory.Load(uint64(base) >> nativeMetadataPageBits)
+					switch live {
+					case 0:
+						require.False(t, exists)
+					case 1:
+						require.IsType(t, &memSeries{}, value)
+					default:
+						page := value.(*nativeMetricMetadataPage)
+						capacity := nativeMetadataPageSize
+						if live <= 32 {
+							capacity = 4
+							for live*4 > capacity*3 {
+								capacity *= 2
+							}
+						}
+						require.Len(t, page.slots, capacity)
+						require.Equal(t, live, page.live)
+					}
+					require.Equal(t, int64(live), store.series.Load())
+					require.Equal(t, int64(live), store.versions.Load())
+					for offset := range nativeMetadataPageSize {
+						ref := base + chunks.HeadSeriesRef(offset)
+						require.Equal(t, offset < live, postings.has(ref))
+						require.Equal(t, offset < live, store.indexedSeries(ref) != nil)
+						if offset >= live {
+							require.Nil(t, nativeMetadataDirectorySeries(captured, ref))
+						}
+					}
+					// Re-publication must invalidate singleton and sparse cached pages.
+					for offset := live; offset < nativeMetadataPageSize; offset++ {
+						ref := base + chunks.HeadSeriesRef(offset)
+						commitNativeMetricMetadata(store, ref, point)
+						require.True(t, postings.has(ref))
+					}
+					require.Equal(t, int64(nativeMetadataPageSize), store.series.Load())
+					require.Equal(t, int64(nativeMetadataPageSize), store.versions.Load())
+					value, _ = store.directory.Load(uint64(base) >> nativeMetadataPageBits)
+					require.True(t, value.(*nativeMetricMetadataPage).dense)
+				})
+			}
+		}
 	})
 
 	t.Run("probe chains tombstones and bounded misses", func(t *testing.T) {

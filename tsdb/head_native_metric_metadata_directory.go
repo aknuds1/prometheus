@@ -238,9 +238,9 @@ func (s *nativeMetricMetadataStore) delete(refs map[storage.SeriesRef]struct{}) 
 						break
 					}
 				}
-			case page.dense && page.live <= 80:
-				s.storeDirectoryPage(key, page.rebuild(128))
-			case !page.dense && page.live <= len(page.slots)/4:
+			// Keep direct indexing until sparse storage saves at least fourfold.
+			// Bulk deletion may skip several sparse capacity boundaries.
+			case page.dense && page.live <= 32 || !page.dense && page.live <= len(page.slots)/4:
 				capacity := 4
 				for page.live*4 > capacity*3 {
 					capacity *= 2
