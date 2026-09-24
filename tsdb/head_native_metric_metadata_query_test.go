@@ -117,6 +117,8 @@ func TestNativeMetricMetadataPostings(t *testing.T) {
 			{name: "absent page published", add: []int{0}, want: true, generationChanged: true},
 			{name: "singleton grows", seed: 1, add: []int{1}, target: 1, want: true, generationChanged: true},
 			{name: "sparse slot inserted", seed: 2, add: []int{2}, target: 2, want: true},
+			{name: "next bitmap word inserted", seed: 2, add: []int{32}, target: 32, want: true},
+			{name: "last bitmap word inserted", seed: 2, add: []int{224}, target: 224, want: true},
 			{name: "sparse page replaced", seed: 3, add: []int{3}, target: 3, want: true, generationChanged: true},
 			{name: "dense slot inserted", seed: 97, add: []int{97}, target: 97, want: true},
 			{name: "sparse slot removed", seed: 3, remove: []int{2}, target: 2},
@@ -205,6 +207,25 @@ func TestNativeMetricMetadataPostings(t *testing.T) {
 		require.True(t, p.Seek(2))
 		require.Equal(t, storage.SeriesRef(3), p.At())
 		require.False(t, p.Seek(4))
+		require.NoError(t, p.Err())
+	})
+	t.Run("bitmap offsets do not alias between full page keys", func(t *testing.T) {
+		store := newNativeMetricMetadataStore()
+		point := makeNativeMetricMetadataPoint(100, metadata.Metadata{Help: "test"})
+		for _, ref := range []chunks.HeadSeriesRef{1, 3, 1<<32 + 2, 1<<32 + 4} {
+			commitNativeMetricMetadata(store, ref, point)
+		}
+		p := &nativeMetricMetadataPostings{
+			Postings: index.NewListPostings([]storage.SeriesRef{1, 2, 3, 257, 259, 1<<32 + 1, 1<<32 + 2, 1<<32 + 3, 1<<32 + 4}),
+			store:    store,
+		}
+		require.True(t, p.Next())
+		require.Equal(t, storage.SeriesRef(1), p.At())
+		require.True(t, p.Seek(257))
+		require.Equal(t, storage.SeriesRef(1<<32+2), p.At())
+		require.True(t, p.Next())
+		require.Equal(t, storage.SeriesRef(1<<32+4), p.At())
+		require.False(t, p.Next())
 		require.NoError(t, p.Err())
 	})
 

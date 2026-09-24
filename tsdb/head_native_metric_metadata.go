@@ -300,6 +300,11 @@ func (p *nativeMetricMetadataPostings) has(ref chunks.HeadSeriesRef) bool {
 		p.page, _ = p.store.directory.Load(key)
 		p.pageKey, p.pageGeneration, p.pageCached = key, generation, true
 	}
+	if page, ok := p.page.(*nativeMetricMetadataPage); ok && !page.dense {
+		// The full page key is resolved above. Membership is only a prefilter;
+		// nativeMetricMetadataForPostings revalidates the series in the Head.
+		return page.contains(ref)
+	}
 	return nativeMetadataDirectorySeries(p.page, ref) != nil
 }
 
