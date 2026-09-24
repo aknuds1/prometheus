@@ -16,6 +16,7 @@ package tsdb
 import (
 	"math/bits"
 	"slices"
+	stdatomic "sync/atomic" //nolint:depguard
 
 	"go.uber.org/atomic"
 
@@ -33,7 +34,7 @@ const (
 var nativeMetadataDirectoryTombstone = new(memSeries)
 
 // nativeMetricMetadataPage holds multiple series within one 256-reference page.
-// Readers access only the immutable representation and atomic slots. The page-key
+// Readers access only the immutable representation, atomic slots and bitmap. The page-key
 // write lock protects live/used counts and all mutations; replacements are never
 // pooled, so captured pages remain safe until Go's GC reclaims them.
 type nativeMetricMetadataPage struct {
@@ -42,6 +43,8 @@ type nativeMetricMetadataPage struct {
 	hashShift uint8
 	live      int
 	used      int
+	// Standard-library words avoid the pointer-alignment padding of Uber's Uint32.
+	present [nativeMetadataPageSize / 32]stdatomic.Uint32
 }
 
 func newNativeMetricMetadataPage(capacity int) *nativeMetricMetadataPage {
@@ -57,6 +60,9 @@ func (p *nativeMetricMetadataPage) lookup(ref chunks.HeadSeriesRef) *memSeries {
 	if p.dense {
 		return p.slots[uint8(ref)].Load()
 	}
+	if !p.contains(ref) {
+		return nil
+	}
 	mask := len(p.slots) - 1
 	start := int((uint64(ref) * nativeMetadataDirectoryHashMultiplier) >> p.hashShift)
 	for probe := range len(p.slots) {
@@ -69,6 +75,13 @@ func (p *nativeMetricMetadataPage) lookup(ref chunks.HeadSeriesRef) *memSeries {
 		}
 	}
 	return nil
+}
+
+// contains checks sparse-page membership, not Head liveness. The caller must
+// first select this page using the full reference's page key.
+func (p *nativeMetricMetadataPage) contains(ref chunks.HeadSeriesRef) bool {
+	offset := uint8(ref)
+	return p.present[offset/32].Load()&(uint32(1)<<(offset%32)) != 0
 }
 
 // slot returns the existing slot or a place to insert, preferring a tombstone.
@@ -105,13 +118,20 @@ func (p *nativeMetricMetadataPage) slot(ref chunks.HeadSeriesRef) int {
 func (p *nativeMetricMetadataPage) insert(series *memSeries) {
 	index := p.slot(series.ref)
 	old := p.slots[index].Load()
-	if old == nil || old == nativeMetadataDirectoryTombstone {
+	added := old == nil || old == nativeMetadataDirectoryTombstone
+	if added {
 		p.live++
 		if old == nil {
 			p.used++
 		}
 	}
 	p.slots[index].Store(series)
+	if added && !p.dense {
+		// Writers hold the page-key lock. Publish the pointer before membership.
+		offset := uint8(series.ref)
+		word := &p.present[offset/32]
+		word.Store(word.Load() | uint32(1)<<(offset%32))
+	}
 }
 
 func (p *nativeMetricMetadataPage) rebuild(capacity int) *nativeMetricMetadataPage {
@@ -224,6 +244,11 @@ func (s *nativeMetricMetadataStore) delete(refs map[storage.SeriesRef]struct{}) 
 					page.slots[index].Store(nil)
 					page.used--
 				} else {
+					// Stop admitting new readers before removing the pointer. Captured
+					// pages may still contain retired series; readers revalidate liveness.
+					offset := uint8(ref)
+					word := &page.present[offset/32]
+					word.Store(word.Load() & ^(uint32(1) << (offset % 32)))
 					page.slots[index].Store(nativeMetadataDirectoryTombstone)
 				}
 				page.live--

@@ -30,14 +30,15 @@ import (
 )
 
 func TestNativeMetricMetadataDirectory(t *testing.T) {
-	t.Run("hash shift occupies existing page padding", func(t *testing.T) {
+	t.Run("bitmap adds only its inline words", func(t *testing.T) {
 		type originalPage struct {
 			_ []atomic.Pointer[memSeries]
 			_ bool
 			_ int
 			_ int
 		}
-		require.Equal(t, unsafe.Sizeof(originalPage{}), unsafe.Sizeof(nativeMetricMetadataPage{}))
+		require.Equal(t, unsafe.Sizeof(originalPage{})+32, unsafe.Sizeof(nativeMetricMetadataPage{}))
+		t.Logf("page=%d baseline-page=%d memSeries=%d", unsafe.Sizeof(nativeMetricMetadataPage{}), unsafe.Sizeof(originalPage{}), unsafe.Sizeof(memSeries{}))
 	})
 	t.Run("patterned full width references at every capacity", func(t *testing.T) {
 		for _, capacity := range []int{4, 8, 16, 32, 64, 128, 256} {
@@ -56,10 +57,55 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 						for offset := range nativeMetadataPageSize {
 							ref := chunks.HeadSeriesRef(key<<nativeMetadataPageBits | uint64(offset))
 							require.Same(t, want[ref], page.lookup(ref))
+							if !page.dense {
+								require.Equal(t, want[ref] != nil, page.contains(ref))
+							}
 						}
 					})
 				}
 			}
+		}
+	})
+	t.Run("bitmap gates sparse pointers during membership transitions", func(t *testing.T) {
+		for _, ref := range []chunks.HeadSeriesRef{0, 31, 32, 63, 64, 127, 128, 223, 224, 255, 1 << 32, math.MaxUint64} {
+			page := newNativeMetricMetadataPage(4)
+			series := &memSeries{ref: ref}
+			slot := page.slot(ref)
+			page.slots[slot].Store(series)
+			require.Nil(t, page.lookup(ref), "a pointer alone does not publish membership")
+			offset := uint8(ref)
+			word := &page.present[offset/32]
+			word.Store(uint32(1) << (offset % 32))
+			require.Same(t, series, page.lookup(ref))
+			word.Store(0)
+			require.Nil(t, page.lookup(ref), "clearing membership hides the retained pointer")
+		}
+	})
+	t.Run("concurrent writers preserve neighboring bitmap bits", func(t *testing.T) {
+		store := newNativeMetricMetadataStore()
+		point := makeNativeMetricMetadataPoint(100, metadata.Metadata{Help: "test"})
+		var writers sync.WaitGroup
+		for offset := range 32 {
+			writers.Go(func() { commitNativeMetricMetadata(store, chunks.HeadSeriesRef(offset), point) })
+		}
+		writers.Wait()
+		value, _ := store.directory.Load(uint64(0))
+		page := value.(*nativeMetricMetadataPage)
+		require.False(t, page.dense)
+		require.Equal(t, uint32(math.MaxUint32), page.present[0].Load())
+		for offset := 0; offset < 32; offset += 2 {
+			writers.Go(func() {
+				ref := chunks.HeadSeriesRef(offset)
+				series := store.indexedSeries(ref)
+				series.Lock()
+				series.setGCed()
+				series.Unlock()
+				store.delete(map[storage.SeriesRef]struct{}{storage.SeriesRef(ref): {}})
+			})
+		}
+		writers.Wait()
+		for offset := range 32 {
+			require.Equal(t, offset%2 != 0, store.indexedSeries(chunks.HeadSeriesRef(offset)) != nil)
 		}
 	})
 	t.Run("representation growth demotion and detached readers", func(t *testing.T) {
@@ -212,6 +258,9 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 			}
 		}
 		first := page.slot(refs[0])
+		offset := uint8(refs[0])
+		word := &page.present[offset/32]
+		word.Store(word.Load() & ^(uint32(1) << (offset % 32)))
 		page.slots[first].Store(nativeMetadataDirectoryTombstone)
 		page.live--
 		for _, ref := range refs[1:] {
@@ -225,6 +274,8 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 		for i := range page.slots {
 			page.slots[i].Store(nativeMetadataDirectoryTombstone)
 		}
+		// Deliberately retain a positive bit to exercise a bounded failed probe.
+		page.present[0].Store(page.present[0].Load() | 1)
 		require.Nil(t, page.lookup(0), "even an all-tombstone table must terminate")
 		require.GreaterOrEqual(t, page.slot(0), 0)
 	})
