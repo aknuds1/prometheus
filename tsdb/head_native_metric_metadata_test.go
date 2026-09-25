@@ -23,7 +23,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"unique"
 	"unsafe"
 
 	"github.com/prometheus/common/model"
@@ -44,7 +43,7 @@ func makeNativeMetricMetadataPoint(timestamp int64, m metadata.Metadata) nativeM
 	}
 	return nativeMetricMetadataPoint{
 		effectiveFrom: timestamp,
-		metadata:      unique.Make(m),
+		metadata:      cloneNativeMetricMetadata(m),
 	}
 }
 
@@ -84,7 +83,7 @@ func nativeMetadataForTest(s *memSeries) *nativeSeriesMetadata {
 	}
 	nativeCopy := &nativeSeriesMetadata{
 		metadata: native.metadata, effectiveFrom: native.effectiveFrom,
-		handle: native.handle, older: slices.Clone(native.older),
+		older: slices.Clone(native.older),
 	}
 	nativeCopy.flags.Store(native.flags.Load())
 	return nativeCopy
@@ -100,7 +99,7 @@ func (s *nativeMetricMetadataStore) snapshot(ref chunks.HeadSeriesRef, snapshot 
 	series.Lock()
 	native := series.nativeMetadataLocked()
 	snapshot.count = copy(snapshot.points[:], native.older)
-	snapshot.points[snapshot.count] = nativeMetricMetadataPoint{effectiveFrom: native.effectiveFrom, metadata: native.handle}
+	snapshot.points[snapshot.count] = nativeMetricMetadataPoint{effectiveFrom: native.effectiveFrom, metadata: native.metadata}
 	snapshot.count++
 	snapshot.truncated = native.flags.Load()&nativeMetadataTruncated != 0
 	series.Unlock()
@@ -121,7 +120,7 @@ func (s *nativeMetricMetadataStore) get(ref chunks.HeadSeriesRef) ([]NativeMetri
 func commitNativeMetricMetadata(store *nativeMetricMetadataStore, ref chunks.HeadSeriesRef, observations ...nativeMetricMetadataPoint) {
 	appender := store.getAppender()
 	for _, observation := range observations {
-		appender.observe(store.seriesForTest(ref), observation.effectiveFrom, observation.metadata.Value())
+		appender.observe(store.seriesForTest(ref), observation.effectiveFrom, *observation.metadata)
 	}
 	store.commitAppender(appender)
 	store.putAppender(appender)
@@ -191,7 +190,7 @@ func TestNativeMetricMetadataStore(t *testing.T) {
 		require.Equal(t, int64(1), store.versions.Load())
 		require.Zero(t, store.evictions.Load())
 		current := nativeMetadataForTest(series)
-		require.Equal(t, current.handle.Value(), *current.metadata)
+		require.NotNil(t, current.metadata)
 		require.Nil(t, current.older)
 	})
 
@@ -213,7 +212,7 @@ func TestNativeMetricMetadataStore(t *testing.T) {
 						timestamp = int64(1024 + round*20 + i)
 					}
 					points[i] = makeNativeMetricMetadataPoint(timestamp, metadata.Metadata{Help: strconv.Itoa(random.IntN(4))})
-					byTime[timestamp] = points[i].metadata.Value()
+					byTime[timestamp] = *points[i].metadata
 				}
 				timestamps := make([]int64, 0, len(byTime))
 				for timestamp := range byTime {
@@ -261,7 +260,7 @@ func TestNativeMetricMetadataStore(t *testing.T) {
 			require.Equal(t, capacity, cap(native.older))
 		}
 		point := makeNativeMetricMetadataPoint(10, metadata.Metadata{Help: "next"})
-		previous := native.handle
+		previous := native.metadata
 		require.Zero(t, testing.AllocsPerRun(1000, func() {
 			series.Lock()
 			native.mergeLocked([]nativeMetricMetadataPoint{point})
@@ -277,7 +276,7 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 	t.Run("reference encoding", func(t *testing.T) {
 		require.Equal(t, uintptr(4), unsafe.Sizeof(nativeMetricMetadataValueRef(0)))
 		require.Equal(t, uintptr(4), unsafe.Sizeof(nativeMetricMetadataObservationRef(0)))
-		appender := newNativeMetricMetadataAppender()
+		appender := newNativeMetricMetadataAppender(newNativeMetricMetadataValueCache())
 		store := newNativeMetricMetadataStore()
 		for i := range maxNativeMetricMetadataValues {
 			m := metadata.Metadata{Help: strconv.Itoa(i)}
@@ -288,7 +287,7 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 		m := metadata.Metadata{Help: "direct"}
 		appender.observe(store.seriesForTest(1), 100, m)
 		require.Len(t, appender.observations, 1)
-		require.Len(t, appender.directHandles, 1)
+		require.Len(t, appender.directValues, 1)
 		ref := appender.observations[0].metadataRef
 		require.Equal(t, nativeMetricMetadataDirectRefMask, ref)
 		require.Equal(t, m, appender.metadataValue(ref))
@@ -323,16 +322,16 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 		m := metadata.Metadata{Type: model.MetricTypeUnknown, Help: "direct"}
 
 		appender.observe(store.seriesForTest(1), 100, m)
-		require.Len(t, appender.directHandles, 1)
+		require.Len(t, appender.directValues, 1)
 		metadataRef := appender.observations[0].metadataRef
 		appender.observe(store.seriesForTest(2), 200, m)
 
-		require.Len(t, appender.directHandles, 1)
+		require.Len(t, appender.directValues, 1)
 		require.Equal(t, metadataRef, appender.observations[1].metadataRef)
 		store.putAppender(appender)
 	})
 
-	t.Run("defers interning and bounds raw values", func(t *testing.T) {
+	t.Run("defers cloning and bounds raw values", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		appender := store.getAppender()
 		m := metadata.Metadata{Type: model.MetricTypeUnknown, Help: "A"}
@@ -340,20 +339,20 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 		first := appender.metadataReference(store.seriesForTest(1), m)
 		require.Equal(t, first, appender.metadataReference(store.seriesForTest(1), m))
 		require.Len(t, appender.values, 1)
-		require.False(t, appender.values[0].resolved)
-		require.Empty(t, appender.directHandles)
-		require.Equal(t, unique.Make(m), appender.metadataHandle(first))
-		require.True(t, appender.values[0].resolved)
+		require.Nil(t, appender.values[0].owned)
+		require.Empty(t, appender.directValues)
+		require.Equal(t, m, *appender.metadataPointer(first))
+		require.NotNil(t, appender.values[0].owned)
 
 		for i := 1; i <= maxNativeMetricMetadataValues; i++ {
 			appender.metadataReference(store.seriesForTest(chunks.HeadSeriesRef(i+1)), metadata.Metadata{Type: model.MetricTypeUnknown, Help: strconv.Itoa(i)})
 		}
 		require.Len(t, appender.values, maxNativeMetricMetadataValues)
-		require.Len(t, appender.directHandles, 1)
+		require.Len(t, appender.directValues, 1)
 		store.putAppender(appender)
 	})
 
-	t.Run("reuses a committed handle after the raw value limit", func(t *testing.T) {
+	t.Run("reuses a committed pointer after the raw value limit", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		appender := store.getAppender()
 		ref := chunks.HeadSeriesRef(1)
@@ -366,13 +365,13 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 
 		metadataRef := appender.metadataReference(store.seriesForTest(ref), m)
 		require.Equal(t, nativeMetricMetadataDirectRefMask, metadataRef)
-		require.Len(t, appender.directHandles, 1)
-		require.Equal(t, point.metadata, appender.metadataHandle(metadataRef))
+		require.Len(t, appender.directValues, 1)
+		require.Same(t, nativeMetadataForTest(store.indexedSeries(ref)).metadata, appender.metadataPointer(metadataRef))
 
 		changed := metadata.Metadata{Type: model.MetricTypeUnknown, Help: "changed"}
 		metadataRef = appender.metadataReference(store.seriesForTest(ref), changed)
 		require.Equal(t, nativeMetricMetadataDirectRefMask|nativeMetricMetadataValueRef(1), metadataRef)
-		require.Len(t, appender.directHandles, 2)
+		require.Len(t, appender.directValues, 2)
 		require.Equal(t, changed, appender.metadataValue(metadataRef))
 		store.putAppender(appender)
 	})
@@ -384,11 +383,11 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 		appender.observe(store.seriesForTest(1), 100, m)
 		appender.observe(store.seriesForTest(1+nativeMetricMetadataStripes), 100, m)
 		require.NotZero(t, appender.multiSeriesStripes)
-		appender.metadataHandle(appender.observations[0].metadataRef)
+		appender.metadataPointer(appender.observations[0].metadataRef)
 		for i := 1; i <= maxNativeMetricMetadataValues; i++ {
 			appender.metadataReference(store.seriesForTest(chunks.HeadSeriesRef(i+1)), metadata.Metadata{Type: model.MetricTypeUnknown, Help: strconv.Itoa(i)})
 		}
-		require.NotEmpty(t, appender.directHandles)
+		require.NotEmpty(t, appender.directValues)
 		appender.points = append(appender.points, makeNativeMetricMetadataPoint(100, m), makeNativeMetricMetadataPoint(200, m))
 		appender.points = appender.points[:1]
 		store.putAppender(appender)
@@ -397,8 +396,9 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 		require.Empty(t, appender.observations)
 		require.Empty(t, appender.values)
 		require.Empty(t, appender.valueRefs)
-		require.Empty(t, appender.directHandles)
+		require.Empty(t, appender.directValues)
 		require.Empty(t, appender.sorted)
+		require.Nil(t, appender.valueCache)
 		require.Empty(t, appender.points)
 		for _, point := range appender.points[:cap(appender.points)] {
 			require.Equal(t, nativeMetricMetadataPoint{}, point)
@@ -463,15 +463,15 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 		require.Equal(t, uint64(1), store.evictions.Load())
 	})
 
-	t.Run("does not intern a stable stripe", func(t *testing.T) {
+	t.Run("does not clone a stable stripe", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		ref := chunks.HeadSeriesRef(1)
 		commitNativeMetricMetadata(store, ref, makeNativeMetricMetadataPoint(100, a))
 		appender := store.getAppender()
 		appender.observe(store.seriesForTest(ref), 200, a)
-		require.False(t, appender.values[0].resolved)
+		require.Nil(t, appender.values[0].owned)
 		store.commitAppender(appender)
-		require.False(t, appender.values[0].resolved)
+		require.Nil(t, appender.values[0].owned)
 
 		versions, _, _ := store.get(ref)
 		require.Equal(t, []NativeMetricMetadataVersion{{EffectiveFrom: 100, Metadata: a}}, versions)
@@ -542,8 +542,8 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 			{EffectiveFrom: 100, Metadata: a},
 			{EffectiveFrom: 200, Metadata: b},
 		}, secondVersions)
-		require.False(t, appender.values[0].resolved)
-		require.True(t, appender.values[1].resolved)
+		require.Nil(t, appender.values[0].owned)
+		require.NotNil(t, appender.values[1].owned)
 		store.putAppender(appender)
 	})
 
@@ -584,8 +584,8 @@ func TestNativeMetricMetadataAppenderCommit(t *testing.T) {
 			appender.observe(store.seriesForTest(ref), 200, m)
 		}
 		store.commitAppender(appender)
-		require.False(t, appender.values[0].resolved, "the stable batch needs no interning")
-		require.True(t, appender.values[1].resolved)
+		require.Nil(t, appender.values[0].owned, "the stable batch needs no cloning")
+		require.NotNil(t, appender.values[1].owned)
 		require.Equal(t, int64(maxNativeMetricMetadataBatch+2), store.versions.Load())
 		lastRef := chunks.HeadSeriesRef(1 + maxNativeMetricMetadataBatch*nativeMetricMetadataStripes)
 		versions, _, ok := store.get(lastRef)
@@ -817,15 +817,15 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 			native  nativeSeriesMetadata
 		}
 		if strconv.IntSize == 64 {
-			require.Equal(t, uintptr(56), unsafe.Sizeof(allocation.native))
+			require.Equal(t, uintptr(48), unsafe.Sizeof(allocation.native))
 			require.Equal(t, uintptr(16), unsafe.Offsetof(allocation.native))
-			require.Equal(t, uintptr(72), unsafe.Sizeof(allocation))
+			require.Equal(t, uintptr(64), unsafe.Sizeof(allocation))
 		} else {
-			// On 386, combining the 8-byte and 32-byte allocations would round
-			// 40 bytes up to 48. Keep the separate-allocation path on 32-bit builds.
-			require.Equal(t, uintptr(32), unsafe.Sizeof(allocation.native))
+			// On 386, combining 8 and 28 bytes would round up to 48 rather
+			// than 8+32. Keep the separate-allocation path on 32-bit builds.
+			require.Equal(t, uintptr(28), unsafe.Sizeof(allocation.native))
 			require.Equal(t, uintptr(8), unsafe.Offsetof(allocation.native))
-			require.Equal(t, uintptr(40), unsafe.Sizeof(allocation))
+			require.Equal(t, uintptr(36), unsafe.Sizeof(allocation))
 		}
 	})
 
@@ -1562,7 +1562,7 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 		head, _ := newTestHeadWithOptions(t, compression.None, opts)
 		ctx := context.Background()
 
-		// Values beyond maxNativeMetricMetadataValues are interned as they are
+		// Values beyond maxNativeMetricMetadataValues are owned as they are
 		// observed rather than held raw until commit.
 		const series = 3 * maxNativeMetricMetadataValues
 		app := head.AppenderV2(ctx)
@@ -1812,9 +1812,7 @@ func TestNativeMetricMetadataCacheOwnership(t *testing.T) {
 			cached := nativeMetadataForTest(first)
 			require.Same(t, cached.metadata, nativeMetadataForTest(second).metadata)
 			require.Equal(t, m, *cached.metadata)
-			if mode == "raw" {
-				require.Same(t, unsafe.StringData(m.Help), unsafe.StringData(cached.metadata.Help), "retain caller-backed comparison strings")
-			}
+			require.NotSame(t, unsafe.StringData(m.Help), unsafe.StringData(cached.metadata.Help), "published strings must not retain caller buffers")
 			store.putAppender(appender)
 			if mode == "committed" {
 				appender = store.getAppender()
@@ -1829,7 +1827,7 @@ func TestNativeMetricMetadataCacheOwnership(t *testing.T) {
 			poison := metadata.Metadata{Help: "reused transaction"}
 			appender.values = append(appender.values, nativeMetricMetadataValue{metadata: poison})
 			appender.points = append(appender.points, makeNativeMetricMetadataPoint(500, poison))
-			appender.shared[cached.handle] = &poison
+			appender.directValues = append(appender.directValues, &poison)
 			runtime.GC()
 			require.Equal(t, m, *cached.metadata)
 			require.Equal(t, m, *nativeMetadataForTest(second).metadata)

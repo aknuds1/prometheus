@@ -22,7 +22,6 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
-	"unique"
 
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
@@ -106,7 +105,7 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 		{name: "final full current batch", count: maxNativeMetricMetadataLookups, after: maxNativeMetricMetadataLookups - 1},
 		{name: "final partial current batch", count: maxNativeMetricMetadataLookups + 1, after: maxNativeMetricMetadataLookups},
 		{name: "between current batches", count: 2*maxNativeMetricMetadataLookups + 1, after: maxNativeMetricMetadataLookups - 1},
-		{name: "historical scratch selected", count: 3, after: 2, historical: true},
+		{name: "historical value selected", count: 3, after: 2, historical: true},
 	} {
 		t.Run("cancellation after "+tc.name, func(t *testing.T) {
 			opts := newTestHeadDefaultOptions(1000, false)
@@ -138,7 +137,7 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 			require.True(t, head.nativeMetricMetadata.publication.TryAcquire(nativeMetricMetadataPublicationPermits), "cancellation must release publication")
 			head.nativeMetricMetadata.publication.Release(nativeMetricMetadataPublicationPermits)
 			// Discard the failed call's results and reuse the buffer, including
-			// historical selection that borrowed scratch before cancellation.
+			// historical values selected before cancellation.
 			require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
 			for i, lookup := range lookups {
 				want := b
@@ -344,17 +343,9 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 			})
 		}
 		readers.Wait()
-		for _, tc := range []struct {
-			ref       storage.SeriesRef
-			timestamp int64
-		}{{refs[0], 200}, {refs[0], 99}, {refs[1], 200}, {refs[1] + 1000, 200}} {
-			scratch, err := head.selectNativeMetricMetadataBatch(t.Context(), []storage.NativeMetricMetadataLookup{{Ref: tc.ref, Timestamp: tc.timestamp}})
-			require.NoError(t, err)
-			require.Nil(t, scratch, "current values and misses must not borrow historical scratch")
-		}
 	})
 
-	t.Run("materialization after publication and scratch reuse", func(t *testing.T) {
+	t.Run("owned values survive publication eviction deletion and reset", func(t *testing.T) {
 		opts := newTestHeadDefaultOptions(1000, false)
 		opts.EnableNativeMetadata = true
 		head, _ := newTestHeadWithOptions(t, compression.None, opts)
@@ -367,14 +358,8 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 			require.NoError(t, app.Commit())
 		}
 		lookups := []storage.NativeMetricMetadataLookup{{Ref: ref, Timestamp: 100}, {Ref: ref, Timestamp: 200}, {Ref: ref, Timestamp: 100}}
-		scratch, err := head.selectNativeMetricMetadataBatch(t.Context(), lookups)
-		require.NoError(t, err)
-		require.NotNil(t, scratch)
-		t.Cleanup(func() {
-			scratch.reset()
-			nativeMetricMetadataLookupPool.Put(scratch)
-		})
-		// Selection must release the barrier before the caller materializes values.
+		require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
+		// Returned values no longer need the publication barrier.
 		require.True(t, head.nativeMetricMetadata.publication.TryAcquire(nativeMetricMetadataPublicationPermits))
 		head.nativeMetricMetadata.publication.Release(nativeMetricMetadataPublicationPermits)
 		current := lookups[1].Metadata
@@ -388,28 +373,22 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 		require.Len(t, deleted, 1)
 		head.nativeMetricMetadata.delete(deleted)
 		runtime.GC()
-		require.NoError(t, scratch.materialize(t.Context(), lookups))
 		historical := lookups[0].Metadata
 		require.Same(t, historical, lookups[2].Metadata)
 		require.Equal(t, a, *historical)
 		require.Equal(t, b, *current)
 
-		// Reuse this exact scratch object instead of depending on pool identity.
-		scratch.reset()
-		require.Empty(t, scratch.copies)
-		require.Equal(t, [maxNativeMetricMetadataLookups]unique.Handle[metadata.Metadata]{}, scratch.historical)
-		scratch.historical[0] = unique.Make(b)
+		head.nativeMetricMetadata.reset()
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		reused := []storage.NativeMetricMetadataLookup{{Ref: ref, Timestamp: 200}}
-		require.ErrorIs(t, scratch.materialize(ctx, reused), context.Canceled)
-		require.Nil(t, reused[0].Metadata)
-		require.Empty(t, scratch.copies)
-		scratch.reset()
-		scratch.historical[0] = unique.Make(b)
-		require.NoError(t, scratch.materialize(t.Context(), reused))
-		require.Equal(t, b, *reused[0].Metadata)
-		require.Equal(t, a, *historical, "retained results must not alias scratch")
+		require.ErrorIs(t, head.LookupNativeMetricMetadata(ctx, lookups), context.Canceled)
+		for _, lookup := range lookups {
+			require.Nil(t, lookup.Metadata)
+		}
+		require.NoError(t, head.Close())
+		runtime.GC()
+		require.Equal(t, a, *historical, "clearing results, reset and close must not mutate values")
+		require.Equal(t, b, *current)
 	})
 
 	t.Run("captured native state survives index unlock and deletion", func(t *testing.T) {
@@ -458,7 +437,7 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 		require.Equal(t, &b, native.metadata)
 		require.Equal(t, int64(200), native.effectiveFrom)
 		require.Len(t, native.older, 1)
-		require.Equal(t, a, native.older[0].metadata.Value())
+		require.Equal(t, a, *native.older[0].metadata)
 		require.Equal(t, int64(100), native.older[0].effectiveFrom)
 		require.Zero(t, store.series.Load())
 		require.Zero(t, store.versions.Load())

@@ -16,7 +16,6 @@ package tsdb
 import (
 	"slices"
 	"strconv"
-	"unique"
 
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/chunks"
@@ -30,15 +29,14 @@ const (
 )
 
 // nativeMetricMetadataValue retains raw metadata for comparisons without
-// interning. When resolved is true, handle identifies the same value.
+// cloning. Once resolved, owned identifies an immutable copy of the same value.
 type nativeMetricMetadataValue struct {
 	metadata metadata.Metadata
-	handle   unique.Handle[metadata.Metadata]
-	resolved bool
+	owned    *metadata.Metadata
 }
 
 // nativeMetricMetadataValueRef selects a one-based raw value, or a zero-based
-// direct handle when the high bit is set. Zero is not a value reference.
+// direct owned value when the high bit is set. Zero is not a value reference.
 type nativeMetricMetadataValueRef uint32
 
 // nativeMetricMetadataObservationRef is a one-based observation index.
@@ -64,18 +62,17 @@ type nativeMetricMetadataGroup struct {
 // Returning it through putAppender resets it for reuse. References into its
 // mutable scratch storage must not survive its return to the pool.
 type nativeMetricMetadataAppender struct {
-	observations  []nativeMetricMetadataObservation
-	values        []nativeMetricMetadataValue
-	valueRefs     map[metadata.Metadata]nativeMetricMetadataValueRef
-	directHandles []unique.Handle[metadata.Metadata]
+	observations []nativeMetricMetadataObservation
+	values       []nativeMetricMetadataValue
+	valueRefs    map[metadata.Metadata]nativeMetricMetadataValueRef
+	directValues []*metadata.Metadata
+	valueCache   *nativeMetricMetadataValueCache
 	// Observation references for the stripe being committed.
 	sorted []nativeMetricMetadataObservationRef
 	// Reusable merge input for the current series, with unique timestamps.
 	points []nativeMetricMetadataPoint
 	// Changing series selected for the current batch.
 	groups []nativeMetricMetadataGroup
-	// Immutable cache values shared across this transaction's series.
-	shared map[unique.Handle[metadata.Metadata]]*metadata.Metadata
 	// Stripes with observations, in order of first use.
 	touched     []uint8
 	stripeFirst [nativeMetricMetadataStripes]nativeMetricMetadataObservationRef
@@ -88,41 +85,40 @@ type nativeMetricMetadataAppender struct {
 	haveLast           bool
 }
 
-func newNativeMetricMetadataAppender() *nativeMetricMetadataAppender {
+func newNativeMetricMetadataAppender(cache *nativeMetricMetadataValueCache) *nativeMetricMetadataAppender {
 	return &nativeMetricMetadataAppender{
 		observations: make([]nativeMetricMetadataObservation, 0, nativeMetricMetadataStripes),
 		values:       make([]nativeMetricMetadataValue, 0, maxNativeMetricMetadataValues),
 		valueRefs:    make(map[metadata.Metadata]nativeMetricMetadataValueRef, maxNativeMetricMetadataValues),
 		groups:       make([]nativeMetricMetadataGroup, 0, maxNativeMetricMetadataBatch),
-		shared:       make(map[unique.Handle[metadata.Metadata]]*metadata.Metadata, maxNativeMetricMetadataValues),
+		valueCache:   cache,
 		touched:      make([]uint8, 0, nativeMetricMetadataStripes),
 	}
 }
 
 func (a *nativeMetricMetadataAppender) metadataValue(ref nativeMetricMetadataValueRef) metadata.Metadata {
 	if ref&nativeMetricMetadataDirectRefMask != 0 {
-		return a.directHandles[ref&^nativeMetricMetadataDirectRefMask].Value()
+		return *a.directValues[ref&^nativeMetricMetadataDirectRefMask]
 	}
 	return a.values[ref-1].metadata
 }
 
-// metadataHandle lazily interns raw values. Commit resolves selected references
+// metadataPointer lazily owns raw values. Commit resolves selected references
 // before taking a series lock.
-func (a *nativeMetricMetadataAppender) metadataHandle(ref nativeMetricMetadataValueRef) unique.Handle[metadata.Metadata] {
+func (a *nativeMetricMetadataAppender) metadataPointer(ref nativeMetricMetadataValueRef) *metadata.Metadata {
 	if ref&nativeMetricMetadataDirectRefMask != 0 {
-		return a.directHandles[ref&^nativeMetricMetadataDirectRefMask]
+		return a.directValues[ref&^nativeMetricMetadataDirectRefMask]
 	}
 	value := &a.values[ref-1]
-	if !value.resolved {
-		value.handle = unique.Make(value.metadata)
-		value.resolved = true
+	if value.owned == nil {
+		value.owned = a.valueCache.resolve(value.metadata)
 	}
-	return value.handle
+	return value.owned
 }
 
 // metadataReference returns a transaction-local reference to m. It deduplicates
-// a bounded set of raw values, deferring their interning until needed. Values
-// outside that set use direct handles.
+// a bounded set of raw values, deferring their cloning until needed. Values
+// outside that set use direct owned pointers.
 func (a *nativeMetricMetadataAppender) metadataReference(series *memSeries, m metadata.Metadata) nativeMetricMetadataValueRef {
 	if valueRef, ok := a.valueRefs[m]; ok {
 		return valueRef
@@ -134,27 +130,22 @@ func (a *nativeMetricMetadataAppender) metadataReference(series *memSeries, m me
 		return valueRef
 	}
 
-	// Reuse the committed handle for stable high-cardinality metadata. This
-	// bounds raw transaction state without paying the interning cost again.
-	var (
-		committed     unique.Handle[metadata.Metadata]
-		haveCommitted bool
-	)
+	// Reuse the committed value for stable high-cardinality metadata without
+	// extending its series critical section or retaining more raw values.
+	var committed *metadata.Metadata
 	series.Lock()
 	if native := series.nativeMetadataLocked(); native != nil {
-		committed = native.handle
-		haveCommitted = true
+		committed = native.metadata
 	}
 	series.Unlock()
 
-	// Compare after unlocking. The handle keeps its value alive independently
+	// Compare after unlocking. The pointer keeps its value alive independently
 	// of the series, and the comparison need not lengthen its critical section.
-	handle := committed
-	if !haveCommitted || committed.Value() != m {
-		handle = unique.Make(m)
+	if committed == nil || *committed != m {
+		committed = a.valueCache.resolve(m)
 	}
-	valueRef := nativeMetricMetadataDirectRefMask | nativeMetricMetadataValueRef(len(a.directHandles))
-	a.directHandles = append(a.directHandles, handle)
+	valueRef := nativeMetricMetadataDirectRefMask | nativeMetricMetadataValueRef(len(a.directValues))
+	a.directValues = append(a.directValues, committed)
 	return valueRef
 }
 
@@ -233,9 +224,11 @@ func (a *nativeMetricMetadataAppender) selectBatch(position int) int {
 
 func (s *nativeMetricMetadataStore) getAppender() *nativeMetricMetadataAppender {
 	if appender := s.appenderPool.Get(); appender != nil {
-		return appender.(*nativeMetricMetadataAppender)
+		a := appender.(*nativeMetricMetadataAppender)
+		a.valueCache = s.values
+		return a
 	}
-	return newNativeMetricMetadataAppender()
+	return newNativeMetricMetadataAppender(s.values)
 }
 
 func (s *nativeMetricMetadataStore) putAppender(appender *nativeMetricMetadataAppender) {
@@ -249,13 +242,13 @@ func (s *nativeMetricMetadataStore) putAppender(appender *nativeMetricMetadataAp
 	clear(appender.values)
 	appender.values = appender.values[:0]
 	clear(appender.valueRefs)
-	clear(appender.directHandles)
-	appender.directHandles = appender.directHandles[:0]
+	clear(appender.directValues)
+	appender.directValues = appender.directValues[:0]
+	appender.valueCache = nil
 	appender.sorted = appender.sorted[:0]
 	clear(appender.points[:cap(appender.points)])
 	appender.points = appender.points[:0]
 	appender.groups = appender.groups[:0]
-	clear(appender.shared)
 	appender.touched = appender.touched[:0]
 	appender.lastMetadata = metadata.Metadata{}
 	appender.lastObservation = 0
@@ -312,13 +305,7 @@ func (s *nativeMetricMetadataStore) commitAppenderStripe(stripeIndex uint8, appe
 		position = appender.selectBatch(position)
 		for _, group := range appender.groups {
 			for _, observationRef := range appender.sorted[group.start:group.end] {
-				appender.metadataHandle(appender.observations[observationRef-1].metadataRef)
-			}
-			last := appender.observations[appender.sorted[group.end-1]-1]
-			handle := appender.metadataHandle(last.metadataRef)
-			if appender.shared[handle] == nil {
-				value := appender.metadataValue(last.metadataRef)
-				appender.shared[handle] = &value
+				appender.metadataPointer(appender.observations[observationRef-1].metadataRef)
 			}
 		}
 		s.commitBatch(appender)
@@ -338,7 +325,7 @@ func (s *nativeMetricMetadataStore) commitBatch(appender *nativeMetricMetadataAp
 			observation := appender.observations[observationRef-1]
 			point := nativeMetricMetadataPoint{
 				effectiveFrom: observation.effectiveFrom,
-				metadata:      appender.metadataHandle(observation.metadataRef),
+				metadata:      appender.metadataPointer(observation.metadataRef),
 			}
 			if last := len(appender.points) - 1; last >= 0 && appender.points[last].effectiveFrom == point.effectiveFrom {
 				appender.points[last] = point
@@ -372,15 +359,9 @@ func (s *nativeMetricMetadataStore) commitBatch(appender *nativeMetricMetadataAp
 			}
 			addedSeries++
 		}
-		previous := native.handle
 		delta, evictions := native.mergeLocked(appender.points)
 		versionDelta += int64(delta)
 		evicted += uint64(evictions)
-		// The resulting newest value is either the preceding newest value or
-		// the final incoming value. Reuse the former's immutable pointer.
-		if native.handle != previous {
-			native.metadata = appender.shared[native.handle]
-		}
 		if first {
 			s.publishLocked(series)
 		}
@@ -419,7 +400,7 @@ func nativeMetricMetadataGroupStableResolved(native *nativeSeriesMetadata, point
 		return false
 	}
 	for _, point := range points {
-		if point.effectiveFrom < native.effectiveFrom || point.metadata != native.handle {
+		if point.effectiveFrom < native.effectiveFrom || !equalNativeMetricMetadata(point.metadata, native.metadata) {
 			return false
 		}
 	}

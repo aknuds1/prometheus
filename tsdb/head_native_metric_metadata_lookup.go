@@ -16,55 +16,12 @@ package tsdb
 import (
 	"context"
 	"slices"
-	"sync"
-	"unique"
 
-	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 )
 
 const maxNativeMetricMetadataLookups = 256
-
-var nativeMetricMetadataLookupPool = sync.Pool{New: func() any { return new(nativeMetricMetadataLookupScratch) }}
-
-// nativeMetricMetadataLookupScratch belongs to one lookup batch until its
-// historical results are materialized. Only scratch is pooled, never results.
-type nativeMetricMetadataLookupScratch struct {
-	historical [maxNativeMetricMetadataLookups]unique.Handle[metadata.Metadata]
-	copies     map[unique.Handle[metadata.Metadata]]*metadata.Metadata
-}
-
-// materialize copies selected values without accessing Head or holding its locks.
-// Handles keep values alive across intervening commits, eviction and series GC.
-func (s *nativeMetricMetadataLookupScratch) materialize(ctx context.Context, lookups []storage.NativeMetricMetadataLookup) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// No publication waits remain. Check cancellation at the boundaries of
-	// this bounded batch rather than once per copied handle.
-	for i, handle := range s.historical[:len(lookups)] {
-		if handle == (unique.Handle[metadata.Metadata]{}) {
-			continue
-		}
-		if s.copies == nil {
-			s.copies = make(map[unique.Handle[metadata.Metadata]]*metadata.Metadata)
-		}
-		m := s.copies[handle]
-		if m == nil {
-			value := handle.Value()
-			m = &value
-			s.copies[handle] = m
-		}
-		lookups[i].Metadata = m
-	}
-	return ctx.Err()
-}
-
-func (s *nativeMetricMetadataLookupScratch) reset() {
-	clear(s.historical[:])
-	clear(s.copies)
-}
 
 // LookupNativeMetricMetadata implements storage.NativeMetricMetadataReader.
 func (db *DB) LookupNativeMetricMetadata(ctx context.Context, lookups []storage.NativeMetricMetadataLookup) error {
@@ -85,15 +42,7 @@ func (h *Head) LookupNativeMetricMetadata(ctx context.Context, lookups []storage
 	}
 	for len(lookups) > 0 {
 		batch := lookups[:min(len(lookups), maxNativeMetricMetadataLookups)]
-		historical, err := h.selectNativeMetricMetadataBatch(ctx, batch)
-		if historical != nil {
-			if err == nil {
-				err = historical.materialize(ctx, batch)
-			}
-			historical.reset()
-			nativeMetricMetadataLookupPool.Put(historical)
-		}
-		if err != nil {
+		if err := h.selectNativeMetricMetadataBatch(ctx, batch); err != nil {
 			return err
 		}
 		lookups = lookups[len(batch):]
@@ -101,17 +50,16 @@ func (h *Head) LookupNativeMetricMetadata(ctx context.Context, lookups []storage
 	return ctx.Err()
 }
 
-// selectNativeMetricMetadataBatch freezes current pointers and historical handles
-// under the publication barrier. The caller owns returned scratch, even on error.
+// selectNativeMetricMetadataBatch selects immutable current and historical values
+// under the publication barrier. Results own their lifetime independently of Head.
 // Results must be cleared and the batch limited to maxNativeMetricMetadataLookups.
-func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []storage.NativeMetricMetadataLookup) (*nativeMetricMetadataLookupScratch, error) {
+func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []storage.NativeMetricMetadataLookup) error {
 	store := h.nativeMetricMetadata
 	if err := store.publication.Acquire(ctx, nativeMetricMetadataPublicationPermits); err != nil {
-		return nil, err
+		return err
 	}
 	defer store.publication.Release(nativeMetricMetadataPublicationPermits)
 
-	var historical *nativeMetricMetadataLookupScratch
 	var page any
 	lastPage := ^uint64(0)
 	// Acquisition checks cancellation before this bounded batch; check again
@@ -140,19 +88,12 @@ func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []st
 			lookup.Metadata = native.metadata
 			continue
 		}
-		var selected unique.Handle[metadata.Metadata]
 		for _, point := range slices.Backward(native.older) {
 			if point.effectiveFrom <= lookup.Timestamp {
-				selected = point.metadata
+				lookup.Metadata = point.metadata
 				break
 			}
 		}
-		if selected != (unique.Handle[metadata.Metadata]{}) {
-			if historical == nil {
-				historical = nativeMetricMetadataLookupPool.Get().(*nativeMetricMetadataLookupScratch)
-			}
-			historical.historical[i] = selected
-		}
 	}
-	return historical, ctx.Err()
+	return ctx.Err()
 }
