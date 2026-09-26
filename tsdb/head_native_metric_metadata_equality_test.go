@@ -30,6 +30,91 @@ import (
 )
 
 func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
+	t.Run("saturation preserves hits and observation decisions", func(t *testing.T) {
+		for _, bound := range []string{"entries", "bytes"} {
+			t.Run(bound, func(t *testing.T) {
+				store := newNativeMetricMetadataStore()
+				app := &headAppenderBase{head: &Head{nativeMetricMetadata: store}, batches: []*appendBatch{{}}}
+				defer app.batches[0].close(app.head)
+				count, size := nativeMetricMetadataEqualityMaxEntries, 1024
+				if bound == "bytes" {
+					count, size = 1, nativeMetricMetadataEqualityMaxBytes/2
+				}
+				m := metadata.Metadata{Help: strings.Repeat("x", size)}
+				series := make([]*memSeries, count+1)
+				for i := range series {
+					s := &memSeries{}
+					series[i] = s
+					s.Lock()
+					s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m), effectiveFrom: 100}
+					observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
+					s.Unlock()
+					require.False(t, observe)
+					if i == count {
+						require.Nil(t, proof, "a saturated memo must not return another admission proof")
+					} else {
+						require.NotNil(t, proof)
+						app.rememberNativeMetadataEquality(proof, m)
+					}
+				}
+				memo := app.batches[0].nativeMetadataEquality
+				require.Len(t, memo.values, count)
+				fresh := metadata.Metadata{Help: strings.Clone(m.Help)}
+				s := series[0]
+				s.Lock()
+				observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 101, &fresh)
+				s.Unlock()
+				require.False(t, observe)
+				require.Nil(t, proof)
+				require.Same(t, unsafe.StringData(fresh.Help), unsafe.StringData(memo.values[nativeMetadataForTest(s).metadata].Help))
+				for _, current := range []*memSeries{s, series[count]} {
+					current.Lock()
+					observe, proof = app.shouldObserveNativeMetricMetadataLocked(current, 99, &m)
+					require.True(t, observe, "saturation cannot suppress older observations")
+					require.Nil(t, proof)
+					changed := metadata.Metadata{Help: m.Help + "changed"}
+					observe, proof = app.shouldObserveNativeMetricMetadataLocked(current, 101, &changed)
+					current.Unlock()
+					require.True(t, observe)
+					require.Nil(t, proof)
+				}
+			})
+		}
+	})
+
+	t.Run("remaining allowance rejects large values without disabling smaller ones", func(t *testing.T) {
+		store := newNativeMetricMetadataStore()
+		app := &headAppenderBase{head: &Head{nativeMetricMetadata: store}, batches: []*appendBatch{{}}}
+		defer app.batches[0].close(app.head)
+		for i, size := range []int{(nativeMetricMetadataEqualityMaxBytes - 4096) / 2, 4096, 1024, 1024} {
+			m := metadata.Metadata{Help: strings.Repeat("x", size)}
+			s := &memSeries{}
+			s.Lock()
+			s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m), effectiveFrom: 100}
+			observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
+			s.Unlock()
+			require.False(t, observe)
+			require.NotNil(t, proof)
+			app.rememberNativeMetadataEquality(proof, m)
+			memo := app.batches[0].nativeMetadataEquality
+			require.Len(t, memo.values, []int{1, 1, 2, 3}[i])
+			require.Equal(t, []int{4096, 4096, 2048, 0}[i], nativeMetricMetadataEqualityMaxBytes-memo.bytes)
+		}
+	})
+
+	t.Run("cost includes every field and remaining allowance", func(t *testing.T) {
+		m := metadata.Metadata{Type: model.MetricTypeGauge, Unit: "seconds", Help: strings.Repeat("x", 1024)}
+		cost := 2 * (len(m.Type) + len(m.Unit) + len(m.Help))
+		for _, allowance := range []int{0, cost - 1, cost, cost + 1, nativeMetricMetadataEqualityMaxBytes} {
+			got := nativeMetricMetadataEqualityCost(m, allowance)
+			if allowance < cost {
+				require.Zero(t, got)
+			} else {
+				require.Equal(t, cost, got)
+			}
+		}
+	})
+
 	t.Run("first proof survives committed state changing before admission", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		app := &headAppenderBase{head: &Head{nativeMetricMetadata: store}}

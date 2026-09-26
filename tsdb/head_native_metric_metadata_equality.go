@@ -31,14 +31,14 @@ type nativeMetricMetadataEqualityMemo struct {
 
 // nativeMetricMetadataEqualityCost charges both sides of an equality proof.
 // This bounds logical string payload, not backing allocations or total heap.
-// Zero means the value exceeds the budget.
-func nativeMetricMetadataEqualityCost(m metadata.Metadata) int {
-	remaining := nativeMetricMetadataEqualityMaxBytes
+// Zero means the value exceeds the remaining budget.
+func nativeMetricMetadataEqualityCost(m metadata.Metadata, remaining int) int {
+	budget := remaining
 	for _, value := range [...]string{string(m.Type), m.Unit, m.Help} {
 		if len(value) > remaining/2 {
 			return 0
 		}
 		remaining -= 2 * len(value)
 	}
-	return nativeMetricMetadataEqualityMaxBytes - remaining
+	return budget - remaining
 }

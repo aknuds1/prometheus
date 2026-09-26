@@ -458,8 +458,11 @@ func (a *headAppenderBase) shouldObserveNativeMetricMetadataLocked(s *memSeries,
 	if max(len(m.Type), len(m.Unit), len(m.Help)) < nativeMetricMetadataEqualityMinBytes {
 		return *native.metadata != *m, nil
 	}
-	if len(a.batches) > 0 && a.batches[0].nativeMetadataEquality != nil {
-		memo := a.batches[0].nativeMetadataEquality
+	var memo *nativeMetricMetadataEqualityMemo
+	if len(a.batches) > 0 {
+		memo = a.batches[0].nativeMetadataEquality
+	}
+	if memo != nil {
 		if verified, ok := memo.values[native.metadata]; ok {
 			// The stored raw value was verified against this exact immutable
 			// pointer. Inequality is definitive too; do not compare twice.
@@ -473,17 +476,27 @@ func (a *headAppenderBase) shouldObserveNativeMetricMetadataLocked(s *memSeries,
 	if *native.metadata != *m {
 		return true, nil
 	}
+	// Saturation prevents new proofs, not observation decisions or existing hits.
+	// Partial-budget accounting stays outside the series lock during admission.
+	if memo != nil && (len(memo.values) >= nativeMetricMetadataEqualityMaxEntries || memo.bytes == nativeMetricMetadataEqualityMaxBytes) {
+		return false, nil
+	}
 	return false, native.metadata
 }
 
 // rememberNativeMetadataEquality admits a verified value after normal batch
-// creation. The caller must have accepted the sample and obtained a proof.
+// creation. The single-owner appender must consume the proof once, immediately
+// after accepting the sample and before any further metadata observation.
 func (a *headAppenderBase) rememberNativeMetadataEquality(owned *metadata.Metadata, m metadata.Metadata) {
-	cost := nativeMetricMetadataEqualityCost(m)
+	first := a.batches[0]
+	remaining := nativeMetricMetadataEqualityMaxBytes
+	if first.nativeMetadataEquality != nil {
+		remaining -= first.nativeMetadataEquality.bytes
+	}
+	cost := nativeMetricMetadataEqualityCost(m, remaining)
 	if cost == 0 {
 		return
 	}
-	first := a.batches[0]
 	if first.nativeMetadataEquality == nil {
 		if pooled := a.head.nativeMetricMetadata.equalityPool.Get(); pooled != nil {
 			first.nativeMetadataEquality = pooled.(*nativeMetricMetadataEqualityMemo)
@@ -492,10 +505,10 @@ func (a *headAppenderBase) rememberNativeMetadataEquality(owned *metadata.Metada
 		}
 	}
 	memo := first.nativeMetadataEquality
-	if len(memo.values) < nativeMetricMetadataEqualityMaxEntries && cost <= nativeMetricMetadataEqualityMaxBytes-memo.bytes {
-		memo.values[owned] = m
-		memo.bytes += cost
-	}
+	// Verification established an available entry; normal batch creation cannot
+	// change this transaction's memo between verification and admission.
+	memo.values[owned] = m
+	memo.bytes += cost
 }
 
 func (a *headAppenderBase) recordNativeMetricMetadata(s *memSeries, timestamp int64, m metadata.Metadata) {
