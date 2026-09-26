@@ -417,8 +417,9 @@ type headAppenderBase struct {
 	series     []*memSeries       // New series held by this appender (using corresponding slices indexes from seriesRefs)
 	batches    []*appendBatch     // Holds all the other data to append. (In regular cases, there should be only one of these.)
 
-	typesInBatch         map[chunks.HeadSeriesRef]sampleType // Which (one) sample type each series holds in the most recent batch.
-	nativeMetricMetadata *nativeMetricMetadataAppender
+	typesInBatch           map[chunks.HeadSeriesRef]sampleType // Which (one) sample type each series holds in the most recent batch.
+	nativeMetricMetadata   *nativeMetricMetadataAppender
+	nativeMetadataEquality *nativeMetricMetadataEqualityMemo
 
 	appendID, cleanupAppendIDsBelow uint64
 	closed                          bool
@@ -442,7 +443,52 @@ func (a *headAppenderBase) shouldObserveNativeMetricMetadataLocked(s *memSeries,
 	native := s.nativeMetadataLocked()
 	// Matching the newest value does not establish what applied at an older
 	// timestamp; that observation may move the start of the matching version.
-	return native == nil || native.effectiveFrom > timestamp || *native.metadata != *m
+	if native == nil || native.effectiveFrom > timestamp {
+		return true
+	}
+	if max(len(m.Type), len(m.Unit), len(m.Help)) < nativeMetricMetadataEqualityMinBytes {
+		return *native.metadata != *m
+	}
+	if a.nativeMetadataEquality != nil {
+		if verified, ok := a.nativeMetadataEquality.values[native.metadata]; ok {
+			// The stored raw value was verified against this exact immutable
+			// pointer. Inequality is definitive too; do not compare twice.
+			if verified != *m {
+				return true
+			}
+			a.nativeMetadataEquality.values[native.metadata] = *m
+			return false
+		}
+	}
+	if *native.metadata != *m {
+		return true
+	}
+	cost := nativeMetricMetadataEqualityCost(*m)
+	if cost == 0 {
+		return false
+	}
+	if a.nativeMetadataEquality == nil {
+		if pooled := a.head.nativeMetricMetadata.equalityPool.Get(); pooled != nil {
+			a.nativeMetadataEquality = pooled.(*nativeMetricMetadataEqualityMemo)
+		} else {
+			a.nativeMetadataEquality = &nativeMetricMetadataEqualityMemo{values: make(map[*metadata.Metadata]metadata.Metadata)}
+		}
+	}
+	memo := a.nativeMetadataEquality
+	if len(memo.values) < nativeMetricMetadataEqualityMaxEntries && cost <= nativeMetricMetadataEqualityMaxBytes-memo.bytes {
+		memo.values[native.metadata] = *m
+		memo.bytes += cost
+	}
+	return false
+}
+
+func (a *headAppenderBase) clearNativeMetadataEquality() {
+	if memo := a.nativeMetadataEquality; memo != nil {
+		a.nativeMetadataEquality = nil
+		clear(memo.values)
+		memo.bytes = 0
+		a.head.nativeMetricMetadata.equalityPool.Put(memo)
+	}
 }
 
 func (a *headAppenderBase) recordNativeMetricMetadata(s *memSeries, timestamp int64, m metadata.Metadata) {
@@ -1813,6 +1859,7 @@ func (a *headAppenderBase) Commit() (err error) {
 	h := a.head
 
 	defer func() {
+		a.clearNativeMetadataEquality()
 		if a.closed {
 			// Don't double-close in case Rollback() was called.
 			return
@@ -2369,6 +2416,7 @@ func (a *headAppenderBase) Rollback() (err error) {
 	}
 	h := a.head
 	defer func() {
+		a.clearNativeMetadataEquality()
 		a.clearNativeMetricMetadata()
 		a.releaseCreatedSeriesReservations()
 		h.iso.closeAppend(a.appendID)

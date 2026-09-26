@@ -81,6 +81,7 @@ type nativeMetricMetadataStore struct {
 	directory      sync.Map
 	directoryLocks [nativeMetricMetadataStripes]sync.Mutex
 	appenderPool   sync.Pool
+	equalityPool   sync.Pool
 	values         *nativeMetricMetadataValueCache
 	// Commits hold one permit from before WAL logging through cache publication.
 	// Senders acquire all permits for a bounded lookup batch. FIFO acquisition
