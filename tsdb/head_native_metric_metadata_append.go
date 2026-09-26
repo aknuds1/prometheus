@@ -154,6 +154,15 @@ func (a *nativeMetricMetadataAppender) resolveMetadata(series *memSeries, m meta
 	// Pointers keep the immutable values alive across concurrent truncation or
 	// deletion. Reusing a value does not reuse its observation's timestamp.
 	for _, value := range retained[:count] {
+		if len(value.Type) != len(m.Type) || len(value.Unit) != len(m.Unit) || len(value.Help) != len(m.Help) {
+			continue
+		}
+		// Reject long common-prefix misses cheaply; matching suffixes are not
+		// proof of equality. Short strings go straight to the full comparison.
+		const minSuffixCheckBytes, suffixBytes = 64, 8
+		if len(m.Help) >= minSuffixCheckBytes && value.Help[len(value.Help)-suffixBytes:] != m.Help[len(m.Help)-suffixBytes:] {
+			continue
+		}
 		if *value == m {
 			return value
 		}

@@ -421,6 +421,51 @@ func TestNativeMetricMetadataAppender(t *testing.T) {
 		}
 	})
 
+	t.Run("history rejection retains exact equality", func(t *testing.T) {
+		for _, size := range []int{0, 1, 63, 64, 65, 4096} {
+			for _, change := range []string{"equal", "prefix", "middle", "suffix", "length", "type", "unit"} {
+				t.Run(strconv.Itoa(size)+"/"+change, func(t *testing.T) {
+					m := metadata.Metadata{Type: model.MetricTypeCounter, Unit: "seconds", Help: strings.Repeat("a", size)}
+					owned := cloneNativeMetricMetadata(m)
+					series := &memSeries{}
+					series.Lock()
+					series.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: owned}
+					series.Unlock()
+					m.Help = strings.Clone(m.Help)
+					switch change {
+					case "prefix", "middle", "suffix":
+						if size == 0 {
+							m.Help = "b"
+						} else {
+							at := 0
+							switch change {
+							case "middle":
+								at = size / 2
+							case "suffix":
+								at = size - 1
+							}
+							m.Help = m.Help[:at] + "b" + m.Help[at+1:]
+						}
+					case "length":
+						m.Help += "a"
+					case "type":
+						m.Type = model.MetricTypeUnknown
+					case "unit":
+						m.Unit = "minutes"
+					}
+					app := newNativeMetricMetadataAppender(newNativeMetricMetadataValueCache())
+					got := app.resolveMetadata(series, m)
+					require.Equal(t, m, *got)
+					if change == "equal" {
+						require.Same(t, owned, got)
+					} else {
+						require.NotSame(t, owned, got)
+					}
+				})
+			}
+		}
+	})
+
 	t.Run("evicted history values are owned again", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		series := store.seriesForTest(1)
