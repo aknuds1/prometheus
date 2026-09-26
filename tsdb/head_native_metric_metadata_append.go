@@ -105,13 +105,13 @@ func (a *nativeMetricMetadataAppender) metadataValue(ref nativeMetricMetadataVal
 
 // metadataPointer lazily owns raw values. Commit resolves selected references
 // before taking a series lock.
-func (a *nativeMetricMetadataAppender) metadataPointer(ref nativeMetricMetadataValueRef) *metadata.Metadata {
+func (a *nativeMetricMetadataAppender) metadataPointer(series *memSeries, ref nativeMetricMetadataValueRef) *metadata.Metadata {
 	if ref&nativeMetricMetadataDirectRefMask != 0 {
 		return a.directValues[ref&^nativeMetricMetadataDirectRefMask]
 	}
 	value := &a.values[ref-1]
 	if value.owned == nil {
-		value.owned = a.valueCache.resolve(value.metadata)
+		value.owned = a.resolveMetadata(series, value.metadata)
 	}
 	return value.owned
 }
@@ -130,23 +130,35 @@ func (a *nativeMetricMetadataAppender) metadataReference(series *memSeries, m me
 		return valueRef
 	}
 
-	// Reuse the committed value for stable high-cardinality metadata without
-	// extending its series critical section or retaining more raw values.
-	var committed *metadata.Metadata
+	valueRef := nativeMetricMetadataDirectRefMask | nativeMetricMetadataValueRef(len(a.directValues))
+	a.directValues = append(a.directValues, a.resolveMetadata(series, m))
+	return valueRef
+}
+
+// resolveMetadata reuses immutable values still owned by the series before
+// consulting the shared cache. The caller must not hold the series lock.
+func (a *nativeMetricMetadataAppender) resolveMetadata(series *memSeries, m metadata.Metadata) *metadata.Metadata {
+	var retained [maxNativeMetricMetadataVersions]*metadata.Metadata
+	var count int
 	series.Lock()
 	if native := series.nativeMetadataLocked(); native != nil {
-		committed = native.metadata
+		retained[0] = native.metadata
+		count = 1
+		for _, point := range native.older {
+			retained[count] = point.metadata
+			count++
+		}
 	}
 	series.Unlock()
 
-	// Compare after unlocking. The pointer keeps its value alive independently
-	// of the series, and the comparison need not lengthen its critical section.
-	if committed == nil || *committed != m {
-		committed = a.valueCache.resolve(m)
+	// Pointers keep the immutable values alive across concurrent truncation or
+	// deletion. Reusing a value does not reuse its observation's timestamp.
+	for _, value := range retained[:count] {
+		if *value == m {
+			return value
+		}
 	}
-	valueRef := nativeMetricMetadataDirectRefMask | nativeMetricMetadataValueRef(len(a.directValues))
-	a.directValues = append(a.directValues, committed)
-	return valueRef
+	return a.valueCache.resolve(m)
 }
 
 // mayHaveObservedSeries reports whether ref may have a buffered observation
@@ -305,7 +317,8 @@ func (s *nativeMetricMetadataStore) commitAppenderStripe(stripeIndex uint8, appe
 		position = appender.selectBatch(position)
 		for _, group := range appender.groups {
 			for _, observationRef := range appender.sorted[group.start:group.end] {
-				appender.metadataPointer(appender.observations[observationRef-1].metadataRef)
+				observation := appender.observations[observationRef-1]
+				appender.metadataPointer(observation.series, observation.metadataRef)
 			}
 		}
 		s.commitBatch(appender)
@@ -325,7 +338,7 @@ func (s *nativeMetricMetadataStore) commitBatch(appender *nativeMetricMetadataAp
 			observation := appender.observations[observationRef-1]
 			point := nativeMetricMetadataPoint{
 				effectiveFrom: observation.effectiveFrom,
-				metadata:      appender.metadataPointer(observation.metadataRef),
+				metadata:      appender.metadataPointer(series, observation.metadataRef),
 			}
 			if last := len(appender.points) - 1; last >= 0 && appender.points[last].effectiveFrom == point.effectiveFrom {
 				appender.points[last] = point
