@@ -277,10 +277,11 @@ func (a *headAppenderV2) appendFloat(s *memSeries, st, t int64, v float64, fastR
 		return nil, false, storage.ErrOutOfOrderSample
 	}
 	var observeMetadata bool
+	var equalityProof *metadata.Metadata
 	if err == nil {
 		s.markPendingCommit()
 		if m != nil {
-			observeMetadata = a.shouldObserveNativeMetricMetadataLocked(s, t, m)
+			observeMetadata, equalityProof = a.shouldObserveNativeMetricMetadataLocked(s, t, m)
 		}
 	}
 	s.Unlock()
@@ -292,6 +293,9 @@ func (a *headAppenderV2) appendFloat(s *memSeries, st, t int64, v float64, fastR
 	}
 
 	b := a.getCurrentBatch(stFloat, s.ref)
+	if equalityProof != nil {
+		a.rememberNativeMetadataEquality(equalityProof, *m)
+	}
 	b.floats = append(b.floats, record.RefSample{Ref: s.ref, ST: st, T: t, V: v})
 	b.floatSeries = append(b.floatSeries, s)
 	return s, observeMetadata, nil
@@ -313,10 +317,11 @@ func (a *headAppenderV2) appendHistogram(s *memSeries, st, t int64, h *histogram
 		return nil, false, storage.ErrOutOfOrderSample
 	}
 	var observeMetadata bool
+	var equalityProof *metadata.Metadata
 	if err == nil {
 		s.markPendingCommit()
 		if m != nil {
-			observeMetadata = a.shouldObserveNativeMetricMetadataLocked(s, t, m)
+			observeMetadata, equalityProof = a.shouldObserveNativeMetricMetadataLocked(s, t, m)
 		}
 	}
 	s.Unlock()
@@ -331,6 +336,9 @@ func (a *headAppenderV2) appendHistogram(s *memSeries, st, t int64, h *histogram
 		sTyp = stCustomBucketHistogram
 	}
 	b := a.getCurrentBatch(sTyp, s.ref)
+	if equalityProof != nil {
+		a.rememberNativeMetadataEquality(equalityProof, *m)
+	}
 	b.histograms = append(b.histograms, record.RefHistogramSample{Ref: s.ref, ST: st, T: t, H: h})
 	b.histogramSeries = append(b.histogramSeries, s)
 	return s, observeMetadata, nil
@@ -353,10 +361,11 @@ func (a *headAppenderV2) appendFloatHistogram(s *memSeries, st, t int64, fh *his
 		return nil, false, storage.ErrOutOfOrderSample
 	}
 	var observeMetadata bool
+	var equalityProof *metadata.Metadata
 	if err == nil {
 		s.markPendingCommit()
 		if m != nil {
-			observeMetadata = a.shouldObserveNativeMetricMetadataLocked(s, t, m)
+			observeMetadata, equalityProof = a.shouldObserveNativeMetricMetadataLocked(s, t, m)
 		}
 	}
 	s.Unlock()
@@ -371,6 +380,9 @@ func (a *headAppenderV2) appendFloatHistogram(s *memSeries, st, t int64, fh *his
 		sTyp = stCustomBucketFloatHistogram
 	}
 	b := a.getCurrentBatch(sTyp, s.ref)
+	if equalityProof != nil {
+		a.rememberNativeMetadataEquality(equalityProof, *m)
+	}
 	b.floatHistograms = append(b.floatHistograms, record.RefFloatHistogramSample{Ref: s.ref, ST: st, T: t, FH: fh})
 	b.floatHistogramSeries = append(b.floatHistogramSeries, s)
 	return s, observeMetadata, nil

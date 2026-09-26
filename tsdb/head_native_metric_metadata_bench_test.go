@@ -720,7 +720,7 @@ func BenchmarkNativeMetricMetadataPendingHeap(b *testing.B) {
 						m.Type = model.MetricTypeUnknown
 					}
 					s.Lock()
-					observe := app.shouldObserveNativeMetricMetadataLocked(s, timestamp, &m)
+					observe, _ := app.shouldObserveNativeMetricMetadataLocked(s, timestamp, &m)
 					s.Unlock()
 					if observe {
 						app.recordNativeMetricMetadata(s, timestamp, m)

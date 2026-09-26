@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 
+	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/storage"
@@ -29,10 +30,83 @@ import (
 )
 
 func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
-	t.Run("proofs preserve observation decisions", func(t *testing.T) {
+	t.Run("first proof survives committed state changing before admission", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		app := &headAppenderBase{head: &Head{nativeMetricMetadata: store}}
-		defer app.clearNativeMetadataEquality()
+		m := metadata.Metadata{Type: model.MetricTypeCounter, Help: strings.Repeat("a", 1024)}
+		s := &memSeries{}
+		s.Lock()
+		s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m), effectiveFrom: 100}
+		observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
+		s.Unlock()
+		require.False(t, observe)
+		require.NotNil(t, proof)
+		require.Empty(t, app.batches, "verification must not allocate a batch")
+		changed := m
+		changed.Help += "changed"
+		s.Lock()
+		s.nativeMetadataLocked().metadata = cloneNativeMetricMetadata(changed)
+		s.Unlock()
+		app.batches = []*appendBatch{{}}
+		defer app.batches[0].close(app.head)
+		app.rememberNativeMetadataEquality(proof, m)
+		require.Equal(t, m, app.batches[0].nativeMetadataEquality.values[proof])
+		s.Lock()
+		observe, proof = app.shouldObserveNativeMetricMetadataLocked(s, 101, &m)
+		s.Unlock()
+		require.True(t, observe, "the old proof must not apply to a changed committed pointer")
+		require.Nil(t, proof)
+	})
+
+	t.Run("first append admits proofs for every sample type across batches", func(t *testing.T) {
+		for _, firstType := range []string{"float", "histogram", "float histogram"} {
+			t.Run(firstType, func(t *testing.T) {
+				opts := newTestHeadDefaultOptions(1000, true)
+				opts.EnableNativeMetadata = true
+				head, _ := newTestHeadWithOptions(t, compression.None, opts)
+				m := metadata.Metadata{Type: model.MetricTypeCounter, Help: strings.Repeat("x", 1024)}
+				ls := labels.FromStrings(labels.MetricName, "memo_batches")
+				seed := head.AppenderV2(t.Context())
+				ref, err := seed.Append(0, ls, 0, 100, 1, nil, nil, storage.AOptions{Metadata: m})
+				require.NoError(t, err)
+				require.NoError(t, seed.Commit())
+				app := head.AppenderV2(t.Context()).(*headAppenderV2)
+				_, err = app.Append(ref, ls, 0, 99, 1, nil, nil, storage.AOptions{Metadata: m, RejectOutOfOrder: true})
+				require.Error(t, err)
+				require.Empty(t, app.batches, "a rejected sample must not allocate a batch or memo")
+				for i, kind := range []string{firstType, "histogram", "float histogram", "float"} {
+					var h *histogram.Histogram
+					var fh *histogram.FloatHistogram
+					switch kind {
+					case "histogram":
+						h = &histogram.Histogram{Count: 1, ZeroCount: 1}
+					case "float histogram":
+						fh = &histogram.FloatHistogram{Count: 1, ZeroCount: 1}
+					}
+					_, err = app.Append(ref, ls, 0, int64(200+i), 1, h, fh, storage.AOptions{Metadata: m})
+					require.NoError(t, err)
+					require.NotNil(t, app.batches[0].nativeMetadataEquality)
+					require.Len(t, app.batches[0].nativeMetadataEquality.values, 1)
+					require.Nil(t, app.nativeMetricMetadata)
+				}
+				require.Greater(t, len(app.batches), 1)
+				for _, b := range app.batches[1:] {
+					require.Nil(t, b.nativeMetadataEquality)
+				}
+				first := app.batches[0]
+				memo := first.nativeMetadataEquality
+				require.NoError(t, app.Commit())
+				require.Nil(t, first.nativeMetadataEquality)
+				require.Empty(t, memo.values)
+				require.Zero(t, memo.bytes)
+			})
+		}
+	})
+
+	t.Run("proofs preserve observation decisions", func(t *testing.T) {
+		store := newNativeMetricMetadataStore()
+		app := &headAppenderBase{head: &Head{nativeMetricMetadata: store}, batches: []*appendBatch{{}}}
+		defer app.batches[0].close(app.head)
 		defer app.clearNativeMetricMetadata()
 		s := store.seriesForTest(1)
 		m := metadata.Metadata{Type: model.MetricTypeCounter, Unit: "seconds", Help: strings.Repeat("a", 1024)}
@@ -41,16 +115,20 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 		observe := func(timestamp int64, value *metadata.Metadata) bool {
 			s.Lock()
 			defer s.Unlock()
-			return app.shouldObserveNativeMetricMetadataLocked(s, timestamp, value)
+			observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, timestamp, value)
+			if proof != nil {
+				app.rememberNativeMetadataEquality(proof, *value)
+			}
+			return observe
 		}
 		require.False(t, observe(100, &m))
 		require.Nil(t, app.nativeMetricMetadata, "equality must not open an observation transaction")
 		owned := nativeMetadataForTest(s).metadata
-		require.Equal(t, m, app.nativeMetadataEquality.values[owned])
+		require.Equal(t, m, app.batches[0].nativeMetadataEquality.values[owned])
 		fresh := m
 		fresh.Help = strings.Clone(m.Help)
 		require.False(t, observe(101, &fresh))
-		require.Same(t, unsafe.StringData(fresh.Help), unsafe.StringData(app.nativeMetadataEquality.values[owned].Help))
+		require.Same(t, unsafe.StringData(fresh.Help), unsafe.StringData(app.batches[0].nativeMetadataEquality.values[owned].Help))
 		require.True(t, observe(99, &m), "matching values can move the beginning of history")
 		require.False(t, observe(101, nil))
 		for _, changed := range []metadata.Metadata{
@@ -59,7 +137,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 			{Type: m.Type, Unit: m.Unit, Help: m.Help + "b"},
 		} {
 			require.True(t, observe(101, &changed))
-			require.Equal(t, fresh, app.nativeMetadataEquality.values[owned], "negative comparisons must not replace proofs")
+			require.Equal(t, fresh, app.batches[0].nativeMetadataEquality.values[owned], "negative comparisons must not replace proofs")
 		}
 		changed := m
 		changed.Help += "changed"
@@ -74,40 +152,48 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 		for _, size := range []int{1023, 1024, nativeMetricMetadataEqualityMaxBytes / 2, nativeMetricMetadataEqualityMaxBytes/2 + 1} {
 			t.Run(strconv.Itoa(size), func(t *testing.T) {
 				store := newNativeMetricMetadataStore()
-				app := &headAppenderBase{head: &Head{nativeMetricMetadata: store}}
-				defer app.clearNativeMetadataEquality()
+				app := &headAppenderBase{head: &Head{nativeMetricMetadata: store}, batches: []*appendBatch{{}}}
+				defer app.batches[0].close(app.head)
 				s := store.seriesForTest(1)
 				m := metadata.Metadata{Help: strings.Repeat("x", size)}
 				s.Lock()
 				s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m), effectiveFrom: 100}
-				require.False(t, app.shouldObserveNativeMetricMetadataLocked(s, 100, &m))
+				observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
+				require.False(t, observe)
+				if proof != nil {
+					app.rememberNativeMetadataEquality(proof, m)
+				}
 				s.Unlock()
 				if size < 1024 || size > nativeMetricMetadataEqualityMaxBytes/2 {
-					require.Nil(t, app.nativeMetadataEquality)
+					require.Nil(t, app.batches[0].nativeMetadataEquality)
 				} else {
-					require.Len(t, app.nativeMetadataEquality.values, 1)
-					require.Equal(t, 2*size, app.nativeMetadataEquality.bytes)
+					require.Len(t, app.batches[0].nativeMetadataEquality.values, 1)
+					require.Equal(t, 2*size, app.batches[0].nativeMetadataEquality.bytes)
 				}
 			})
 		}
 		for _, size := range []int{1024, 256 << 10} {
 			store := newNativeMetricMetadataStore()
-			app := &headAppenderBase{head: &Head{nativeMetricMetadata: store}}
+			app := &headAppenderBase{head: &Head{nativeMetricMetadata: store}, batches: []*appendBatch{{}}}
 			for range nativeMetricMetadataEqualityMaxEntries + 1 {
 				s := &memSeries{}
 				m := metadata.Metadata{Help: strings.Repeat("x", size)}
 				s.Lock()
 				s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m)}
-				require.False(t, app.shouldObserveNativeMetricMetadataLocked(s, 100, &m))
+				observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
+				require.False(t, observe)
+				if proof != nil {
+					app.rememberNativeMetadataEquality(proof, m)
+				}
 				s.Unlock()
 			}
-			require.Len(t, app.nativeMetadataEquality.values, min(nativeMetricMetadataEqualityMaxEntries, nativeMetricMetadataEqualityMaxBytes/(2*size)))
-			require.LessOrEqual(t, app.nativeMetadataEquality.bytes, nativeMetricMetadataEqualityMaxBytes)
-			memo := app.nativeMetadataEquality
-			app.clearNativeMetadataEquality()
+			require.Len(t, app.batches[0].nativeMetadataEquality.values, min(nativeMetricMetadataEqualityMaxEntries, nativeMetricMetadataEqualityMaxBytes/(2*size)))
+			require.LessOrEqual(t, app.batches[0].nativeMetadataEquality.bytes, nativeMetricMetadataEqualityMaxBytes)
+			memo := app.batches[0].nativeMetadataEquality
+			app.batches[0].close(app.head)
 			require.Empty(t, memo.values)
 			require.Zero(t, memo.bytes)
-			require.Nil(t, app.nativeMetadataEquality)
+			require.Nil(t, app.batches[0].nativeMetadataEquality)
 		}
 	})
 
@@ -128,7 +214,8 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 					_, err = app.Append(ref, ls, 0, 200, 1, nil, nil, storage.AOptions{Metadata: m})
 					require.NoError(t, err)
 					require.Nil(t, app.nativeMetricMetadata)
-					memo := app.nativeMetadataEquality
+					first := app.batches[0]
+					memo := first.nativeMetadataEquality
 					require.NotNil(t, memo)
 					require.NotEmpty(t, memo.values)
 					if changes {
@@ -146,7 +233,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 						require.Error(t, app.Commit())
 					}
 					require.True(t, app.closed)
-					require.Nil(t, app.nativeMetadataEquality)
+					require.Nil(t, first.nativeMetadataEquality)
 					require.Nil(t, app.nativeMetricMetadata)
 					require.Empty(t, memo.values)
 					require.Zero(t, memo.bytes)
