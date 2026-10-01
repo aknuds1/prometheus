@@ -18,9 +18,11 @@ import (
 	"math"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/common/model"
 	"go.uber.org/atomic"
@@ -168,6 +170,16 @@ func metricMetadataBenchmarkWALPosition(b *testing.B, wal *wlog.WL) int64 {
 	return int64(segment)*int64(wlog.DefaultSegmentSize) + int64(offset)
 }
 
+// metricMetadataBenchmarkP99 returns the 99th percentile of durations, which it
+// sorts in place.
+func metricMetadataBenchmarkP99(durations []time.Duration) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+	slices.Sort(durations)
+	return durations[(len(durations)*99+99)/100-1]
+}
+
 func metricMetadataBenchmarkHeapAlloc() uint64 {
 	// The second collection clears sync.Pool victim caches left by the commit.
 	runtime.GC()
@@ -178,8 +190,22 @@ func metricMetadataBenchmarkHeapAlloc() uint64 {
 }
 
 func appendMetricMetadataBenchmarkRound(b *testing.B, h *Head, fixture *metricMetadataBenchmarkFixture, refs []storage.SeriesRef, variant int, timestamp int64) {
+	appendMetricMetadataBenchmarkOptions(b, h, fixture, refs, fixture.options[variant], timestamp)
+}
+
+// freshOptions copies a variant's options into newly allocated strings, as a
+// producer that decodes every request would supply them.
+func (f *metricMetadataBenchmarkFixture) freshOptions(variant int) []storage.AOptions {
+	options := make([]storage.AOptions, len(f.options[variant]))
+	for i, o := range f.options[variant] {
+		o.Metadata = metadata.Metadata{Type: model.MetricType(strings.Clone(string(o.Metadata.Type))), Unit: strings.Clone(o.Metadata.Unit), Help: strings.Clone(o.Metadata.Help)}
+		options[i] = o
+	}
+	return options
+}
+
+func appendMetricMetadataBenchmarkOptions(b *testing.B, h *Head, fixture *metricMetadataBenchmarkFixture, refs []storage.SeriesRef, options []storage.AOptions, timestamp int64) {
 	app := h.AppenderV2(b.Context())
-	options := fixture.options[variant]
 	for i, lset := range fixture.labels {
 		ref, err := app.Append(refs[i], lset, 0, timestamp, float64(timestamp), nil, nil, options[fixture.familyBySeries[i]])
 		if err != nil {
@@ -263,13 +289,18 @@ func validateMetricMetadataBenchmarkState(b *testing.B, h *Head, mode metricMeta
 // BenchmarkHeadMetricMetadataRetainedHeap compares initial ingestion and
 // retained per-series heap. Run each case six times in fresh processes with
 // -benchtime=1x -cpu=2 so global interning state cannot cross cases.
+//
+// Producer-freed scenarios allocate fresh strings for every round inside the
+// measurement window and drop them before measuring, as a freed remote-write
+// request would, so retained heap counts only what storage keeps.
 func BenchmarkHeadMetricMetadataRetainedHeap(b *testing.B) {
 	scenarios := []struct {
-		name        string
-		numSeries   int
-		numFamilies int
-		numVersions int
-		numVariants int
+		name          string
+		numSeries     int
+		numFamilies   int
+		numVersions   int
+		numVariants   int
+		producerFreed bool
 	}{
 		{name: "stable", numSeries: 100_000, numFamilies: 100, numVersions: 1, numVariants: 1},
 		{name: "stable-unique", numSeries: 25_000, numFamilies: 25_000, numVersions: 1, numVariants: 1},
@@ -278,6 +309,8 @@ func BenchmarkHeadMetricMetadataRetainedHeap(b *testing.B) {
 		{name: "observed-versions=5", numSeries: 25_000, numFamilies: 100, numVersions: 5, numVariants: 5},
 		{name: "observed-versions=4", numSeries: 25_000, numFamilies: 100, numVersions: 4, numVariants: 4},
 		{name: fmt.Sprintf("observed-versions=%d", maxNativeMetricMetadataVersions+1), numSeries: 10_000, numFamilies: 100, numVersions: maxNativeMetricMetadataVersions + 1, numVariants: 2},
+		{name: "stable/producer-freed", numSeries: 100_000, numFamilies: 100, numVersions: 1, numVariants: 1, producerFreed: true},
+		{name: "stable-unique/producer-freed", numSeries: 25_000, numFamilies: 25_000, numVersions: 1, numVariants: 1, producerFreed: true},
 	}
 
 	for _, scenario := range scenarios {
@@ -302,7 +335,12 @@ func BenchmarkHeadMetricMetadataRetainedHeap(b *testing.B) {
 					b.StartTimer()
 
 					for version := range scenario.numVersions {
-						appendMetricMetadataBenchmarkRound(b, h, fixture, refs, version%scenario.numVariants, 100+int64(version))
+						variant := version % scenario.numVariants
+						if scenario.producerFreed {
+							appendMetricMetadataBenchmarkOptions(b, h, fixture, refs, fixture.freshOptions(variant), 100+int64(version))
+							continue
+						}
+						appendMetricMetadataBenchmarkRound(b, h, fixture, refs, variant, 100+int64(version))
 					}
 
 					b.StopTimer()
@@ -790,6 +828,94 @@ func BenchmarkHeadMetricMetadataSeriesChurn(b *testing.B) {
 
 			b.ReportMetric(float64(totalWALBytes)/float64(b.N*numSeries), "wal-B/series")
 		})
+	}
+}
+
+// BenchmarkHeadMetricMetadataDistinctChurn measures new series carrying
+// metadata values the Head has never seen, as fresh strings in the batches a
+// remote-write receiver commits. Each value is carried by seen series of one
+// round. Truncation and heap measurements run outside timing; the truncated
+// heap is absolute and includes whatever the value cache keeps. Use a fixed
+// -benchtime=Nx.
+func BenchmarkHeadMetricMetadataDistinctChurn(b *testing.B) {
+	const numSeries, batch, roundSpacing = 10_000, 500, 3_000
+
+	for _, helpBytes := range []int{64, 1024} {
+		for _, seen := range []int{1, 2} {
+			for _, mode := range metricMetadataBenchmarkModes() {
+				b.Run(fmt.Sprintf("help=%d/seen=%d/mode=%s", helpBytes, seen, mode.name), func(b *testing.B) {
+					h, _, closeHead := newMetricMetadataBenchmarkHead(b, mode, 1_000, true)
+					defer closeHead()
+					lsets := make([]labels.Labels, numSeries)
+					options := make([]storage.AOptions, numSeries)
+					refs := make([]storage.SeriesRef, numSeries)
+					baseline := metricMetadataBenchmarkHeapAlloc()
+					var liveHeap, truncatedHeap int64
+					commits := make([]time.Duration, 0, b.N*numSeries/batch)
+					b.ReportAllocs()
+					b.ResetTimer()
+					b.StopTimer()
+					for round := range b.N {
+						// Value identifiers increase across rounds, so every
+						// value is new to the Head when its round starts.
+						for i := range numSeries {
+							value := (round*numSeries + i) / seen
+							lsets[i] = labels.FromStrings(labels.MetricName, "distinct_churn_total", "series", strconv.Itoa(round*numSeries+i))
+							help := fmt.Sprintf("Distinct churn value %d ", value)
+							options[i] = storage.AOptions{Metadata: metadata.Metadata{Type: model.MetricTypeCounter, Unit: "requests", Help: help + strings.Repeat("x", helpBytes-len(help))}}
+						}
+						clear(refs)
+						timestamp := 100 + int64(round)*roundSpacing
+						before := metricMetadataBenchmarkHeapAlloc()
+						b.StartTimer()
+						for begin := 0; begin < numSeries; begin += batch {
+							start := time.Now()
+							app := h.AppenderV2(b.Context())
+							for i := begin; i < begin+batch; i++ {
+								ref, err := app.Append(0, lsets[i], 0, timestamp, 1, nil, nil, options[i])
+								if err != nil {
+									b.Fatal(err)
+								}
+								refs[i] = ref
+							}
+							if err := app.Commit(); err != nil {
+								b.Fatal(err)
+							}
+							commits = append(commits, time.Since(start))
+						}
+						b.StopTimer()
+						want := make([]metadata.Metadata, 0, 2)
+						for _, i := range []int{0, numSeries - 1} {
+							want = append(want, options[i].Metadata)
+						}
+						clear(options)
+						liveHeap += int64(metricMetadataBenchmarkHeapAlloc()) - int64(before)
+						if mode.nativeEnabled {
+							if got := h.nativeMetricMetadata.series.Load(); got != numSeries {
+								b.Fatalf("unexpected native series: %d", got)
+							}
+							for j, i := range []int{0, numSeries - 1} {
+								versions, _, ok := h.nativeMetricMetadata.get(chunks.HeadSeriesRef(refs[i]))
+								if !ok || len(versions) != 1 || versions[0].EffectiveFrom != timestamp || versions[0].Metadata != want[j] {
+									b.Fatalf("unexpected native metadata for series %d", i)
+								}
+							}
+						}
+						if err := h.truncateMemory(timestamp + roundSpacing/2); err != nil {
+							b.Fatal(err)
+						}
+						if got := h.NumSeries(); got != 0 {
+							b.Fatalf("unexpected series count after truncation: %d", got)
+						}
+						truncatedHeap = int64(metricMetadataBenchmarkHeapAlloc()) - int64(baseline)
+					}
+					b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*numSeries), "ns/series")
+					b.ReportMetric(float64(metricMetadataBenchmarkP99(commits).Nanoseconds()), "p99-ns/txn")
+					b.ReportMetric(float64(liveHeap)/float64(b.N*numSeries), "live-heap-B/series")
+					b.ReportMetric(float64(truncatedHeap), "truncated-heap-B")
+				})
+			}
+		}
 	}
 }
 

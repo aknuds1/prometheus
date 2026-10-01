@@ -17,13 +17,16 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/common/model"
 	"go.uber.org/atomic"
 
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 )
@@ -166,92 +169,138 @@ func BenchmarkHeadMetricMetadataLookupAppendConcurrent(b *testing.B) {
 // BenchmarkHeadMetricMetadataAppendFixedConcurrency keeps the series, worker
 // count, batch size, and total work fixed while GOMAXPROCS changes.
 // CPU counts that do not divide eight are skipped.
+//
+// Changed series alternate between two values by default, which the Head
+// already holds. With values=fresh, every round instead gives its changed
+// series per-family values the Head has never seen, generated before timing.
 func BenchmarkHeadMetricMetadataAppendFixedConcurrency(b *testing.B) {
 	const workers, perWorker, families = 8, 1000, 100
-	for _, changedPercent := range []int{0, 1, 100} {
-		for _, mode := range []metricMetadataBenchmarkMode{{name: "off"}, {name: "native", nativeEnabled: true}} {
-			b.Run(fmt.Sprintf("change=%d/mode=%s", changedPercent, mode.name), func(b *testing.B) {
-				procs := runtime.GOMAXPROCS(0)
-				if procs > workers || workers%procs != 0 {
-					b.Skipf("GOMAXPROCS must divide %d, got %d", workers, procs)
+	for _, fresh := range []bool{false, true} {
+		for _, changedPercent := range []int{0, 1, 100} {
+			if fresh && changedPercent == 0 {
+				continue
+			}
+			for _, mode := range []metricMetadataBenchmarkMode{{name: "off"}, {name: "native", nativeEnabled: true}} {
+				name := fmt.Sprintf("change=%d/mode=%s", changedPercent, mode.name)
+				if fresh {
+					name = fmt.Sprintf("change=%d/values=fresh/mode=%s", changedPercent, mode.name)
 				}
-				h, _, closeHead := newMetricMetadataBenchmarkHead(b, mode, 1_000_000_000, false)
-				b.Cleanup(closeHead)
-				fixture := newMetricMetadataBenchmarkFixture(workers*perWorker, families, maxNativeMetricMetadataVersions+2)
-				refs := make([]storage.SeriesRef, workers*perWorker)
-				for version := range maxNativeMetricMetadataVersions {
-					appendMetricMetadataBenchmarkRound(b, h, fixture, refs, version, 100+int64(version))
-				}
-				var changed [workers * perWorker]bool
-				for worker := range workers {
-					for i := range perWorker {
-						// Ten series per worker, spread across 80 distinct families.
-						changed[worker*perWorker+i] = changedPercent == 100 || changedPercent == 1 && i%100 == (i/100+worker*10)%100
-					}
-				}
-				var nextWorker atomic.Uint64
-				var completed [workers]int64
-				b.ReportAllocs()
-				b.SetParallelism(workers / procs)
-				b.ResetTimer()
-				b.RunParallel(func(pb *testing.PB) {
-					worker := int(nextWorker.Add(1) - 1)
-					if worker >= workers {
-						b.Fatal("too many workers")
-					}
-					var rounds int64
-					for pb.Next() {
-						app := h.AppenderV2(b.Context())
-						for i := worker * perWorker; i < (worker+1)*perWorker; i++ {
-							variant := maxNativeMetricMetadataVersions - 1
-							if changed[i] {
-								variant = maxNativeMetricMetadataVersions + int(rounds%2)
-							}
-							ref, err := app.Append(refs[i], fixture.labels[i], 0, 1000+rounds, float64(rounds), nil, nil, fixture.options[variant][fixture.familyBySeries[i]])
-							if err != nil {
-								b.Fatal(err)
-							}
-							refs[i] = ref
-						}
-						if err := app.Commit(); err != nil {
-							b.Fatal(err)
-						}
-						rounds++
-					}
-					completed[worker] = rounds
+				b.Run(name, func(b *testing.B) {
+					benchmarkHeadMetricMetadataAppendFixedConcurrency(b, mode, changedPercent, fresh, workers, perWorker, families)
 				})
-				b.StopTimer()
-				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*perWorker), "ns/sample")
-				var rounds, evictions int64
-				for _, n := range completed {
-					rounds += n
-				}
-				if rounds != int64(b.N) || nextWorker.Load() != workers {
-					b.Fatalf("unexpected completed work: %d rounds, %d workers", rounds, nextWorker.Load())
-				}
-				validateMetricMetadataBenchmarkSamples(b, h, workers*perWorker*maxNativeMetricMetadataVersions+rounds*perWorker)
-				if !mode.nativeEnabled {
-					validateMetricMetadataBenchmarkState(b, h, mode, fixture, refs, maxNativeMetricMetadataVersions)
-					return
-				}
-				for i, ref := range refs {
-					n := completed[i/perWorker]
-					variant := maxNativeMetricMetadataVersions - 1
-					updated := changed[i] && n > 0
-					if updated {
-						variant = maxNativeMetricMetadataVersions + int((n-1)%2)
-						evictions += n
-					}
-					versions, truncated, ok := h.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
-					if !ok || len(versions) != maxNativeMetricMetadataVersions || truncated != updated || !versions[len(versions)-1].Metadata.Equals(fixture.options[variant][fixture.familyBySeries[i]].Metadata) {
-						b.Fatalf("unexpected metadata for series %d after %d rounds", i, n)
-					}
-				}
-				if h.NumSeries() != workers*perWorker || h.nativeMetricMetadata.series.Load() != workers*perWorker || h.nativeMetricMetadata.versions.Load() != workers*perWorker*maxNativeMetricMetadataVersions || h.nativeMetricMetadata.evictions.Load() != uint64(evictions) {
-					b.Fatal("unexpected series, version, or eviction counters")
-				}
-			})
+			}
 		}
+	}
+}
+
+func benchmarkHeadMetricMetadataAppendFixedConcurrency(b *testing.B, mode metricMetadataBenchmarkMode, changedPercent int, fresh bool, workers, perWorker, families int) {
+	procs := runtime.GOMAXPROCS(0)
+	if procs > workers || workers%procs != 0 {
+		b.Skipf("GOMAXPROCS must divide %d, got %d", workers, procs)
+	}
+	h, _, closeHead := newMetricMetadataBenchmarkHead(b, mode, 1_000_000_000, false)
+	b.Cleanup(closeHead)
+	fixture := newMetricMetadataBenchmarkFixture(workers*perWorker, families, maxNativeMetricMetadataVersions+2)
+	refs := make([]storage.SeriesRef, workers*perWorker)
+	for version := range maxNativeMetricMetadataVersions {
+		appendMetricMetadataBenchmarkRound(b, h, fixture, refs, version, 100+int64(version))
+	}
+	changed := make([]bool, workers*perWorker)
+	for worker := range workers {
+		for i := range perWorker {
+			// Ten series per worker, spread across 80 distinct families.
+			changed[worker*perWorker+i] = changedPercent == 100 || changedPercent == 1 && i%100 == (i/100+worker*10)%100
+		}
+	}
+	// Fresh rounds are claimed in order; round r gives each family a value
+	// that no other round uses.
+	var freshValues [][]metadata.Metadata
+	if fresh {
+		freshValues = make([][]metadata.Metadata, b.N)
+		for r := range freshValues {
+			freshValues[r] = make([]metadata.Metadata, families)
+			for f := range families {
+				freshValues[r][f] = metadata.Metadata{Type: model.MetricTypeCounter, Unit: "requests", Help: fmt.Sprintf("Total requests processed by benchmark family %03d, fresh round %d.", f, r)}
+			}
+		}
+	}
+	var nextWorker, nextFresh atomic.Uint64
+	completed := make([]int64, workers)
+	latencies := make([][]time.Duration, workers)
+	lastFresh := make([]int, workers)
+	b.ReportAllocs()
+	b.SetParallelism(workers / procs)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		worker := int(nextWorker.Add(1) - 1)
+		if worker >= workers {
+			b.Fatal("too many workers")
+		}
+		var rounds int64
+		for pb.Next() {
+			start := time.Now()
+			var values []metadata.Metadata
+			if fresh {
+				lastFresh[worker] = int(nextFresh.Add(1) - 1)
+				values = freshValues[lastFresh[worker]]
+			}
+			app := h.AppenderV2(b.Context())
+			for i := worker * perWorker; i < (worker+1)*perWorker; i++ {
+				variant := maxNativeMetricMetadataVersions - 1
+				opts := fixture.options[variant][fixture.familyBySeries[i]]
+				switch {
+				case changed[i] && fresh:
+					opts.Metadata = values[fixture.familyBySeries[i]]
+				case changed[i]:
+					opts = fixture.options[maxNativeMetricMetadataVersions+int(rounds%2)][fixture.familyBySeries[i]]
+				}
+				ref, err := app.Append(refs[i], fixture.labels[i], 0, 1000+rounds, float64(rounds), nil, nil, opts)
+				if err != nil {
+					b.Fatal(err)
+				}
+				refs[i] = ref
+			}
+			if err := app.Commit(); err != nil {
+				b.Fatal(err)
+			}
+			latencies[worker] = append(latencies[worker], time.Since(start))
+			rounds++
+		}
+		completed[worker] = rounds
+	})
+	b.StopTimer()
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*perWorker), "ns/sample")
+	b.ReportMetric(float64(metricMetadataBenchmarkP99(slices.Concat(latencies...)).Nanoseconds()), "p99-ns/txn")
+	var rounds, evictions int64
+	for _, n := range completed {
+		rounds += n
+	}
+	if rounds != int64(b.N) || nextWorker.Load() != uint64(workers) || fresh && nextFresh.Load() != uint64(b.N) {
+		b.Fatalf("unexpected completed work: %d rounds, %d workers, %d fresh rounds", rounds, nextWorker.Load(), nextFresh.Load())
+	}
+	validateMetricMetadataBenchmarkSamples(b, h, int64(workers*perWorker*maxNativeMetricMetadataVersions)+rounds*int64(perWorker))
+	if !mode.nativeEnabled {
+		validateMetricMetadataBenchmarkState(b, h, mode, fixture, refs, maxNativeMetricMetadataVersions)
+		return
+	}
+	for i, ref := range refs {
+		n := completed[i/perWorker]
+		want := fixture.options[maxNativeMetricMetadataVersions-1][fixture.familyBySeries[i]].Metadata
+		updated := changed[i] && n > 0
+		if updated {
+			want = fixture.options[maxNativeMetricMetadataVersions+int((n-1)%2)][fixture.familyBySeries[i]].Metadata
+			if fresh {
+				want = freshValues[lastFresh[i/perWorker]][fixture.familyBySeries[i]]
+			}
+			evictions += n
+		}
+		versions, truncated, ok := h.nativeMetricMetadata.get(chunks.HeadSeriesRef(ref))
+		if !ok || len(versions) != maxNativeMetricMetadataVersions || truncated != updated || !versions[len(versions)-1].Metadata.Equals(want) {
+			b.Fatalf("unexpected metadata for series %d after %d rounds", i, n)
+		}
+	}
+	if h.NumSeries() != uint64(workers*perWorker) || h.nativeMetricMetadata.series.Load() != int64(workers*perWorker) || h.nativeMetricMetadata.versions.Load() != int64(workers*perWorker*maxNativeMetricMetadataVersions) || h.nativeMetricMetadata.evictions.Load() != uint64(evictions) {
+		b.Fatal("unexpected series, version, or eviction counters")
 	}
 }
 
