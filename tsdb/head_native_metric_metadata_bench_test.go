@@ -16,6 +16,7 @@ package tsdb
 import (
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -178,6 +179,22 @@ func metricMetadataBenchmarkP99(durations []time.Duration) time.Duration {
 	}
 	slices.Sort(durations)
 	return durations[(len(durations)*99+99)/100-1]
+}
+
+// distinctChurnOwnedEnv selects whether BenchmarkHeadMetricMetadataDistinctChurn
+// declares its metadata strings owned: on (the default) or off.
+const distinctChurnOwnedEnv = "PROMETHEUS_DISTINCT_CHURN_OWNED"
+
+func distinctChurnOwned(b *testing.B) bool {
+	switch v, ok := os.LookupEnv(distinctChurnOwnedEnv); {
+	case !ok, v == "on":
+		return true
+	case v == "off":
+		return false
+	default:
+		b.Fatalf("%s must be on or off, got %q", distinctChurnOwnedEnv, v)
+		return false
+	}
 }
 
 func metricMetadataBenchmarkHeapAlloc() uint64 {
@@ -837,10 +854,12 @@ func BenchmarkHeadMetricMetadataSeriesChurn(b *testing.B) {
 // metadata values the Head has never seen, as fresh strings in the batches a
 // remote-write receiver commits. Each value is carried by seen series of one
 // round. Truncation and heap measurements run outside timing; the truncated
-// heap is absolute and includes whatever the value cache keeps. Use a fixed
-// -benchtime=Nx.
+// heap is absolute and includes whatever the value cache keeps. The strings
+// are declared owned unless PROMETHEUS_DISTINCT_CHURN_OWNED is off; the owned
+// metric reports which. Use a fixed -benchtime=Nx.
 func BenchmarkHeadMetricMetadataDistinctChurn(b *testing.B) {
 	const numSeries, batch, roundSpacing = 10_000, 500, 3_000
+	owned := distinctChurnOwned(b)
 
 	for _, helpBytes := range []int{64, 1024} {
 		for _, seen := range []int{1, 2} {
@@ -866,7 +885,7 @@ func BenchmarkHeadMetricMetadataDistinctChurn(b *testing.B) {
 							help := fmt.Sprintf("Distinct churn value %d ", value)
 							// Concatenation allocates exactly; decoded remote-write
 							// symbols are owned the same way.
-							options[i] = storage.AOptions{Metadata: metadata.Metadata{Type: model.MetricTypeCounter, Unit: "requests", Help: help + strings.Repeat("x", helpBytes-len(help))}, MetadataOwned: true}
+							options[i] = storage.AOptions{Metadata: metadata.Metadata{Type: model.MetricTypeCounter, Unit: "requests", Help: help + strings.Repeat("x", helpBytes-len(help))}, MetadataOwned: owned}
 						}
 						clear(refs)
 						timestamp := 100 + int64(round)*roundSpacing
@@ -917,6 +936,11 @@ func BenchmarkHeadMetricMetadataDistinctChurn(b *testing.B) {
 					b.ReportMetric(float64(metricMetadataBenchmarkP99(commits).Nanoseconds()), "p99-ns/txn")
 					b.ReportMetric(float64(liveHeap)/float64(b.N*numSeries), "live-heap-B/series")
 					b.ReportMetric(float64(truncatedHeap), "truncated-heap-B")
+					ownedMetric := 0.0
+					if owned {
+						ownedMetric = 1
+					}
+					b.ReportMetric(ownedMetric, "owned")
 				})
 			}
 		}
