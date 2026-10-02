@@ -43,6 +43,12 @@ const (
 	committedScrapeContentType = "application/openmetrics-text"
 )
 
+// committedScrapeBase is every run's first scrape time. It is fixed, so runs
+// cut the same TSDB chunks whenever they run. It is midnight UTC, so no shape's
+// scrapes cross a day, the test storage's chunk range. It precedes the scrape
+// loop's future-sample limit.
+var committedScrapeBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
 type committedScrapeShape struct {
 	name                      string
 	targets, families, perFam int
@@ -161,7 +167,7 @@ type committedScrapeRun struct {
 	loops   []*scrapeLoop
 	payload []byte
 	scrapes int
-	// base precedes the scrape loop's future-sample limit for every scrape.
+	// base is the first scrape's time.
 	base time.Time
 }
 
@@ -175,7 +181,7 @@ func newCommittedScrapeRun(tb testing.TB, shape committedScrapeShape, mode strin
 	})
 	db.DisableCompactions()
 	fanout := storage.NewFanout(promslog.NewNopLogger(), db)
-	r := &committedScrapeRun{shape: shape, mode: mode, db: db, loops: make([]*scrapeLoop, shape.targets), base: time.Now().Add(-7 * 24 * time.Hour).Truncate(time.Second)}
+	r := &committedScrapeRun{shape: shape, mode: mode, db: db, loops: make([]*scrapeLoop, shape.targets), base: committedScrapeBase}
 	for t := range r.loops {
 		target := "t" + strconv.Itoa(t)
 		r.loops[t], _ = newTestScrapeLoop(tb, func(sl *scrapeLoop) {
@@ -349,6 +355,7 @@ func BenchmarkScrapeLoopAppendCommitted(b *testing.B) {
 					heapBefore = committedScrapeHeapAlloc()
 				}
 				r := newCommittedScrapeRun(b, shape, mode)
+				b.Logf("synthetic base %s", r.base.Format(time.RFC3339))
 				var warmup, steady committedScrapeTotals
 				var before, after runtime.MemStats
 				var sharingLog []string
