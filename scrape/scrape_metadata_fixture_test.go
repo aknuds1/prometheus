@@ -17,6 +17,7 @@ package scrape
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -70,6 +71,39 @@ var committedScrapeModes = []string{committedScrapeNative, committedScrapeWAL, c
 // They run outside timing at every sharing checkpoint and must not change
 // the scrapes; the final values are reported as metrics.
 var committedScrapeReports []func(tb testing.TB, r *committedScrapeRun) (unit string, value float64)
+
+// Benchmark switches, each "on" or "off". Reports default to on and the heap
+// measurement to off, which keeps the timed conditions of earlier runs.
+// Turning reports off still measures sharing at every checkpoint, so builds
+// with and without registered reports do the same checkpoint work.
+const (
+	committedScrapeReportsEnv = "PROMETHEUS_COMMITTED_SCRAPE_REPORTS"
+	committedScrapeHeapEnv    = "PROMETHEUS_COMMITTED_SCRAPE_HEAP"
+)
+
+func committedScrapeSwitch(tb testing.TB, name string, unset bool) bool {
+	switch v, ok := os.LookupEnv(name); {
+	case !ok:
+		return unset
+	case v == "on":
+		return true
+	case v == "off":
+		return false
+	default:
+		tb.Fatalf("%s must be on or off, got %q", name, v)
+		return false
+	}
+}
+
+// committedScrapeHeapAlloc returns live heap bytes after two collections; the
+// second clears sync.Pool victim caches.
+func committedScrapeHeapAlloc() uint64 {
+	runtime.GC()
+	runtime.GC()
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	return stats.HeapAlloc
+}
 
 func (s committedScrapeShape) samplesPerScrape() int { return s.targets * s.families * s.perFam }
 
@@ -305,6 +339,15 @@ func BenchmarkScrapeLoopAppendCommitted(b *testing.B) {
 	for _, shape := range committedScrapeShapes {
 		for _, mode := range committedScrapeModes {
 			b.Run(fmt.Sprintf("%s/mode=%s", shape.name, mode), func(b *testing.B) {
+				var reports []func(testing.TB, *committedScrapeRun) (string, float64)
+				if committedScrapeSwitch(b, committedScrapeReportsEnv, true) {
+					reports = committedScrapeReports
+				}
+				measureHeap := committedScrapeSwitch(b, committedScrapeHeapEnv, false)
+				var heapBefore uint64
+				if measureHeap {
+					heapBefore = committedScrapeHeapAlloc()
+				}
 				r := newCommittedScrapeRun(b, shape, mode)
 				var warmup, steady committedScrapeTotals
 				var before, after runtime.MemStats
@@ -337,7 +380,7 @@ func BenchmarkScrapeLoopAppendCommitted(b *testing.B) {
 					if r.native() && ((i+1)&i == 0 || i == b.N-1) {
 						shared, total := r.sharing(b)
 						entry := fmt.Sprintf("%d:%d/%d", i+1, shared, total)
-						for _, report := range committedScrapeReports {
+						for _, report := range reports {
 							unit, value := report(b, r)
 							entry += fmt.Sprintf(",%s=%g", unit, value)
 							if i == b.N-1 {
@@ -352,6 +395,16 @@ func BenchmarkScrapeLoopAppendCommitted(b *testing.B) {
 				}
 				warmup.report(b, "warmup-")
 				steady.report(b, "")
+				b.ReportMetric(float64(len(reports)), "reports")
+				if measureHeap {
+					// Live heap after the last timed scrape and checkpoint, with the
+					// TSDB, every target's scrape loop and cache, and the benchmark's
+					// own payload and bookkeeping alive.
+					retained := int64(committedScrapeHeapAlloc()) - int64(heapBefore)
+					runtime.KeepAlive(r)
+					b.ReportMetric(float64(retained), "retained-heap-B")
+					b.ReportMetric(float64(retained)/float64(r.db.Head().NumSeries()), "retained-heap-B/series")
+				}
 				if len(sharingLog) > 0 {
 					b.Logf("sharing by scrape: %s", strings.Join(sharingLog, " "))
 				}
