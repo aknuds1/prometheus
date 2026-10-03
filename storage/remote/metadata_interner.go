@@ -46,9 +46,12 @@ func newMetadataInterner(entries, bytes int) *metadataInterner {
 // and the interner may retain m's strings. Values larger than a generation's
 // byte bound are never shared.
 func (i *metadataInterner) intern(m metadata.Metadata) *metadata.Metadata {
+	// Copy m only where a new value is needed: taking m's address would move
+	// it to the heap on entry, allocating on every hit.
 	cost := len(m.Type) + len(m.Unit) + len(m.Help)
 	if cost > i.limit {
-		return &m
+		unshared := m
+		return &unshared
 	}
 	i.mtx.Lock()
 	defer i.mtx.Unlock()
@@ -57,7 +60,8 @@ func (i *metadataInterner) intern(m metadata.Metadata) *metadata.Metadata {
 	}
 	v, ok := i.older[m]
 	if !ok {
-		v = &m
+		owned := m
+		v = &owned
 	}
 	if len(i.current) >= i.entries || i.bytes+cost > i.limit {
 		i.older, i.current, i.bytes = i.current, map[metadata.Metadata]*metadata.Metadata{}, 0

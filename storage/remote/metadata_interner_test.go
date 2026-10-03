@@ -66,6 +66,26 @@ func TestMetadataInterner(t *testing.T) {
 		require.NotSame(t, unshared, i.intern(oversized))
 		require.NotContains(t, i.current, oversized)
 	})
+	t.Run("hits do not allocate", func(t *testing.T) {
+		i := newMetadataInterner(4, 1<<10)
+		m := value(1)
+		want := i.intern(m)
+		// Call through a method value, as queue managers' callbacks do.
+		intern := i.intern
+		var got *metadata.Metadata
+		require.Zero(t, testing.AllocsPerRun(100, func() { got = intern(m) }))
+		require.Same(t, want, got)
+		// Promotion from the older generation keeps the value, and later hits
+		// do not allocate. Promotion itself may grow the new generation's map.
+		for n := 2; n <= 5; n++ {
+			i.intern(value(n))
+		}
+		require.NotContains(t, i.current, m)
+		require.Contains(t, i.older, m)
+		require.Same(t, want, intern(m))
+		require.Zero(t, testing.AllocsPerRun(100, func() { got = intern(m) }))
+		require.Same(t, want, got)
+	})
 	t.Run("concurrent callers", func(t *testing.T) {
 		i := newMetadataInterner(8, 1<<10)
 		var wg sync.WaitGroup
