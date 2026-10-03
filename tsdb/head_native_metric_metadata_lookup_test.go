@@ -15,6 +15,7 @@ package tsdb
 
 import (
 	"context"
+	"errors"
 	"math"
 	"runtime"
 	"strconv"
@@ -566,8 +567,6 @@ func TestHeadLookupNativeMetricMetadataPublication(t *testing.T) {
 				}
 				return
 			}
-			_, before, err := wal.LastSegmentAndOffset()
-			require.NoError(t, err)
 			series := head.series.getByID(chunks.HeadSeriesRef(ref))
 			series.Lock()
 			locked := true
@@ -578,15 +577,13 @@ func TestHeadLookupNativeMetricMetadataPublication(t *testing.T) {
 			}()
 			done := make(chan error, 1)
 			go func() { done <- app.Commit() }()
+			// Commit holds the barrier from before logging, and its pre-log
+			// pass waits for the series lock. Lookups wait for publication.
 			require.Eventually(t, func() bool {
-				_, after, err := wal.LastSegmentAndOffset()
-				return err == nil && after > before
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+				defer cancel()
+				return errors.Is(head.LookupNativeMetricMetadata(ctx, lookups), context.DeadlineExceeded)
 			}, time.Second, time.Millisecond)
-			// The new sample is already visible in the WAL, but publication is
-			// blocked. Without the barrier this returns old or absent metadata.
-			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-			defer cancel()
-			require.ErrorIs(t, head.LookupNativeMetricMetadata(ctx, lookups), context.DeadlineExceeded)
 			require.Nil(t, lookups[0].Metadata)
 			series.Unlock()
 			locked = false

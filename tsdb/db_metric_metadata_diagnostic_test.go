@@ -364,7 +364,8 @@ func (f *metadataDiagnosticFixture) validateWAL(tb testing.TB) metadataDiagnosti
 	seenMetadata := make([]bool, c.Series)
 	var series []record.RefSeries
 	var samples []record.RefSample
-	var metas []record.RefMetadata
+	var metas []record.RefNativeMetadata
+	var points []record.RefNativeMetadataPoint
 	out := metadataDiagnosticWAL{}
 	for r.Next() {
 		data := r.Record()
@@ -397,14 +398,20 @@ func (f *metadataDiagnosticFixture) validateWAL(tb testing.TB) metadataDiagnosti
 				out.Samples++
 			}
 		case record.Metadata:
-			metas, err = d.Metadata(data, metas[:0])
+			// WAL mode logs legacy entries; native mode logs merge groups.
+			metas, points, err = d.NativeMetadata(data, metas[:0], points[:0])
 			if err != nil {
 				tb.Fatal(err)
 			}
+			kind := map[string]record.NativeMetadataKind{"wal": record.NativeMetadataLegacy, "native": record.NativeMetadataGroup}
 			for _, m := range metas {
 				id, ok := ids[m.Ref]
 				want := f.values[id%c.Values]
-				if !ok || c.Mode != "wal" || seenMetadata[id] || m.Type != record.GetMetricType(want.Type) || m.Unit != want.Unit || m.Help != want.Help {
+				wantKind, logged := kind[c.Mode]
+				if !ok || !logged || seenMetadata[id] || m.Kind != wantKind || len(m.Points) != 1 {
+					tb.Fatal("invalid WAL metadata")
+				}
+				if p := m.Points[0]; p.Type != record.GetMetricType(want.Type) || p.Unit != want.Unit || p.Help != want.Help {
 					tb.Fatal("invalid WAL metadata")
 				}
 				seenMetadata[id] = true
@@ -417,7 +424,8 @@ func (f *metadataDiagnosticFixture) validateWAL(tb testing.TB) metadataDiagnosti
 	if r.Err() != nil {
 		tb.Fatal(r.Err())
 	}
-	if out.Series != c.Series || out.Samples != c.Series*(c.Sweeps+1) || (c.Mode == "wal" && out.Metadata != c.Series) || (c.Mode != "wal" && out.Metadata != 0) {
+	logsMetadata := c.Mode == "wal" || c.Mode == "native"
+	if out.Series != c.Series || out.Samples != c.Series*(c.Sweeps+1) || (logsMetadata && out.Metadata != c.Series) || (!logsMetadata && out.Metadata != 0) {
 		tb.Fatalf("invalid WAL totals: %+v", out)
 	}
 	for _, n := range steps {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/record"
 )
 
 const (
@@ -83,6 +84,9 @@ type nativeMetricMetadataAppender struct {
 	lastMetadata       metadata.Metadata
 	lastObservation    nativeMetricMetadataObservationRef
 	haveLast           bool
+	// Reusable WAL entries for the pre-log pass; they retain caller strings.
+	walEntries []record.RefNativeMetadata
+	walPoints  []record.RefNativeMetadataPoint
 }
 
 func newNativeMetricMetadataAppender(cache *nativeMetricMetadataValueCache) *nativeMetricMetadataAppender {
@@ -222,6 +226,84 @@ func (a *nativeMetricMetadataAppender) observe(s *memSeries, effectiveFrom int64
 	a.haveLast = true
 }
 
+// sortStripe collects a stripe's observation chain into sorted, ordered by
+// series and timestamp, then by append order so the last observation wins when
+// equal timestamps are collapsed during merging.
+func (a *nativeMetricMetadataAppender) sortStripe(first nativeMetricMetadataObservationRef) {
+	a.sorted = a.sorted[:0]
+	for observationRef := first; observationRef != 0; observationRef = a.observations[observationRef-1].next {
+		a.sorted = append(a.sorted, observationRef)
+	}
+	compare := func(x, y nativeMetricMetadataObservationRef) int {
+		left := a.observations[x-1]
+		right := a.observations[y-1]
+		switch {
+		case left.series.ref < right.series.ref:
+			return -1
+		case left.series.ref > right.series.ref:
+			return 1
+		case left.effectiveFrom < right.effectiveFrom:
+			return -1
+		case left.effectiveFrom > right.effectiveFrom:
+			return 1
+		case x < y:
+			return -1
+		case x > y:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if !slices.IsSortedFunc(a.sorted, compare) {
+		slices.SortFunc(a.sorted, compare)
+	}
+}
+
+// appendWALEntries returns one merge group entry per series whose observations
+// the commit stability checks find unstable before logging, with the points
+// commit merges: deduplicated per timestamp, the last observation winning, with
+// the caller's raw values. The entries are valid until the appender is reset.
+// Without concurrent writers to a series, commit merges exactly these groups.
+func (a *nativeMetricMetadataAppender) appendWALEntries() []record.RefNativeMetadata {
+	a.walEntries, a.walPoints = a.walEntries[:0], a.walPoints[:0]
+	for _, stripe := range a.touched {
+		first := a.stripeFirst[stripe]
+		if nativeMetricMetadataStripeStable(a, first) {
+			continue
+		}
+		a.sortStripe(first)
+		for position := 0; position < len(a.sorted); {
+			end := position + 1
+			series := a.observations[a.sorted[position]-1].series
+			for end < len(a.sorted) && a.observations[a.sorted[end]-1].series.ref == series.ref {
+				end++
+			}
+			series.Lock()
+			stable := nativeMetricMetadataGroupStable(series.nativeMetadataLocked(), a, a.sorted[position:end])
+			series.Unlock()
+			if !stable {
+				start := len(a.walPoints)
+				for _, observationRef := range a.sorted[position:end] {
+					observation := a.observations[observationRef-1]
+					m := a.metadataValue(observation.metadataRef)
+					point := record.RefNativeMetadataPoint{EffectiveFrom: observation.effectiveFrom, Type: record.GetMetricType(m.Type), Unit: m.Unit, Help: m.Help}
+					if last := len(a.walPoints) - 1; last >= start && a.walPoints[last].EffectiveFrom == point.EffectiveFrom {
+						a.walPoints[last] = point
+					} else {
+						a.walPoints = append(a.walPoints, point)
+					}
+				}
+				a.walEntries = append(a.walEntries, record.RefNativeMetadata{
+					Ref: series.ref, Kind: record.NativeMetadataGroup,
+					Points: a.walPoints[start:len(a.walPoints):len(a.walPoints)],
+				})
+			}
+			position = end
+		}
+	}
+	return a.walEntries
+}
+
 // selectBatch selects changing series groups and returns the next position.
 // Stable groups count toward the limit; each comparison holds only its series lock.
 func (a *nativeMetricMetadataAppender) selectBatch(position int) int {
@@ -274,6 +356,10 @@ func (s *nativeMetricMetadataStore) putAppender(appender *nativeMetricMetadataAp
 	appender.lastMetadata = metadata.Metadata{}
 	appender.lastObservation = 0
 	appender.haveLast = false
+	clear(appender.walEntries)
+	appender.walEntries = appender.walEntries[:0]
+	clear(appender.walPoints)
+	appender.walPoints = appender.walPoints[:0]
 	s.appenderPool.Put(appender)
 }
 
@@ -290,35 +376,7 @@ func (s *nativeMetricMetadataStore) commitAppenderStripe(stripeIndex uint8, appe
 		return
 	}
 
-	appender.sorted = appender.sorted[:0]
-	for observationRef := first; observationRef != 0; observationRef = appender.observations[observationRef-1].next {
-		appender.sorted = append(appender.sorted, observationRef)
-	}
-	// Order by series and timestamp, then by append order so the last
-	// observation wins when equal timestamps are collapsed during merging.
-	compare := func(a, b nativeMetricMetadataObservationRef) int {
-		left := appender.observations[a-1]
-		right := appender.observations[b-1]
-		switch {
-		case left.series.ref < right.series.ref:
-			return -1
-		case left.series.ref > right.series.ref:
-			return 1
-		case left.effectiveFrom < right.effectiveFrom:
-			return -1
-		case left.effectiveFrom > right.effectiveFrom:
-			return 1
-		case a < b:
-			return -1
-		case a > b:
-			return 1
-		default:
-			return 0
-		}
-	}
-	if !slices.IsSortedFunc(appender.sorted, compare) {
-		slices.SortFunc(appender.sorted, compare)
-	}
+	appender.sortStripe(first)
 
 	// Prepare immutable values without a series lock, then recheck and merge
 	// under that lock. Concurrent commits may have changed the current point.
@@ -364,21 +422,7 @@ func (s *nativeMetricMetadataStore) commitBatch(appender *nativeMetricMetadataAp
 		}
 		first := native == nil
 		if first {
-			if strconv.IntSize == 64 && series.metadata.Load() == nil {
-				// Keep native-first state next to its sidecar in one allocation.
-				// Combining them on 32-bit builds would increase allocator bytes.
-				allocation := &struct {
-					sidecar memSeriesMetadata
-					native  nativeSeriesMetadata
-				}{}
-				native = &allocation.native
-				allocation.sidecar.native = native
-				series.metadata.Store(&allocation.sidecar)
-			} else {
-				// Never replace a sidecar already published by legacy metadata.
-				native = &nativeSeriesMetadata{}
-				series.ensureMetadataLocked().native = native
-			}
+			native = createNativeMetadataLocked(series)
 			addedSeries++
 		}
 		delta, evictions := native.mergeLocked(appender.points)
@@ -400,6 +444,26 @@ func (s *nativeMetricMetadataStore) commitBatch(appender *nativeMetricMetadataAp
 	if evicted != 0 {
 		s.evictions.Add(evicted)
 	}
+}
+
+// createNativeMetadataLocked attaches empty native state to a series without
+// any. The caller holds the series lock, merges, and then publishes the series.
+func createNativeMetadataLocked(series *memSeries) *nativeSeriesMetadata {
+	if strconv.IntSize == 64 && series.metadata.Load() == nil {
+		// Keep native-first state next to its sidecar in one allocation.
+		// Combining them on 32-bit builds would increase allocator bytes.
+		allocation := &struct {
+			sidecar memSeriesMetadata
+			native  nativeSeriesMetadata
+		}{}
+		allocation.sidecar.native = &allocation.native
+		series.metadata.Store(&allocation.sidecar)
+		return &allocation.native
+	}
+	// Never replace a sidecar already published by legacy metadata.
+	native := &nativeSeriesMetadata{}
+	series.ensureMetadataLocked().native = native
+	return native
 }
 
 // nativeMetricMetadataGroupStable compares an entire series group against one

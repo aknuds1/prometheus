@@ -508,6 +508,7 @@ func TestNativeMetadataWALDelivery(t *testing.T) {
 				return fmt.Sprintf("%s/%d/%d", kind, index, timestamp)
 			}
 			var previous metadata.Metadata
+			newest := make([]metadata.Metadata, len(refs))
 			for version := range 3 {
 				app := db.AppenderV2(t.Context())
 				timestamp := base + int64(version*100)
@@ -529,6 +530,7 @@ func TestNativeMetadataWALDelivery(t *testing.T) {
 					refs[i], err = app.Append(refs[i], labels.FromStrings(labels.MetricName, "metric", "id", strconv.Itoa(i)), base-10, timestamp, 1, h, fh, storage.AOptions{Metadata: m})
 					require.NoError(t, err)
 					expected[key("sample", i, timestamp)] = m
+					newest[i] = m
 					if version == 0 {
 						expected[key("sample", i, base-10)] = unknown
 					}
@@ -549,13 +551,14 @@ func TestNativeMetadataWALDelivery(t *testing.T) {
 				db, err = tsdb.Open(dir, nil, nil, opts, nil)
 				require.NoError(t, err)
 				// The watcher skips old segments on startup. Append to the new
-				// segment without supplying metadata: replay did not restore it.
+				// segment without supplying metadata: replay seeded each series
+				// with its newest version.
 				clear(expected)
 				app := db.AppenderV2(t.Context())
 				for i, ref := range refs {
 					_, err := app.Append(ref, labels.EmptyLabels(), 0, base+1000, 1, nil, nil, storage.AOptions{})
 					require.NoError(t, err)
-					expected[key("sample", i, base+1000)] = unknown
+					expected[key("sample", i, base+1000)] = newest[i]
 				}
 				require.NoError(t, app.Commit())
 			}

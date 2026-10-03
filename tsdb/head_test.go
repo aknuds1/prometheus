@@ -135,6 +135,8 @@ func populateTestWL(t testing.TB, w *wlog.WL, recs []any, buf []byte, enableSTSt
 			buf = enc.MmapMarkers(v, buf)
 		case []record.RefMetadata:
 			buf = enc.Metadata(v, buf)
+		case []record.RefNativeMetadata:
+			buf = enc.NativeMetadata(v, buf)
 		default:
 			continue
 		}

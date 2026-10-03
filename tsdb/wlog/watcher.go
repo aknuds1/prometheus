@@ -528,6 +528,8 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 		w.recordBuf.PutMetadata(metadata)
 	}()
 
+	var nativeEntries []record.RefNativeMetadata
+	var nativePoints []record.RefNativeMetadataPoint
 	dec := record.NewDecoder(labels.NewSymbolTable(), w.logger) // One table per WAL segment means it won't grow indefinitely.
 	for r.Next() && !isClosed(w.quit) {
 		var err error
@@ -652,12 +654,23 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 			if !w.sendMetadata {
 				break
 			}
-			metadata, err = dec.Metadata(rec, metadata[:0])
+			// Native metadata entries are not forwarded; senders look up
+			// native metadata instead.
+			nativeEntries, nativePoints, err = dec.NativeMetadata(rec, nativeEntries[:0], nativePoints[:0])
 			if err != nil {
 				w.recordDecodeFailsMetric.Inc()
 				return err
 			}
-			w.writer.StoreMetadata(metadata)
+			metadata = metadata[:0]
+			for _, e := range nativeEntries {
+				if e.Kind == record.NativeMetadataLegacy {
+					p := e.Points[0]
+					metadata = append(metadata, record.RefMetadata{Ref: e.Ref, Type: p.Type, Unit: p.Unit, Help: p.Help})
+				}
+			}
+			if len(metadata) > 0 {
+				w.writer.StoreMetadata(metadata)
+			}
 
 		case record.Unknown:
 			// Could be corruption, or reading from a WAL from a newer Prometheus.

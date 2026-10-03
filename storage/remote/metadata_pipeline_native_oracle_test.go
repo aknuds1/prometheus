@@ -1,0 +1,232 @@
+// Copyright The Prometheus Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package remote
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/record"
+	"github.com/prometheus/prometheus/tsdb/wlog"
+	"github.com/prometheus/prometheus/util/compression"
+)
+
+// This build logs native metadata merge groups and checkpoints overrides.
+func init() {
+	metadataPipelineMetadataOracle = func(c metadataPipelineConfig, w metadataPipelineWALRecords, refs map[int]chunks.HeadSeriesRef, fromAppend int) error {
+		if c.Source != "native" {
+			return metadataPipelineLegacyMetadataOracle(c, w, refs, fromAppend)
+		}
+		want, err := metadataPipelineNativeEntries(c, refs, fromAppend)
+		if err != nil {
+			return err
+		}
+		got, err := w.decodeNative(w.ids)
+		if err != nil {
+			return err
+		}
+		if c.Mixed {
+			want.records = len(w.metadata)
+		}
+		return want.check("WAL", got, len(w.metadata), w.payload())
+	}
+	metadataPipelineCheckpointOracle = func(c metadataPipelineConfig, w metadataPipelineWALRecords) error {
+		if c.Source != "native" {
+			return metadataPipelineLegacyCheckpointOracle(c, w)
+		}
+		// Every series keeps its whole history, as one untruncated override.
+		var want metadataPipelineExpected
+		var enc record.Encoder
+		refs := w.refs()
+		for slot := range c.Series {
+			entry := record.RefNativeMetadata{Ref: refs[slot], Kind: record.NativeMetadataOverride}
+			for step := 0; step <= metadataPipelineRestartHistory; step++ {
+				entry.Points = append(entry.Points, metadataPipelineNativePoint(c, slot, step))
+			}
+			want.add(metadataPipelineNativeKey(slot, entry), len(enc.NativeMetadata([]record.RefNativeMetadata{entry}, nil))-1)
+		}
+		got, err := w.decodeNative(w.ids)
+		if err != nil {
+			return err
+		}
+		want.records = len(w.metadata)
+		return want.check("checkpoint", got, len(w.metadata), w.payload())
+	}
+}
+
+func metadataPipelineNativePoint(c metadataPipelineConfig, slot, step int) record.RefNativeMetadataPoint {
+	m := c.metadata(slot, c.version(slot, step))
+	return record.RefNativeMetadataPoint{EffectiveFrom: c.timestamp(step), Type: record.GetMetricType(m.Type), Unit: m.Unit, Help: m.Help}
+}
+
+func metadataPipelineNativeKey(id int, e record.RefNativeMetadata) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d|%d|%t", id, e.Kind, e.Truncated)
+	for _, p := range e.Points {
+		fmt.Fprintf(&b, "|%d,%d,%s,%s", p.EffectiveFrom, p.Type, p.Unit, p.Help)
+	}
+	return b.String()
+}
+
+// metadataPipelineNativeEntries models the merge groups Commit logs. A
+// series' samples in a transaction are observed from its first sample whose
+// metadata differs from the series' committed native version, or from its
+// first sample if it has none; an observed sample keeps later samples of the
+// series in that transaction observed. Groups hold one point per observed
+// timestamp. Replay seeds each series with its newest version.
+//
+// Observations of another series in the same stripe can make a sample with
+// unchanged metadata observed. Such a group is stable and logs nothing, and in
+// these traces a series' observed samples are contiguous, so the model
+// ignores stripes.
+func metadataPipelineNativeEntries(c metadataPipelineConfig, refs map[int]chunks.HeadSeriesRef, fromAppend int) (metadataPipelineExpected, error) {
+	var e metadataPipelineExpected
+	var enc record.Encoder
+	committed := map[int]int{}
+	var err error
+	for i, a := range c.appends() {
+		c.transactions(a, func(samples []metadataPipelineSample) {
+			entries := 0
+			for start := 0; start < len(samples); {
+				end := start + 1
+				for end < len(samples) && samples[end].id == samples[start].id {
+					end++
+				}
+				run := samples[start:end]
+				start = end
+				id := run[0].id
+				first := 0
+				if v, ok := committed[id]; ok {
+					for first < len(run) && c.version(run[first].slot, run[first].step) == v {
+						first++
+					}
+				}
+				if first == len(run) {
+					continue
+				}
+				last := run[len(run)-1]
+				committed[id] = c.version(last.slot, last.step)
+				if i < fromAppend {
+					continue
+				}
+				ref, ok := refs[id]
+				if !ok {
+					err = errors.Join(err, fmt.Errorf("no series record for id %d", id))
+					continue
+				}
+				entry := record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataGroup}
+				for _, s := range run[first:] {
+					entry.Points = append(entry.Points, metadataPipelineNativePoint(c, s.slot, s.step))
+				}
+				e.add(metadataPipelineNativeKey(id, entry), len(enc.NativeMetadata([]record.RefNativeMetadata{entry}, nil))-1)
+				entries++
+			}
+			if entries > 0 {
+				e.records++
+			}
+		})
+	}
+	return e, err
+}
+
+// decodeNative decodes metadata records' entries with the native decoder.
+func (w metadataPipelineWALRecords) decodeNative(ids map[chunks.HeadSeriesRef]int) (map[string]int, error) {
+	got := map[string]int{}
+	var dec record.Decoder
+	for _, rec := range w.metadata {
+		entries, _, err := dec.NativeMetadata(rec, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			id, ok := ids[e.Ref]
+			if !ok {
+				return nil, fmt.Errorf("metadata for unknown ref %d", e.Ref)
+			}
+			got[metadataPipelineNativeKey(id, e)]++
+		}
+	}
+	return got, nil
+}
+
+func TestRemoteWriteMetadataPipelineNativeOracles(t *testing.T) {
+	c := metadataPipelineConfig{Case: "restart", Source: "native", Series: 2, Values: 2, Sweeps: metadataPipelineRestartHistory + 3, RestartStep: metadataPipelineRestartHistory + 1, Writers: 1, CommitSize: 2, Base: 1000}
+	writeCheckpoint := func(t *testing.T, entries []record.RefNativeMetadata) string {
+		dir := t.TempDir()
+		w, err := wlog.New(nil, nil, dir, compression.None)
+		require.NoError(t, err)
+		var enc record.Encoder
+		var series []record.RefSeries
+		for id := range c.Series {
+			series = append(series, record.RefSeries{Ref: chunks.HeadSeriesRef(id + 1), Labels: metadataPipelineLabels(id)})
+		}
+		require.NoError(t, w.Log(enc.Series(series, nil)))
+		require.NoError(t, w.Log(enc.NativeMetadata(entries, nil)))
+		require.NoError(t, w.Close())
+		return dir
+	}
+	full := func() []record.RefNativeMetadata {
+		var entries []record.RefNativeMetadata
+		for id := range c.Series {
+			e := record.RefNativeMetadata{Ref: chunks.HeadSeriesRef(id + 1), Kind: record.NativeMetadataOverride}
+			for step := 0; step <= metadataPipelineRestartHistory; step++ {
+				e.Points = append(e.Points, metadataPipelineNativePoint(c, id, step))
+			}
+			entries = append(entries, e)
+		}
+		return entries
+	}
+
+	t.Run("checkpoint contents", func(t *testing.T) {
+		_, err := checkMetadataPipelineCheckpoint(c, writeCheckpoint(t, full()))
+		require.NoError(t, err)
+		// Delivery after a restart sees only the newest version; the oracle must
+		// still notice a lost older one, a wrong start, or a truncation flag.
+		lost := full()
+		lost[0].Points = lost[0].Points[1:]
+		moved := full()
+		moved[1].Points[2].EffectiveFrom++
+		truncated := full()
+		truncated[0].Truncated = true
+		for name, entries := range map[string][]record.RefNativeMetadata{"lost older version": lost, "moved start": moved, "truncated": truncated, "missing series": full()[:1]} {
+			_, err := checkMetadataPipelineCheckpoint(c, writeCheckpoint(t, entries))
+			require.Error(t, err, name)
+		}
+	})
+
+	t.Run("WAL groups", func(t *testing.T) {
+		b := metadataPipelineConfig{Case: "batched", Source: "native", Series: 2, Values: 2, Sweeps: 100, Writers: 1, CommitSize: 2, StepsPerCommit: 10, Base: 1000}
+		refs := map[int]chunks.HeadSeriesRef{0: 1, 1: 2}
+		want, err := metadataPipelineNativeEntries(b, refs, 0)
+		require.NoError(t, err)
+		// The seed logs both series. Each series changes once in 100 steps,
+		// both within the transaction of steps 1-10, so each group holds every
+		// step from the change to the end of that batch.
+		require.Equal(t, 2, want.records)
+		groups := 0
+		for key, n := range want.entries {
+			groups += n
+			// A key has two separators before its points, and one per point.
+			if points := strings.Count(key, "|") - 2; strings.HasPrefix(key, "1|") && points > 1 {
+				require.Equal(t, 9, points, "series 1 changes at step 2, in the batch of steps 1-10")
+			}
+		}
+		require.Equal(t, 2+2, groups)
+	})
+}

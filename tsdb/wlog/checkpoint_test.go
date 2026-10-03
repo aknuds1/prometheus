@@ -29,7 +29,10 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/encoding"
+	"github.com/prometheus/prometheus/tsdb/nativemetadata"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/tsdb/tombstones"
 	"github.com/prometheus/prometheus/util/compression"
@@ -470,6 +473,121 @@ func TestCheckpoint_Tombstones(t *testing.T) {
 		{Ref: 3, Intervals: tombstones.Intervals{{Mint: 0, Maxt: 100}}},
 	}
 	require.Equal(t, expected, stones)
+}
+
+// TestCheckpoint_NativeMetadata checks that checkpoints reduce metadata
+// entries per kept series as forwarding and replay do, across checkpoints.
+func TestCheckpoint_NativeMetadata(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	seg, err := CreateSegment(dir, 0)
+	require.NoError(t, err)
+	require.NoError(t, seg.Close())
+	w, err := NewSize(nil, nil, dir, 128*1024, compression.None)
+	require.NoError(t, err)
+
+	point := func(from int64, help string) record.RefNativeMetadataPoint {
+		return record.RefNativeMetadataPoint{EffectiveFrom: from, Type: uint8(record.Gauge), Unit: "bytes", Help: help}
+	}
+	group := func(ref chunks.HeadSeriesRef, points ...record.RefNativeMetadataPoint) record.RefNativeMetadata {
+		return record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataGroup, Points: points}
+	}
+	legacy := func(ref chunks.HeadSeriesRef, help string) record.RefMetadata {
+		return record.RefMetadata{Ref: ref, Type: uint8(record.Gauge), Unit: "bytes", Help: help}
+	}
+	// A well-framed entry of a future kind, with an unknown flag bit.
+	unknown := encoding.Encbuf{}
+	unknown.PutByte(byte(record.Metadata))
+	unknown.PutUvarint64(6)
+	unknown.PutByte(uint8(record.Gauge))
+	unknown.PutUvarint(4)
+	for _, field := range [][2]string{{"UNIT", "bytes"}, {"HELP", "future"}, {"f", "\x00\x00\x00\x00\x00\x00\x00\x07"}, {"k", "\x10"}} {
+		unknown.PutUvarintStr(field[0])
+		unknown.PutUvarintStr(field[1])
+	}
+
+	var enc record.Encoder
+	rounds := [][][]byte{
+		{
+			enc.Metadata([]record.RefMetadata{legacy(1, "a"), legacy(4, "x")}, nil),
+			enc.NativeMetadata([]record.RefNativeMetadata{group(2, point(10, "A")), group(3, point(1, "A"))}, nil),
+			enc.Metadata([]record.RefMetadata{legacy(1, "b"), legacy(5, "dropped")}, nil),
+			enc.NativeMetadata([]record.RefNativeMetadata{group(2, point(20, "B"), point(30, "C")), group(4, point(100, "y")), group(3, point(2, "B"), point(3, "A"), point(4, "B"))}, nil),
+			unknown.Get(),
+		},
+		{
+			// The second checkpoint continues from the first one's overrides.
+			enc.NativeMetadata([]record.RefNativeMetadata{group(2, point(5, "B")), group(3, point(5, "C"), point(6, "D")), group(5, point(1, "dropped"))}, nil),
+		},
+	}
+	keep := func(id chunks.HeadSeriesRef) bool { return id != 5 }
+	reduced := map[chunks.HeadSeriesRef]*nativemetadata.State{}
+	isNative := map[chunks.HeadSeriesRef]bool{}
+	intern := func(m metadata.Metadata) *metadata.Metadata { return &m }
+	var dec record.Decoder
+	for i, round := range rounds {
+		for _, rec := range round {
+			require.NoError(t, w.Log(rec))
+			entries, _, err := dec.NativeMetadata(rec, nil, nil)
+			require.NoError(t, err)
+			for _, e := range entries {
+				if !keep(e.Ref) {
+					continue
+				}
+				if reduced[e.Ref] == nil {
+					reduced[e.Ref] = &nativemetadata.State{}
+				}
+				reduced[e.Ref].Apply(e.Kind, e.Truncated, nativemetadata.AppendRecordPoints(nil, e.Points, intern))
+				isNative[e.Ref] = isNative[e.Ref] || e.Kind != record.NativeMetadataLegacy
+			}
+		}
+		first, last, err := Segments(w.Dir())
+		require.NoError(t, err)
+		_, err = w.NextSegment()
+		require.NoError(t, err)
+		stats, err := Checkpoint(promslog.NewNopLogger(), w, first, last, keep, 0, false)
+		require.NoError(t, err)
+		require.Equal(t, 1-i, stats.UnknownMetadata)
+
+		cpDir, _, err := LastCheckpoint(w.Dir())
+		require.NoError(t, err)
+		sr, err := NewSegmentsReader(cpDir)
+		require.NoError(t, err)
+		r := NewReader(sr)
+		got := map[chunks.HeadSeriesRef]record.RefNativeMetadata{}
+		for r.Next() {
+			if dec.Type(r.Record()) != record.Metadata {
+				continue
+			}
+			entries, _, err := dec.NativeMetadata(r.Record(), nil, nil)
+			require.NoError(t, err)
+			for _, e := range entries {
+				require.NotContains(t, got, e.Ref)
+				got[e.Ref] = e
+			}
+		}
+		require.NoError(t, r.Err())
+		require.NoError(t, sr.Close())
+
+		require.Len(t, got, len(reduced))
+		for ref, state := range reduced {
+			want := record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataLegacy}
+			if isNative[ref] {
+				want.Kind, want.Truncated = record.NativeMetadataOverride, state.Truncated
+				for _, p := range state.AppendPoints(nil) {
+					want.Points = nativemetadata.AppendRecordPoint(want.Points, p)
+				}
+			} else {
+				want.Points = []record.RefNativeMetadataPoint{{EffectiveFrom: math.MinInt64, Type: uint8(record.Gauge), Unit: "bytes", Help: state.Metadata.Help}}
+			}
+			require.Equal(t, want, got[ref], "round %d, ref %d", i, ref)
+		}
+	}
+	require.Equal(t, "b", reduced[1].Metadata.Help)
+	require.True(t, reduced[3].Truncated, "ref 3 exceeded the version cap")
+	require.Equal(t, int64(math.MinInt64), reduced[4].AppendPoints(nil)[0].EffectiveFrom)
+	require.Equal(t, int64(7), reduced[6].EffectiveFrom)
+	require.NoError(t, w.Close())
 }
 
 // TestCheckpointV2HistogramsToV1 verifies that when a WAL contains V2 histogram

@@ -115,6 +115,7 @@ type Head struct {
 	wlReplayHistogramsPool      zeropool.Pool[[]record.RefHistogramSample]
 	wlReplayFloatHistogramsPool zeropool.Pool[[]record.RefFloatHistogramSample]
 	wlReplayMetadataPool        zeropool.Pool[[]record.RefMetadata]
+	wlReplayNativeMetadataPool  zeropool.Pool[*nativeMetadataReplayRecord]
 	wlReplayMmapMarkersPool     zeropool.Pool[[]record.RefMmapMarker]
 
 	// All series addressable by their ID or hash.
@@ -428,6 +429,7 @@ func (h *Head) resetWLReplayResources() {
 	h.wlReplayHistogramsPool = zeropool.Pool[[]record.RefHistogramSample]{}
 	h.wlReplayFloatHistogramsPool = zeropool.Pool[[]record.RefFloatHistogramSample]{}
 	h.wlReplayMetadataPool = zeropool.Pool[[]record.RefMetadata]{}
+	h.wlReplayNativeMetadataPool = zeropool.Pool[*nativeMetadataReplayRecord]{}
 	h.wlReplayMmapMarkersPool = zeropool.Pool[[]record.RefMmapMarker]{}
 }
 
@@ -468,6 +470,7 @@ type headMetrics struct {
 	oooHistogram                  prometheus.Histogram
 	mmapChunksTotal               prometheus.Counter
 	walReplayUnknownRefsTotal     *prometheus.CounterVec
+	nativeMetadataUnknownEntries  prometheus.Counter
 	wblReplayUnknownRefsTotal     *prometheus.CounterVec
 }
 
@@ -657,6 +660,10 @@ func newHeadMetrics(h *Head, r prometheus.Registerer) *headMetrics {
 			Name: "prometheus_tsdb_wal_replay_unknown_refs_total",
 			Help: "Total number of unknown series references encountered during WAL replay.",
 		}, []string{"type"}),
+		nativeMetadataUnknownEntries: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "prometheus_tsdb_native_metric_metadata_unknown_wal_entries_total",
+			Help: "Total number of native metadata WAL entries of unknown kind, applied as single-point overrides by replay or checkpoints.",
+		}),
 		wblReplayUnknownRefsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "prometheus_tsdb_wbl_replay_unknown_refs_total",
 			Help: "Total number of unknown series references encountered during WBL replay.",
@@ -738,6 +745,7 @@ func newHeadMetrics(h *Head, r prometheus.Registerer) *headMetrics {
 				return float64(val)
 			}),
 			m.walReplayUnknownRefsTotal,
+			m.nativeMetadataUnknownEntries,
 			m.wblReplayUnknownRefsTotal,
 		)
 	}
@@ -932,6 +940,10 @@ func (h *Head) Init(minValidTime int64) error {
 
 	syms := labels.NewSymbolTable() // One table for the whole WAL.
 	multiRef := map[chunks.HeadSeriesRef]chunks.HeadSeriesRef{}
+	var nativeReplay *nativeMetadataReplay
+	if h.nativeMetricMetadata != nil {
+		nativeReplay = newNativeMetadataReplay()
+	}
 	if err == nil && startFrom >= snapIdx {
 		sr, err := wlog.NewSegmentsReader(dir)
 		if err != nil {
@@ -945,7 +957,7 @@ func (h *Head) Init(minValidTime int64) error {
 
 		// A corrupted checkpoint is a hard error for now and requires user
 		// intervention. There's likely little data that can be recovered anyway.
-		if err := h.loadWAL(wlog.NewReader(sr), syms, multiRef, mmappedChunks, oooMmappedChunks); err != nil {
+		if err := h.loadWAL(wlog.NewReader(sr), syms, multiRef, mmappedChunks, oooMmappedChunks, nativeReplay); err != nil {
 			return fmt.Errorf("backfill checkpoint: %w", err)
 		}
 		h.updateWALReplayStatusRead(startFrom)
@@ -979,7 +991,7 @@ func (h *Head) Init(minValidTime int64) error {
 		if err != nil {
 			return fmt.Errorf("segment reader (offset=%d): %w", offset, err)
 		}
-		err = h.loadWAL(wlog.NewReader(sr), syms, multiRef, mmappedChunks, oooMmappedChunks)
+		err = h.loadWAL(wlog.NewReader(sr), syms, multiRef, mmappedChunks, oooMmappedChunks, nativeReplay)
 		if err := sr.Close(); err != nil {
 			h.logger.Warn("Error while closing the wal segments reader", "err", err)
 		}
@@ -988,6 +1000,9 @@ func (h *Head) Init(minValidTime int64) error {
 		}
 		h.logger.Info("WAL segment loaded", "segment", i, "maxSegment", endAt, "duration", time.Since(walSegmentStart).String())
 		h.updateWALReplayStatusRead(i)
+	}
+	if nativeReplay != nil {
+		h.seedNativeMetricMetadata(nativeReplay, multiRef)
 	}
 	walReplayDuration := time.Since(walReplayStart)
 
@@ -1613,13 +1628,15 @@ func (h *Head) truncateWAL(mint int64) error {
 	}
 
 	h.metrics.checkpointCreationTotal.Inc()
-	if _, err = wlog.Checkpoint(h.logger, h.wal, first, last, h.keepSeriesInWALCheckpointFn(mint), mint, h.opts.EnableSTStorage.Load()); err != nil {
+	stats, err := wlog.Checkpoint(h.logger, h.wal, first, last, h.keepSeriesInWALCheckpointFn(mint), mint, h.opts.EnableSTStorage.Load())
+	if err != nil {
 		h.metrics.checkpointCreationFail.Inc()
 		if _, ok := errors.AsType[*chunks.CorruptionErr](err); ok {
 			h.metrics.walCorruptionsTotal.Inc()
 		}
 		return fmt.Errorf("create checkpoint: %w", err)
 	}
+	h.metrics.nativeMetadataUnknownEntries.Add(float64(stats.UnknownMetadata))
 	if err := h.wal.Truncate(last + 1); err != nil {
 		// If truncating fails, we'll just try again at the next checkpoint.
 		// Leftover segments will just be ignored in the future if there's a checkpoint

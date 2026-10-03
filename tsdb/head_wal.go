@@ -78,7 +78,29 @@ func counterAddNonZero(v *prometheus.CounterVec, value float64, lvs ...string) {
 	}
 }
 
-func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[chunks.HeadSeriesRef]chunks.HeadSeriesRef, mmappedChunks, oooMmappedChunks map[chunks.HeadSeriesRef][]*mmappedChunk) (err error) {
+// replayLegacyMetadata replaces a replayed series' legacy metadata. Only the
+// replay loop accesses series metadata: replay workers do not access it, and
+// appenders start after initialization.
+func (h *Head) replayLegacyMetadata(ref chunks.HeadSeriesRef, typ uint8, unit, help string, multiRef map[chunks.HeadSeriesRef]chunks.HeadSeriesRef, missingSeries map[chunks.HeadSeriesRef]struct{}, unknown *atomic.Uint64) {
+	if r, ok := multiRef[ref]; ok {
+		ref = r
+	}
+	s := h.series.getByID(ref)
+	if s == nil {
+		unknown.Inc()
+		missingSeries[ref] = struct{}{}
+		return
+	}
+	s.setLegacyMetadataLocked(&metadata.Metadata{
+		Type: record.ToMetricType(typ),
+		Unit: unit,
+		Help: help,
+	})
+}
+
+// loadWAL replays r. A non-nil nativeReplay reduces native metadata entries
+// across calls, for seeding after the whole WAL has been replayed.
+func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[chunks.HeadSeriesRef]chunks.HeadSeriesRef, mmappedChunks, oooMmappedChunks map[chunks.HeadSeriesRef][]*mmappedChunk, nativeReplay *nativeMetadataReplay) (err error) {
 	// Track number of missing series records that were referenced by other records.
 	unknownSeriesRefs := &seriesRefSet{refs: make(map[chunks.HeadSeriesRef]struct{}), mtx: sync.Mutex{}}
 	// Track number of different records that referenced a series we don't know about
@@ -233,6 +255,23 @@ func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[ch
 				}
 				decoded <- hists
 			case record.Metadata:
+				if nativeReplay != nil {
+					native := h.wlReplayNativeMetadataPool.Get()
+					if native == nil {
+						native = &nativeMetadataReplayRecord{}
+					}
+					native.entries, native.points, err = dec.NativeMetadata(r.Record(), native.entries[:0], native.points[:0])
+					if err != nil {
+						decodeErr = &wlog.CorruptionErr{
+							Err:     fmt.Errorf("decode metadata: %w", err),
+							Segment: r.Segment(),
+							Offset:  r.Offset(),
+						}
+						return
+					}
+					decoded <- native
+					continue
+				}
 				meta := h.wlReplayMetadataPool.Get()[:0]
 				meta, err := dec.Metadata(r.Record(), meta)
 				if err != nil {
@@ -268,6 +307,9 @@ Outer:
 				}
 				if !created {
 					multiRef[walSeries.Ref] = mSeries.ref
+				}
+				if nativeReplay != nil {
+					nativeReplay.declare(mSeries.ref, walSeries.Ref)
 				}
 
 				idx := uint64(mSeries.ref) % uint64(concurrency)
@@ -456,25 +498,24 @@ Outer:
 			h.wlReplayFloatHistogramsPool.Put(v[:0])
 		case []record.RefMetadata:
 			for _, m := range v {
-				if r, ok := multiRef[m.Ref]; ok {
-					m.Ref = r
-				}
-				s := h.series.getByID(m.Ref)
-				if s == nil {
-					unknownMetadataRefs.Inc()
-					missingSeries[m.Ref] = struct{}{}
-					continue
-				}
-				// This loop exclusively accesses series metadata during replay:
-				// replay workers do not access it, and appenders start after initialization.
-				s.setLegacyMetadataLocked(&metadata.Metadata{
-					Type: record.ToMetricType(m.Type),
-					Unit: m.Unit,
-					Help: m.Help,
-				})
+				h.replayLegacyMetadata(m.Ref, m.Type, m.Unit, m.Help, multiRef, missingSeries, &unknownMetadataRefs)
 			}
 			clear(v) // Zero out to avoid retaining metadata strings.
 			h.wlReplayMetadataPool.Put(v[:0])
+		case *nativeMetadataReplayRecord:
+			nativeReplay.apply(v.entries)
+			for _, e := range v.entries {
+				// Native entries update legacy metadata only where WAL metadata
+				// records are enabled; legacy entries always do, as before.
+				if len(e.Points) == 0 || (e.Kind != record.NativeMetadataLegacy && !h.opts.EnableMetadataWALRecords) {
+					continue
+				}
+				newest := e.Points[len(e.Points)-1]
+				h.replayLegacyMetadata(e.Ref, newest.Type, newest.Unit, newest.Help, multiRef, missingSeries, &unknownMetadataRefs)
+			}
+			clear(v.entries) // Zero out to avoid retaining metadata strings.
+			clear(v.points)
+			h.wlReplayNativeMetadataPool.Put(v)
 		default:
 			panic(fmt.Errorf("unexpected decoded type: %T", d))
 		}

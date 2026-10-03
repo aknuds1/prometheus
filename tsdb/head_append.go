@@ -1217,8 +1217,9 @@ func (a *headAppenderBase) GetRef(lset labels.Labels, hash uint64) (storage.Seri
 	return storage.SeriesRef(s.ref), s.labels()
 }
 
-// log writes all headAppender's data to the WAL.
-func (a *headAppenderBase) log() error {
+// log writes all headAppender's data to the WAL. Only Commit emits native
+// metadata merge groups, after series records and before samples.
+func (a *headAppenderBase) log(emitNativeMetadata bool) error {
 	if a.head.wal == nil {
 		return nil
 	}
@@ -1235,6 +1236,16 @@ func (a *headAppenderBase) log() error {
 
 		if err := a.head.wal.Log(rec); err != nil {
 			return fmt.Errorf("log series: %w", err)
+		}
+	}
+	if emitNativeMetadata && a.nativeMetricMetadata != nil {
+		if entries := a.nativeMetricMetadata.appendWALEntries(); len(entries) > 0 {
+			rec = enc.NativeMetadata(entries, buf)
+			buf = rec[:0]
+
+			if err := a.head.wal.Log(rec); err != nil {
+				return fmt.Errorf("log native metadata: %w", err)
+			}
 		}
 	}
 	for _, b := range a.batches {
@@ -1902,7 +1913,7 @@ func (a *headAppenderBase) Commit() (err error) {
 		}()
 	}
 
-	if err := a.log(); err != nil {
+	if err := a.log(true); err != nil {
 		_ = a.Rollback() // Most likely the same error will happen again.
 		return fmt.Errorf("write to WAL: %w", err)
 	}
@@ -2473,5 +2484,5 @@ func (a *headAppenderBase) Rollback() (err error) {
 	a.batches = a.batches[:0]
 	// Series are created in the head memory regardless of rollback. Thus we have
 	// to log them to the WAL in any case.
-	return a.log()
+	return a.log(false)
 }

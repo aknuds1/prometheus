@@ -1129,7 +1129,7 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 	})
 }
 
-func TestHeadMetadataWALReplayPopulatesOnlyLegacySidecarState(t *testing.T) {
+func TestHeadMetadataWALReplaySidecarState(t *testing.T) {
 	const numMetadataSeries = 32
 	versions := []metadata.Metadata{
 		{Type: model.MetricTypeCounter, Unit: "requests", Help: "requests"},
@@ -1187,6 +1187,8 @@ func TestHeadMetadataWALReplayPopulatesOnlyLegacySidecarState(t *testing.T) {
 					require.Equal(t, uint64(len(lsets)), reopened.head.NumSeries())
 					if tc.native {
 						require.NotNil(t, reopened.head.nativeMetricMetadata)
+						require.Equal(t, int64(numMetadataSeries), reopened.head.nativeMetricMetadata.series.Load())
+						require.Equal(t, int64(numMetadataSeries), reopened.head.nativeMetricMetadata.versions.Load())
 					} else {
 						require.Nil(t, reopened.head.nativeMetricMetadata)
 					}
@@ -1198,15 +1200,24 @@ func TestHeadMetadataWALReplayPopulatesOnlyLegacySidecarState(t *testing.T) {
 						series.Unlock()
 						require.Equal(t, i < numMetadataSeries, hasSidecar)
 						if i < numMetadataSeries {
+							// Legacy entries always replace legacy metadata.
 							require.Equal(t, &versions[len(versions)-1], legacyMetadataForTest(series))
 						} else {
 							require.Nil(t, legacyMetadataForTest(series))
 						}
-						require.Nil(t, nativeMetadataForTest(series))
-						if tc.native {
-							_, _, ok := reopened.head.nativeMetricMetadata.get(series.ref)
-							require.False(t, ok)
+						native := nativeMetadataForTest(series)
+						if !tc.native || i >= numMetadataSeries {
+							require.Nil(t, native)
+							continue
 						}
+						// Replay seeds the newest reduced version. Each dual-mode
+						// transaction logs its legacy entries after its merge groups,
+						// so the legacy value of unknown start replaces the history.
+						require.Equal(t, versions[len(versions)-1], *native.Metadata)
+						require.Equal(t, int64(math.MinInt64), native.EffectiveFrom)
+						require.Empty(t, native.Older)
+						_, _, ok := reopened.head.nativeMetricMetadata.get(series.ref)
+						require.True(t, ok)
 					}
 					querier, err := NewBlockQuerier(reopened.head, 100, 101)
 					require.NoError(t, err)

@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/fileutil"
+	"github.com/prometheus/prometheus/tsdb/nativemetadata"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/tsdb/tombstones"
 	"github.com/prometheus/prometheus/tsdb/tsdbutil"
@@ -47,6 +48,9 @@ type CheckpointStats struct {
 	TotalTombstones   int // Processed tombstones including dropped ones.
 	TotalExemplars    int // Processed exemplars including dropped ones.
 	TotalMetadata     int // Processed metadata including dropped ones.
+	// UnknownMetadata counts kept native metadata entries of unknown kind,
+	// which were applied as single-point overrides.
+	UnknownMetadata int
 }
 
 // LastCheckpoint returns the directory name and index of the most recent checkpoint.
@@ -93,11 +97,26 @@ func DeleteTempCheckpoints(logger *slog.Logger, dir string) error {
 	return nil
 }
 
+const (
+	// checkpointMetadataBatch bounds the entries in one checkpoint metadata record.
+	checkpointMetadataBatch = 4096
+	// checkpointMetadataInternerLimit bounds the distinct values a checkpoint shares.
+	checkpointMetadataInternerLimit = 1 << 16
+)
+
+// checkpointMetadata is a series' metadata reduced from WAL entries. Series
+// that only had legacy entries keep a legacy entry with the latest value.
+type checkpointMetadata struct {
+	nativemetadata.State
+	native bool
+}
+
 // Checkpoint creates a compacted checkpoint of segments in range [from, to] in the given WAL.
 // It includes the most recent checkpoint if it exists.
-// All series not satisfying keep, samples/exemplars below mint, tombstones not
-// satisfying keep or with all intervals below mint, and metadata that are not the
-// latest are dropped.
+// All series not satisfying keep, samples/exemplars below mint, and tombstones not
+// satisfying keep or with all intervals below mint are dropped. Metadata entries
+// are reduced per kept series: legacy entries to the latest one, and native
+// entries to an override carrying the reduced history and truncation flag.
 //
 // keep is evaluated per record as segments are read, so its result for a given ref
 // must not change while Checkpoint runs. Otherwise records for the same ref could be
@@ -170,14 +189,17 @@ func Checkpoint(logger *slog.Logger, w *WL, from, to int, keep func(id chunks.He
 		floatHistogramSamples []record.RefFloatHistogramSample
 		tstones               []tombstones.Stone
 		exemplars             []record.RefExemplar
-		metadata              []record.RefMetadata
+		metadata              []record.RefNativeMetadata
+		metadataPoints        []record.RefNativeMetadataPoint
+		metadataValues        []nativemetadata.Point
 		st                    = labels.NewSymbolTable() // Needed for decoding; labels do not outlive this function.
 		dec                   = record.NewDecoder(st, logger)
 		enc                   = record.Encoder{EnableSTStorage: enableSTStorage}
 		buf                   []byte
 		recs                  [][]byte
 
-		latestMetadataMap = make(map[chunks.HeadSeriesRef]record.RefMetadata)
+		reducedMetadata = make(map[chunks.HeadSeriesRef]checkpointMetadata)
+		interner        = nativemetadata.NewInterner(checkpointMetadataInternerLimit)
 	)
 	for r.Next() {
 		series, samples, histogramSamples, floatHistogramSamples, tstones, exemplars, metadata = series[:0], samples[:0], histogramSamples[:0], floatHistogramSamples[:0], tstones[:0], exemplars[:0], metadata[:0]
@@ -358,20 +380,28 @@ func Checkpoint(logger *slog.Logger, w *WL, from, to int, keep func(id chunks.He
 			stats.TotalExemplars += len(exemplars)
 			stats.DroppedExemplars += len(exemplars) - len(repl)
 		case record.Metadata:
-			metadata, err = dec.Metadata(rec, metadata)
+			metadata, metadataPoints, err = dec.NativeMetadata(rec, metadata, metadataPoints[:0])
 			if err != nil {
 				return nil, fmt.Errorf("decode metadata: %w", err)
 			}
-			// Only keep reference to the latest found metadata for each refID.
+			// Keep one reduced entry per series, in WAL order.
 			repl := 0
 			for _, m := range metadata {
-				if keep(m.Ref) {
-					if _, ok := latestMetadataMap[m.Ref]; !ok {
-						repl++
-					}
-					latestMetadataMap[m.Ref] = m
+				if !keep(m.Ref) {
+					continue
 				}
+				reduced, ok := reducedMetadata[m.Ref]
+				if !ok {
+					repl++
+				}
+				metadataValues = nativemetadata.AppendRecordPoints(metadataValues[:0], m.Points, interner.Intern)
+				if reduced.Apply(m.Kind, m.Truncated, metadataValues) {
+					stats.UnknownMetadata++
+				}
+				reduced.native = reduced.native || m.Kind != record.NativeMetadataLegacy
+				reducedMetadata[m.Ref] = reduced
 			}
+			clear(metadataValues)
 			stats.TotalMetadata += len(metadata)
 			stats.DroppedMetadata += len(metadata) - repl
 		default:
@@ -402,13 +432,32 @@ func Checkpoint(logger *slog.Logger, w *WL, from, to int, keep func(id chunks.He
 		return nil, fmt.Errorf("flush records: %w", err)
 	}
 
-	// Flush latest metadata records for each series.
-	if len(latestMetadataMap) > 0 {
-		latestMetadata := make([]record.RefMetadata, 0, len(latestMetadataMap))
-		for _, m := range latestMetadataMap {
-			latestMetadata = append(latestMetadata, m)
+	// Flush the reduced metadata of each series, in bounded records.
+	metadata, metadataPoints = metadata[:0], metadataPoints[:0]
+	for ref, reduced := range reducedMetadata {
+		entry := record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataLegacy}
+		start := len(metadataPoints)
+		if reduced.native {
+			entry.Kind, entry.Truncated = record.NativeMetadataOverride, reduced.Truncated
+			for _, p := range reduced.AppendPoints(metadataValues[:0]) {
+				metadataPoints = nativemetadata.AppendRecordPoint(metadataPoints, p)
+			}
+		} else if reduced.Metadata != nil {
+			metadataPoints = nativemetadata.AppendRecordPoint(metadataPoints, nativemetadata.Point{Metadata: reduced.Metadata})
 		}
-		if err := cp.Log(enc.Metadata(latestMetadata, buf[:0])); err != nil {
+		entry.Points = metadataPoints[start:len(metadataPoints):len(metadataPoints)]
+		metadata = append(metadata, entry)
+		if len(metadata) == checkpointMetadataBatch {
+			if err := cp.Log(enc.NativeMetadata(metadata, buf[:0])); err != nil {
+				return nil, fmt.Errorf("flush metadata records: %w", err)
+			}
+			clear(metadata)
+			clear(metadataPoints)
+			metadata, metadataPoints = metadata[:0], metadataPoints[:0]
+		}
+	}
+	if len(metadata) > 0 {
+		if err := cp.Log(enc.NativeMetadata(metadata, buf[:0])); err != nil {
 			return nil, fmt.Errorf("flush metadata records: %w", err)
 		}
 	}
