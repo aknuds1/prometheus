@@ -325,8 +325,9 @@ decoding, belong to their caller, so metadata strings the watcher decodes count
 as the sender's. The process-wide interner is one allocation site, counted once
 however many endpoints share it. Allocation stacks approximate ownership; they
 do not establish which object retains an allocation. Results keep the whole
-process's heap as a cross-check. `Endpoints: 2` adds a second queue and receiver
-for heap passes.
+process's heap as a cross-check. `PROMETHEUS_METADATA_PIPELINE_ENDPOINTS=2` adds a
+second queue and receiver, for heap passes of cases without held backlogs or
+restarts.
 
 `BenchmarkHeadMetricMetadataBackfillWAL` reports the decompressed metadata and
 compressed WAL bytes per sample of an out-of-order backfill, after an untimed
