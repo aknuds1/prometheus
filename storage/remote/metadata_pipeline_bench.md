@@ -282,6 +282,34 @@ parallel readers; existing two-version cases are unchanged.
 adds the corresponding full-history lookup while eight ingestion workers replace
 versions and wait for two lookup destinations before advancing their own series.
 
+## Batched and restart companions
+
+| Case | Difference from the original trace |
+| --- | --- |
+| `batched` | The 1%-changing workload, with 10 consecutive steps of 100 series per transaction, as in RW2 and OTLP requests. Transactions still hold 1,000 samples. |
+| `restart` | Change every series' metadata in each of the first four sweeps, then leave it unchanged. After sweep `PROMETHEUS_METADATA_PIPELINE_RESTART_STEP` (default 30), checkpoint the WAL and restart TSDB and sender. Only the sweeps after the restart are measured. |
+
+WAL-only forwarding writes each transaction's metadata records before its samples
+and keeps only the latest value per series. The receiver therefore expects every
+WAL-only sample in a batched transaction to carry the transaction's final version,
+and every native sample to carry the version at its own timestamp.
+
+Before the restart, a single writer appends in ID order, so segment cuts and
+checkpoint contents are identical across runs. Segments are 32 KiB per 10,000
+series, and truncation at the midpoint timestamp checkpoints about two thirds of
+them. The checkpoint must include the whole metadata history. While draining
+the pre-restart sweeps, the fixture notifies the watcher every 10 ms: a watcher
+that moves to a new segment otherwise waits up to 15 s to read it. Reopened
+storage writes default-size segments, so measured sweeps neither roll over nor
+use synthetic notifications. Producers forget their series refs at the restart.
+
+The result reports truncation and replay wall time, the WAL truncation summary,
+the replay duration gauge, checkpoint file bytes, and decompressed checkpoint
+record bytes by type. Heap passes add the peak sampled heap during truncation and
+the retained heap after replay, before the sender opens. Every run also reports
+decompressed WAL record bytes by type after the database closes, including the
+pre-restart segments that remain after truncation.
+
 ## Linux findings (2026-09-20)
 
 Measured on Debian 13.7, an eight-vCPU Xeon Platinum 8358 guest with 16 GB RAM,

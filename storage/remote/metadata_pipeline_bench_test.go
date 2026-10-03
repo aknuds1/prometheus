@@ -18,9 +18,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +38,7 @@ type metadataPipelineResult struct {
 	AllocatedBytes, Allocations                    uint64
 	LifecycleAllocatedBytes, LifecycleAllocations  uint64
 	WALBytes, LifecycleWALBytes                    float64
+	WALPayloadBytes                                map[string]int64
 	Requests, RequestBytes, ReceiverServiceNanos   int64
 	OutstandingAtWriterEnd, PeakSampledQueue       int64
 	ResidentSeries                                 uint64
@@ -47,6 +48,7 @@ type metadataPipelineResult struct {
 	ScheduleP50, ScheduleP99, ScheduleMax          float64
 	SweepsLateByInterval                           int64
 	TransactionsLateByInterval                     int64
+	Restart                                        *metadataPipelineRestart `json:",omitempty"`
 }
 
 // BenchmarkRemoteWriteMetadataPipeline includes ingestion, WAL reading, metadata
@@ -56,9 +58,13 @@ func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
 	series := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_SERIES", 10000)
 	sweeps := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_SWEEPS", 200)
 	receiverProcs := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_RECEIVER_PROCS", 2)
+	// The checkpoint covers about two thirds of the segments, so unchanged steps
+	// must follow the metadata history: 30 leaves WAL records a margin of 11
+	// segments at 10,000 series.
+	restartStep := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_RESTART_STEP", 30)
 	require.Zero(b, series%100, "series count must be a multiple of 100")
 	require.LessOrEqual(b, sweeps, 400, "changing traces must fit the five-version native history")
-	for _, workload := range []string{"cold", "unchanged", "changes", "newseries", "backlog", "cardinality", "distinct", "changes-distinct", "paced-unchanged", "paced-changes"} {
+	for _, workload := range []string{"cold", "unchanged", "changes", "newseries", "backlog", "cardinality", "distinct", "changes-distinct", "paced-unchanged", "paced-changes", "batched", "restart"} {
 		c := metadataPipelineConfig{Case: workload, Series: series, Values: 100, Sweeps: sweeps, Writers: 4, Shards: 4, CommitSize: 1000, Batch: 2000, Capacity: 10000, ReceiverProcs: receiverProcs}
 		switch workload {
 		case "backlog":
@@ -69,6 +75,12 @@ func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
 			c.Values = c.Series
 		case "paced-unchanged", "paced-changes":
 			c.SweepInterval = 20 * time.Millisecond
+		case "batched":
+			// Keep 1,000 samples per transaction, as in the unbatched cases.
+			c.CommitSize, c.StepsPerCommit = 100, 10
+		case "restart":
+			// Segments scale with the series count. Measured sweeps follow the restart.
+			c.RestartStep, c.WALSegmentSize = restartStep, max(1, series/10000)*32<<10
 		}
 		for _, mode := range []string{"disabled", "wal", "native"} {
 			c.Source = mode
@@ -158,6 +170,12 @@ func benchmarkMetadataPipeline(b *testing.B, c metadataPipelineConfig) {
 		if r.CPU.Available {
 			metrics["cpu-ns/sample"] += float64(r.CPU.User+r.CPU.System) / n
 		}
+		if restart := r.Restart; restart != nil {
+			metrics["truncate-ms/op"] += float64(restart.Truncation) / float64(time.Millisecond)
+			metrics["replay-ms/op"] += float64(restart.Replay) / float64(time.Millisecond)
+			metrics["checkpoint-B/op"] += float64(restart.CheckpointBytes)
+			metrics["truncate-alloc-B/op"] += float64(restart.TruncationAllocatedBytes)
+		}
 		encoded, err := json.Marshal(r)
 		require.NoError(b, err)
 		b.Logf("metadata-pipeline-result: %s", encoded)
@@ -200,6 +218,13 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		require.NoError(b, f.append(ctx, 0, 0))
 		beforeReceiver, err = f.drain(ctx, f.expectedItems(1))
 		require.NoError(b, err)
+		if c.RestartStep > 0 {
+			restart, err := f.restart(ctx, dir, r.Diagnostic)
+			require.NoError(b, err)
+			r.Restart = &restart
+			beforeReceiver, err = f.receiver.command(ctx, "stats")
+			require.NoError(b, err)
+		}
 		beforeMetrics, err := f.metrics()
 		require.NoError(b, err)
 		beforeWAL = beforeMetrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
@@ -220,7 +245,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		phaseStart = time.Now()
 		b.StartTimer()
 	}
-	first, last := 1, c.Sweeps
+	first, last := c.RestartStep+1, c.Sweeps
 	if c.Case == "cold" {
 		first, last = 0, 0
 	}
@@ -289,14 +314,9 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	require.Equal(b, uint64(c.residentSeries()), r.ResidentSeries)
 	metrics, err := f.metrics()
 	require.NoError(b, err)
-	require.Zero(b, metrics["prometheus_tsdb_head_native_metric_metadata_version_evictions_total"])
+	require.NoError(b, checkMetadataPipelineMetrics(metrics))
 	r.LifecycleWALBytes = metrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
 	r.WALBytes = r.LifecycleWALBytes - beforeWAL
-	for name, value := range metrics {
-		if strings.HasPrefix(name, "prometheus_remote_storage_") && (strings.HasSuffix(name, "_failed_total") || strings.HasSuffix(name, "_dropped_total") || strings.HasSuffix(name, "_retried_total")) {
-			require.Zero(b, value, name)
-		}
-	}
 	require.NoError(b, d.begin(ctx, f, "db-close"))
 	closeStart := time.Now()
 	require.NoError(b, f.db.Close())
@@ -309,6 +329,8 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	r.LifecycleCPU = lifecycleEndCPU.sub(lifecycleCPU)
 	runtime.ReadMemStats(&afterMemory)
 	r.LifecycleAllocatedBytes, r.LifecycleAllocations = afterMemory.TotalAlloc-lifecycleMemory.TotalAlloc, afterMemory.Mallocs-lifecycleMemory.Mallocs
+	r.WALPayloadBytes, err = metadataPipelinePayloadBytes(filepath.Join(dir, "wal"))
+	require.NoError(b, err)
 	var latencies []time.Duration
 	var lateness []time.Duration
 	for i := range f.latency {

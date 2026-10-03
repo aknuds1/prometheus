@@ -23,7 +23,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	runtimemetrics "runtime/metrics"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,6 +49,8 @@ import (
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
+	"github.com/prometheus/prometheus/tsdb/record"
+	"github.com/prometheus/prometheus/tsdb/wlog"
 	"github.com/prometheus/prometheus/util/compression"
 )
 
@@ -54,12 +58,17 @@ const metadataPipelineReceiverEnv = "PROMETHEUS_METADATA_PIPELINE_RECEIVER"
 
 // metadataPipelineConfig describes a finite trace. Step zero seeds the warm
 // cases; cold initialization measures only step zero. IDs survive WAL ref changes.
+// StepsPerCommit batches consecutive steps of each series into one transaction.
+// The restart case checkpoints the WAL after RestartStep, then restarts storage
+// and sender before the remaining steps.
 type metadataPipelineConfig struct {
 	Group                            string
 	Case, Source                     string
 	Series, Values, Sweeps           int
 	Writers, Shards, Batch, Capacity int
 	CommitSize, ReceiverProcs        int
+	StepsPerCommit, RestartStep      int
+	WALSegmentSize                   int
 	Base                             int64
 	Mixed                            bool
 	SweepInterval                    time.Duration
@@ -91,12 +100,23 @@ func (c metadataPipelineConfig) version(slot, step int) int {
 	switch c.Case {
 	case "backlog":
 		return step
-	case "changes", "changes-distinct", "paced-changes":
+	case "restart":
+		return min(step, metadataPipelineRestartHistory)
+	case "changes", "changes-distinct", "paced-changes", "batched":
 		if step > slot%100 {
 			return 1 + (step-1-slot%100)/100
 		}
 	}
 	return 0
+}
+
+// lastStepInCommit returns the final step of the transaction containing step.
+// Steps after the seed are batched from step one.
+func (c metadataPipelineConfig) lastStepInCommit(step int) int {
+	if c.StepsPerCommit <= 1 || step == 0 {
+		return step
+	}
+	return min((step-1)/c.StepsPerCommit*c.StepsPerCommit+c.StepsPerCommit, c.lastStep())
 }
 
 func (c metadataPipelineConfig) residentSeries() int {
@@ -183,8 +203,13 @@ func (r *metadataPipelineReceiver) validate(req *writev2.Request) (samples, hist
 				return fmt.Errorf("unexpected sample id=%d step=%d value=%g", id, step, value)
 			}
 			want := r.metadata[slot][r.config.version(slot, step)]
-			if r.config.Source == "disabled" {
+			switch r.config.Source {
+			case "disabled":
 				want = metadata.Metadata{Type: model.MetricTypeUnknown}
+			case "wal":
+				// Legacy records precede a transaction's samples and carry only the
+				// latest value, so each sample gets its transaction's final version.
+				want = r.metadata[slot][r.config.version(slot, r.config.lastStepInCommit(step))]
 			}
 			if md != want {
 				return fmt.Errorf("metadata id=%d step=%d: got %+v, want %+v", id, step, md, want)
@@ -477,6 +502,12 @@ func newMetadataPipeline(ctx context.Context, c metadataPipelineConfig) (*metada
 	if c.SamplesPerSecond < 0 || (c.SamplesPerSecond > 0 && (c.SweepInterval != 0 || c.Series%c.Writers != 0)) {
 		return nil, errors.New("transaction pacing requires equal writer partitions and no sweep pacing")
 	}
+	if c.StepsPerCommit < 0 || (c.StepsPerCommit > 1 && (c.SweepInterval != 0 || c.SamplesPerSecond != 0 || c.Group != "")) {
+		return nil, errors.New("batched transactions must be unpaced and ungrouped")
+	}
+	if (c.Case == "restart") != (c.RestartStep > 0) || (c.RestartStep > 0 && (c.Group != "" || c.RestartStep <= metadataPipelineRestartHistory || c.RestartStep >= c.lastStep())) {
+		return nil, errors.New("restarts require an ungrouped restart trace with steps after the history and after the restart")
+	}
 	f := &metadataPipeline{
 		config: c, registry: prometheus.NewRegistry(), observer: prometheus.NewRegistry(), refs: make([]storage.SeriesRef, c.Series),
 		latency: make([][]time.Duration, c.Writers), peak: make([]int64, c.Writers),
@@ -529,11 +560,19 @@ func metadataPipelineInputs(c metadataPipelineConfig) ([]labels.Labels, [][]meta
 }
 
 func (f *metadataPipeline) open(dir string) error {
+	if err := f.openDB(dir); err != nil {
+		return err
+	}
+	return f.openSender(dir)
+}
+
+func (f *metadataPipeline) openDB(dir string) error {
 	c := f.config
 	opts := tsdb.DefaultOptions()
 	opts.EnableNativeMetadata = c.Source == "native"
 	opts.EnableMetadataWALRecords = c.Source == "wal"
 	opts.WALCompression = compression.Snappy
+	opts.WALSegmentSize = c.WALSegmentSize
 	opts.EnableExemplarStorage, opts.MaxExemplars = c.Mixed, int64(c.Series*2)
 	var err error
 	f.db, err = tsdb.Open(dir, nil, f.registry, opts, nil)
@@ -541,6 +580,11 @@ func (f *metadataPipeline) open(dir string) error {
 		return err
 	}
 	f.db.DisableCompactions()
+	return nil
+}
+
+func (f *metadataPipeline) openSender(dir string) error {
+	c := f.config
 	var reader storage.NativeMetricMetadataReader
 	if c.Source == "native" {
 		reader = f.db
@@ -647,9 +691,10 @@ func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 	c := f.config
 	group, ctx := errgroup.WithContext(ctx)
 	writers := c.Writers
-	if first == 0 && last == 0 && c.Case != "cold" {
+	if (first == 0 && last == 0 && c.Case != "cold") || (c.RestartStep > 0 && last <= c.RestartStep) {
 		// Seed in ID order so warm cases start with identical WAL refs and
-		// shard assignments. Measured sweeps still use concurrent producers.
+		// shard assignments; a checkpointed prefix also gets identical segment
+		// cuts. Measured sweeps still use concurrent producers.
 		writers = 1
 	}
 	var paceStart time.Time
@@ -669,9 +714,10 @@ func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 				defer pacer.timer.Stop()
 			}
 			begin, end := c.Series*writer/writers, c.Series*(writer+1)/writers
-			for step := first; step <= last; step++ {
+			for batch := first; batch <= last; batch += max(1, c.StepsPerCommit) {
+				batchEnd := min(c.lastStepInCommit(batch), last)
 				if pacer != nil && c.SweepInterval > 0 {
-					late, err := pacer.wait(ctx, step-first)
+					late, err := pacer.wait(ctx, batch-first)
 					if err != nil {
 						return err
 					}
@@ -679,7 +725,7 @@ func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 				}
 				for offset := begin; offset < end; offset += c.CommitSize {
 					if pacer != nil && c.SamplesPerSecond > 0 {
-						scheduled := (step-first)*(end-begin) + offset - begin
+						scheduled := (batch-first)*(end-begin) + offset - begin
 						late, err := pacer.waitSamples(ctx, scheduled, writer, writers, c.CommitSize, c.SamplesPerSecond)
 						if err != nil {
 							return err
@@ -692,30 +738,32 @@ func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 					start := time.Now()
 					app := f.db.AppenderV2(ctx)
 					for slot := offset; slot < min(offset+c.CommitSize, end); slot++ {
-						generation := c.generation(slot, step)
-						id := slot + generation*c.Series
-						if generation > 0 && step == c.firstStep(id) {
-							f.refs[slot] = 0
-						}
-						timestamp, value := c.Base+int64(step)*15000, float64(step+1)
-						var h *histogram.Histogram
-						var fh *histogram.FloatHistogram
-						if c.Mixed {
-							switch slot % 3 {
-							case 1:
-								h = &histogram.Histogram{Count: uint64(step + 1), ZeroCount: uint64(step + 1), Sum: value}
-							case 2:
-								fh = &histogram.FloatHistogram{Count: value, ZeroCount: value, Sum: value}
+						for step := batch; step <= batchEnd; step++ {
+							generation := c.generation(slot, step)
+							id := slot + generation*c.Series
+							if generation > 0 && step == c.firstStep(id) {
+								f.refs[slot] = 0
 							}
+							timestamp, value := c.Base+int64(step)*15000, float64(step+1)
+							var h *histogram.Histogram
+							var fh *histogram.FloatHistogram
+							if c.Mixed {
+								switch slot % 3 {
+								case 1:
+									h = &histogram.Histogram{Count: uint64(step + 1), ZeroCount: uint64(step + 1), Sum: value}
+								case 2:
+									fh = &histogram.FloatHistogram{Count: value, ZeroCount: value, Sum: value}
+								}
+							}
+							ref, err := app.Append(f.refs[slot], f.labels[id], 0, timestamp, value, h, fh, storage.AOptions{Metadata: f.metadata[slot][c.version(slot, step)]})
+							if err == nil && c.Mixed && slot%3 == 0 {
+								_, err = app.AppendExemplars(ref, labels.EmptyLabels(), []exemplar.Exemplar{{Labels: labels.FromStrings("trace_id", "trace"), Ts: timestamp, HasTs: true, Value: value}})
+							}
+							if err != nil {
+								return errors.Join(err, app.Rollback())
+							}
+							f.refs[slot] = ref
 						}
-						ref, err := app.Append(f.refs[slot], f.labels[id], 0, timestamp, value, h, fh, storage.AOptions{Metadata: f.metadata[slot][c.version(slot, step)]})
-						if err == nil && c.Mixed && slot%3 == 0 {
-							_, err = app.AppendExemplars(ref, labels.EmptyLabels(), []exemplar.Exemplar{{Labels: labels.FromStrings("trace_id", "trace"), Ts: timestamp, HasTs: true, Value: value}})
-						}
-						if err != nil {
-							return errors.Join(err, app.Rollback())
-						}
-						f.refs[slot] = ref
 					}
 					if err := app.Commit(); err != nil {
 						return err
@@ -775,10 +823,216 @@ func (f *metadataPipeline) metrics() (map[string]float64, error) {
 	values := make(map[string]float64, len(families))
 	for _, family := range families {
 		for _, metric := range family.Metric {
-			values[family.GetName()] += metric.GetCounter().GetValue() + metric.GetGauge().GetValue()
+			values[family.GetName()] += metric.GetCounter().GetValue() + metric.GetGauge().GetValue() + metric.GetSummary().GetSampleSum()
 		}
 	}
 	return values, nil
+}
+
+// checkMetadataPipelineMetrics rejects lost forwarding work and history evictions.
+func checkMetadataPipelineMetrics(metrics map[string]float64) error {
+	if v := metrics["prometheus_tsdb_head_native_metric_metadata_version_evictions_total"]; v != 0 {
+		return fmt.Errorf("%g native metadata version evictions", v)
+	}
+	for name, value := range metrics {
+		if strings.HasPrefix(name, "prometheus_remote_storage_") && (strings.HasSuffix(name, "_failed_total") || strings.HasSuffix(name, "_dropped_total") || strings.HasSuffix(name, "_retried_total")) && value != 0 {
+			return fmt.Errorf("%s = %g", name, value)
+		}
+	}
+	return nil
+}
+
+// metadataPipelineRestartHistory is the last step that changes metadata in the
+// restart case, filling the five-version native history.
+const metadataPipelineRestartHistory = 4
+
+// metadataPipelineRestart describes one WAL checkpoint and restart. Heap fields
+// are populated only in heap passes; the peak samples live and unswept objects.
+type metadataPipelineRestart struct {
+	Truncation, Replay                              time.Duration
+	WALTruncationSeconds, ReplaySeconds             float64
+	HistorySegment, Checkpoint                      int
+	CheckpointBytes                                 int64
+	CheckpointPayloadBytes                          map[string]int64
+	TruncationAllocatedBytes, TruncationAllocations uint64
+	TruncationBaseHeap, TruncationPeakHeap          uint64
+	ReplayedHeap                                    uint64
+	PreRestartWALBytes                              float64
+}
+
+// drainNotified drains while repeating write notifications. A watcher that moves
+// to a new segment reads it only when notified, so a final segment rollover would
+// otherwise wait for the watcher's 15s read timeout.
+func (f *metadataPipeline) drainNotified(ctx context.Context, expected int64) (metadataPipelineReceiverStats, error) {
+	sender, done := f.sender, make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				sender.Notify()
+			}
+		}
+	})
+	defer wg.Wait()
+	defer close(done)
+	return f.drain(ctx, expected)
+}
+
+// restart writes the steps up to RestartStep after the seed, and checkpoints
+// the drained WAL with the sender running. The checkpoint must include the whole
+// metadata history. Restart then reopens storage and sender with fresh
+// registries; replay is the timed DB open. Series refs are forgotten, as by
+// restarted producers. The new watcher skips samples in segments written before
+// it started. Later segments have the default size, so measured sweeps never
+// wait for the watcher to notice a rollover.
+func (f *metadataPipeline) restart(ctx context.Context, dir string, heap bool) (metadataPipelineRestart, error) {
+	var r metadataPipelineRestart
+	if err := f.append(ctx, 1, metadataPipelineRestartHistory); err != nil {
+		return r, err
+	}
+	_, history, err := wlog.Segments(filepath.Join(dir, "wal"))
+	if err != nil {
+		return r, err
+	}
+	r.HistorySegment = history
+	if err := f.append(ctx, metadataPipelineRestartHistory+1, f.config.RestartStep); err != nil {
+		return r, err
+	}
+	if _, err := f.drainNotified(ctx, f.expectedItems(f.config.RestartStep+1)); err != nil {
+		return r, err
+	}
+	if heap {
+		r.TruncationBaseHeap = metadataPipelineRetainedHeap(f)
+	}
+	var stop chan struct{}
+	var peak chan uint64
+	if heap {
+		stop, peak = make(chan struct{}), make(chan uint64, 1)
+		go func() { peak <- metadataPipelineSampleHeap(stop) }()
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	start := time.Now()
+	err = f.db.Head().Truncate(f.config.Base + int64(f.config.RestartStep/2)*15000)
+	r.Truncation = time.Since(start)
+	runtime.ReadMemStats(&after)
+	if heap {
+		close(stop)
+		r.TruncationPeakHeap = <-peak
+	}
+	if err != nil {
+		return r, err
+	}
+	r.TruncationAllocatedBytes, r.TruncationAllocations = after.TotalAlloc-before.TotalAlloc, after.Mallocs-before.Mallocs
+	checkpoint, index, err := wlog.LastCheckpoint(filepath.Join(dir, "wal"))
+	if err != nil {
+		return r, fmt.Errorf("restart requires a checkpoint: %w", err)
+	}
+	r.Checkpoint = index
+	if index < history {
+		return r, fmt.Errorf("checkpoint %d ends before the history in segment %d", index, history)
+	}
+	entries, err := os.ReadDir(checkpoint)
+	if err != nil {
+		return r, err
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			return r, err
+		}
+		r.CheckpointBytes += info.Size()
+	}
+	if r.CheckpointPayloadBytes, err = metadataPipelinePayloadBytes(checkpoint); err != nil {
+		return r, err
+	}
+	if err := f.closeSender(); err != nil {
+		return r, err
+	}
+	metrics, err := f.metrics()
+	if err != nil {
+		return r, err
+	}
+	if err := checkMetadataPipelineMetrics(metrics); err != nil {
+		return r, err
+	}
+	for _, name := range []string{"prometheus_tsdb_checkpoint_creations_failed_total", "prometheus_tsdb_wal_truncations_failed_total", "prometheus_tsdb_checkpoint_deletions_failed_total"} {
+		if metrics[name] != 0 {
+			return r, fmt.Errorf("%s = %g", name, metrics[name])
+		}
+	}
+	if metrics["prometheus_tsdb_checkpoint_creations_total"] != 1 {
+		return r, fmt.Errorf("created %g checkpoints, want 1", metrics["prometheus_tsdb_checkpoint_creations_total"])
+	}
+	r.WALTruncationSeconds = metrics["prometheus_tsdb_wal_truncate_duration_seconds"]
+	r.PreRestartWALBytes = metrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
+	err = f.db.Close()
+	f.db = nil
+	if err != nil {
+		return r, err
+	}
+	// TSDB collectors are never unregistered; keep the retired sender's failure
+	// counters checked above out of later checks.
+	f.registry, f.observer = prometheus.NewRegistry(), prometheus.NewRegistry()
+	f.config.WALSegmentSize = 0
+	start = time.Now()
+	if err := f.openDB(dir); err != nil {
+		return r, err
+	}
+	r.Replay = time.Since(start)
+	if metrics, err = f.metrics(); err != nil {
+		return r, err
+	}
+	r.ReplaySeconds = metrics["prometheus_tsdb_data_replay_duration_seconds"]
+	if heap {
+		r.ReplayedHeap = metadataPipelineRetainedHeap(f)
+	}
+	clear(f.refs)
+	return r, f.openSender(dir)
+}
+
+// metadataPipelinePayloadBytes sums decompressed record bytes by record type
+// over the segments in dir, excluding checkpoints. Page padding and compression
+// make file sizes too coarse to compare record encodings.
+func metadataPipelinePayloadBytes(dir string) (map[string]int64, error) {
+	segments, err := wlog.NewSegmentsReader(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer segments.Close()
+	var dec record.Decoder
+	payloads := map[string]int64{}
+	reader := wlog.NewReader(segments)
+	for reader.Next() {
+		rec := reader.Record()
+		payloads[dec.Type(rec).String()] += int64(len(rec))
+	}
+	return payloads, reader.Err()
+}
+
+// metadataPipelineSampleHeap returns the peak heap object bytes observed until
+// stop is closed. Unlike MemStats, reading these runtime metrics does not stop
+// the world.
+func metadataPipelineSampleHeap(stop <-chan struct{}) uint64 {
+	samples := []runtimemetrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	var peak uint64
+	for {
+		runtimemetrics.Read(samples)
+		peak = max(peak, samples[0].Value.Uint64())
+		select {
+		case <-stop:
+			runtimemetrics.Read(samples)
+			return max(peak, samples[0].Value.Uint64())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (f *metadataPipeline) closeSender() error {
@@ -824,7 +1078,7 @@ func (u metadataPipelineCPUUsage) sub(before metadataPipelineCPUUsage) metadataP
 
 func TestRemoteWriteMetadataPipeline(t *testing.T) {
 	for _, mode := range []string{"disabled", "wal", "native"} {
-		for _, workload := range []string{"cold", "unchanged", "changes", "changes-distinct", "paced-unchanged", "paced-changes", "newseries", "backlog", "mixed", "scale-unchanged", "scale-distinct", "scale-changes", "scale-changes-distinct", "scale-backlog", "scale-backlog-distinct"} {
+		for _, workload := range []string{"cold", "unchanged", "changes", "changes-distinct", "paced-unchanged", "paced-changes", "newseries", "backlog", "batched", "restart", "mixed", "scale-unchanged", "scale-distinct", "scale-changes", "scale-changes-distinct", "scale-backlog", "scale-backlog-distinct"} {
 			t.Run("source="+mode+"/case="+workload, func(t *testing.T) {
 				c := metadataPipelineConfig{Source: mode, Case: workload, Series: 300, Values: 100, Sweeps: 4, Writers: 4, Shards: 4, Batch: 20, Capacity: 100, CommitSize: 50, ReceiverProcs: 2, Base: time.Now().Add(time.Hour).UnixMilli(), Mixed: workload == "mixed"}
 				if scaleCase, ok := strings.CutPrefix(workload, "scale-"); ok {
@@ -844,8 +1098,16 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 				if c.Case == "backlog" {
 					c.Writers, c.Shards = 1, 1
 				}
-				if c.Case == "changes" || c.Case == "changes-distinct" || c.Case == "paced-changes" || c.Case == "newseries" {
+				if c.Case == "changes" || c.Case == "changes-distinct" || c.Case == "paced-changes" || c.Case == "newseries" || c.Case == "batched" {
 					c.Sweeps = 101
+				}
+				switch workload {
+				case "batched":
+					// Keep transactions at 50 samples, as in the unbatched cases.
+					c.CommitSize, c.StepsPerCommit = 5, 10
+				case "restart":
+					// About nine minimal segments precede the checkpoint.
+					c.Sweeps, c.RestartStep, c.WALSegmentSize = 200, 180, 32<<10
 				}
 				if workload == "changes-distinct" {
 					c.Values = c.Series
@@ -858,7 +1120,8 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 				f, err := newMetadataPipeline(ctx, c)
 				require.NoError(t, err)
 				defer func() { require.NoError(t, f.close()) }()
-				require.NoError(t, f.open(t.TempDir()))
+				dir := t.TempDir()
+				require.NoError(t, f.open(dir))
 				require.NoError(t, f.append(ctx, 0, 0))
 				_, err = f.drain(ctx, f.expectedItems(1))
 				require.NoError(t, err)
@@ -868,10 +1131,21 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 					}
 				}
 				if workload != "cold" {
+					first := 1
+					if c.RestartStep > 0 {
+						restart, err := f.restart(ctx, dir, true)
+						require.NoError(t, err)
+						require.Positive(t, restart.Checkpoint)
+						require.Positive(t, restart.CheckpointBytes)
+						require.Positive(t, restart.CheckpointPayloadBytes["series"])
+						require.Positive(t, restart.TruncationPeakHeap)
+						require.Positive(t, restart.ReplayedHeap)
+						first = c.RestartStep + 1
+					}
 					if c.Case == "backlog" {
 						require.NoError(t, f.holdReceiver(ctx))
 					}
-					require.NoError(t, f.append(ctx, 1, c.Sweeps))
+					require.NoError(t, f.append(ctx, first, c.Sweeps))
 					if c.Case == "backlog" {
 						require.NoError(t, f.awaitBacklog(ctx))
 						require.Less(t, f.pending(), int64(c.Series*c.Sweeps), "must leave unread WAL work")
@@ -897,12 +1171,7 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 				require.Equal(t, uint64(c.residentSeries()), f.db.Head().NumSeries())
 				metrics, err := f.metrics()
 				require.NoError(t, err)
-				require.Zero(t, metrics["prometheus_tsdb_head_native_metric_metadata_version_evictions_total"])
-				for name, value := range metrics {
-					if strings.HasPrefix(name, "prometheus_remote_storage_") && (strings.HasSuffix(name, "_failed_total") || strings.HasSuffix(name, "_dropped_total") || strings.HasSuffix(name, "_retried_total")) {
-						require.Zero(t, value, name)
-					}
-				}
+				require.NoError(t, checkMetadataPipelineMetrics(metrics))
 				require.NoError(t, f.closeSender())
 				cancelled, stop := context.WithCancel(ctx)
 				stop()
