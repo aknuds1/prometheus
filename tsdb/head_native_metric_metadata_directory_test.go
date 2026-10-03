@@ -170,7 +170,7 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 		series := nativeMetadataDirectorySeries(captured, 0)
 		require.NotNil(t, series)
 		require.NotZero(t, series.metadata.Load().native.flags.Load()&nativeMetadataRetired)
-		require.Equal(t, "test", series.metadata.Load().native.metadata.Help)
+		require.Equal(t, "test", series.metadata.Load().native.Metadata.Help)
 		require.Zero(t, store.versions.Load())
 	})
 

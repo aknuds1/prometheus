@@ -26,6 +26,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/tsdb/nativemetadata"
 	"github.com/prometheus/prometheus/util/compression"
 )
 
@@ -46,7 +47,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 					s := &memSeries{}
 					series[i] = s
 					s.Lock()
-					s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m), effectiveFrom: 100}
+					s.ensureMetadataLocked().native = &nativeSeriesMetadata{History: nativemetadata.History{Metadata: cloneNativeMetricMetadata(m), EffectiveFrom: 100}}
 					observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
 					s.Unlock()
 					require.False(t, observe)
@@ -66,7 +67,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 				s.Unlock()
 				require.False(t, observe)
 				require.Nil(t, proof)
-				require.Same(t, unsafe.StringData(fresh.Help), unsafe.StringData(memo.values[nativeMetadataForTest(s).metadata].Help))
+				require.Same(t, unsafe.StringData(fresh.Help), unsafe.StringData(memo.values[nativeMetadataForTest(s).Metadata].Help))
 				for _, current := range []*memSeries{s, series[count]} {
 					current.Lock()
 					observe, proof = app.shouldObserveNativeMetricMetadataLocked(current, 99, &m)
@@ -90,7 +91,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 			m := metadata.Metadata{Help: strings.Repeat("x", size)}
 			s := &memSeries{}
 			s.Lock()
-			s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m), effectiveFrom: 100}
+			s.ensureMetadataLocked().native = &nativeSeriesMetadata{History: nativemetadata.History{Metadata: cloneNativeMetricMetadata(m), EffectiveFrom: 100}}
 			observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
 			s.Unlock()
 			require.False(t, observe)
@@ -121,7 +122,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 		m := metadata.Metadata{Type: model.MetricTypeCounter, Help: strings.Repeat("a", 1024)}
 		s := &memSeries{}
 		s.Lock()
-		s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m), effectiveFrom: 100}
+		s.ensureMetadataLocked().native = &nativeSeriesMetadata{History: nativemetadata.History{Metadata: cloneNativeMetricMetadata(m), EffectiveFrom: 100}}
 		observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
 		s.Unlock()
 		require.False(t, observe)
@@ -130,7 +131,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 		changed := m
 		changed.Help += "changed"
 		s.Lock()
-		s.nativeMetadataLocked().metadata = cloneNativeMetricMetadata(changed)
+		s.nativeMetadataLocked().Metadata = cloneNativeMetricMetadata(changed)
 		s.Unlock()
 		app.batches = []*appendBatch{{}}
 		defer app.batches[0].close(app.head)
@@ -208,7 +209,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 		}
 		require.False(t, observe(100, &m))
 		require.Nil(t, app.nativeMetricMetadata, "equality must not open an observation transaction")
-		owned := nativeMetadataForTest(s).metadata
+		owned := nativeMetadataForTest(s).Metadata
 		require.Equal(t, m, app.batches[0].nativeMetadataEquality.values[owned])
 		fresh := m
 		fresh.Help = strings.Clone(m.Help)
@@ -242,7 +243,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 				s := store.seriesForTest(1)
 				m := metadata.Metadata{Help: strings.Repeat("x", size)}
 				s.Lock()
-				s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m), effectiveFrom: 100}
+				s.ensureMetadataLocked().native = &nativeSeriesMetadata{History: nativemetadata.History{Metadata: cloneNativeMetricMetadata(m), EffectiveFrom: 100}}
 				observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
 				require.False(t, observe)
 				if proof != nil {
@@ -264,7 +265,7 @@ func TestHeadAppenderNativeMetadataEquality(t *testing.T) {
 				s := &memSeries{}
 				m := metadata.Metadata{Help: strings.Repeat("x", size)}
 				s.Lock()
-				s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m)}
+				s.ensureMetadataLocked().native = &nativeSeriesMetadata{History: nativemetadata.History{Metadata: cloneNativeMetricMetadata(m)}}
 				observe, proof := app.shouldObserveNativeMetricMetadataLocked(s, 100, &m)
 				require.False(t, observe)
 				if proof != nil {

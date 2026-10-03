@@ -23,6 +23,7 @@ import (
 	"go.uber.org/atomic"
 
 	"github.com/prometheus/prometheus/model/metadata"
+	"github.com/prometheus/prometheus/tsdb/nativemetadata"
 )
 
 const (
@@ -148,5 +149,5 @@ func cloneNativeMetricMetadata(m metadata.Metadata) *metadata.Metadata {
 }
 
 func equalNativeMetricMetadata(a, b *metadata.Metadata) bool {
-	return a == b || a != nil && b != nil && *a == *b
+	return nativemetadata.Equal(a, b)
 }

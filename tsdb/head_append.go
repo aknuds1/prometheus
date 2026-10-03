@@ -452,28 +452,28 @@ func (a *headAppenderBase) shouldObserveNativeMetricMetadataLocked(s *memSeries,
 	native := s.nativeMetadataLocked()
 	// Matching the newest value does not establish what applied at an older
 	// timestamp; that observation may move the start of the matching version.
-	if native == nil || native.effectiveFrom > timestamp {
+	if native == nil || native.EffectiveFrom > timestamp {
 		return true, nil
 	}
 	if max(len(m.Type), len(m.Unit), len(m.Help)) < nativeMetricMetadataEqualityMinBytes {
-		return *native.metadata != *m, nil
+		return *native.Metadata != *m, nil
 	}
 	var memo *nativeMetricMetadataEqualityMemo
 	if len(a.batches) > 0 {
 		memo = a.batches[0].nativeMetadataEquality
 	}
 	if memo != nil {
-		if verified, ok := memo.values[native.metadata]; ok {
+		if verified, ok := memo.values[native.Metadata]; ok {
 			// The stored raw value was verified against this exact immutable
 			// pointer. Inequality is definitive too; do not compare twice.
 			if verified != *m {
 				return true, nil
 			}
-			memo.values[native.metadata] = *m
+			memo.values[native.Metadata] = *m
 			return false, nil
 		}
 	}
-	if *native.metadata != *m {
+	if *native.Metadata != *m {
 		return true, nil
 	}
 	// Saturation prevents new proofs, not observation decisions or existing hits.
@@ -481,7 +481,7 @@ func (a *headAppenderBase) shouldObserveNativeMetricMetadataLocked(s *memSeries,
 	if memo != nil && (len(memo.values) >= nativeMetricMetadataEqualityMaxEntries || memo.bytes == nativeMetricMetadataEqualityMaxBytes) {
 		return false, nil
 	}
-	return false, native.metadata
+	return false, native.Metadata
 }
 
 // rememberNativeMetadataEquality admits a verified value after normal batch

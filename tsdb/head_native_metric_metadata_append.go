@@ -142,10 +142,10 @@ func (a *nativeMetricMetadataAppender) resolveMetadata(series *memSeries, m meta
 	var count int
 	series.Lock()
 	if native := series.nativeMetadataLocked(); native != nil {
-		retained[0] = native.metadata
+		retained[0] = native.Metadata
 		count = 1
-		for _, point := range native.older {
-			retained[count] = point.metadata
+		for _, point := range native.Older {
+			retained[count] = point.Metadata
 			count++
 		}
 	}
@@ -346,10 +346,10 @@ func (s *nativeMetricMetadataStore) commitBatch(appender *nativeMetricMetadataAp
 		for _, observationRef := range observationRefs {
 			observation := appender.observations[observationRef-1]
 			point := nativeMetricMetadataPoint{
-				effectiveFrom: observation.effectiveFrom,
-				metadata:      appender.metadataPointer(series, observation.metadataRef),
+				EffectiveFrom: observation.effectiveFrom,
+				Metadata:      appender.metadataPointer(series, observation.metadataRef),
 			}
-			if last := len(appender.points) - 1; last >= 0 && appender.points[last].effectiveFrom == point.effectiveFrom {
+			if last := len(appender.points) - 1; last >= 0 && appender.points[last].EffectiveFrom == point.EffectiveFrom {
 				appender.points[last] = point
 			} else {
 				appender.points = append(appender.points, point)
@@ -410,7 +410,7 @@ func nativeMetricMetadataGroupStable(native *nativeSeriesMetadata, appender *nat
 	}
 	for _, ref := range refs {
 		observation := appender.observations[ref-1]
-		if observation.effectiveFrom < native.effectiveFrom || appender.metadataValue(observation.metadataRef) != *native.metadata {
+		if observation.effectiveFrom < native.EffectiveFrom || appender.metadataValue(observation.metadataRef) != *native.Metadata {
 			return false
 		}
 	}
@@ -422,7 +422,7 @@ func nativeMetricMetadataGroupStableResolved(native *nativeSeriesMetadata, point
 		return false
 	}
 	for _, point := range points {
-		if point.effectiveFrom < native.effectiveFrom || !equalNativeMetricMetadata(point.metadata, native.metadata) {
+		if point.EffectiveFrom < native.EffectiveFrom || !equalNativeMetricMetadata(point.Metadata, native.Metadata) {
 			return false
 		}
 	}
@@ -447,7 +447,7 @@ func nativeMetricMetadataStripeStable(appender *nativeMetricMetadataAppender, fi
 	}
 	for ref := first; ref != 0; {
 		observation := appender.observations[ref-1]
-		if observation.effectiveFrom < native.effectiveFrom || appender.metadataValue(observation.metadataRef) != *native.metadata {
+		if observation.effectiveFrom < native.EffectiveFrom || appender.metadataValue(observation.metadataRef) != *native.Metadata {
 			return false
 		}
 		ref = observation.next

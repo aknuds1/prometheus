@@ -27,11 +27,12 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/index"
+	"github.com/prometheus/prometheus/tsdb/nativemetadata"
 )
 
 const (
 	nativeMetricMetadataStripes            = 256
-	maxNativeMetricMetadataVersions        = 5
+	maxNativeMetricMetadataVersions        = nativemetadata.MaxVersions
 	nativeMetricMetadataPublicationPermits = math.MaxInt64
 )
 
@@ -59,10 +60,7 @@ type NativeMetricMetadataSeries struct {
 	Truncated bool
 }
 
-type nativeMetricMetadataPoint struct {
-	effectiveFrom int64
-	metadata      *metadata.Metadata
-}
+type nativeMetricMetadataPoint = nativemetadata.Point
 
 // nativeMetricMetadataStore indexes series-owned native histories and coordinates
 // their publication to senders. Index entries retain retired series until cleanup;
@@ -122,9 +120,7 @@ func (s *nativeMetricMetadataStore) reset() {
 // The series lock protects updates. Forwarding may read native state under the
 // publication barrier; deletion must therefore leave retired history unchanged.
 type nativeSeriesMetadata struct {
-	metadata      *metadata.Metadata
-	effectiveFrom int64
-	older         []nativeMetricMetadataPoint
+	nativemetadata.History
 	// Retirement is also visible to readers holding a detached directory page.
 	flags atomic.Uint32
 }
@@ -150,125 +146,11 @@ func (n *nativeSeriesMetadata) setFlag(flag uint32) {
 // returns the change in retained versions and the number evicted. The caller
 // holds the series lock. All input values must be immutable and independently owned.
 func (n *nativeSeriesMetadata) mergeLocked(observations []nativeMetricMetadataPoint) (versionDelta, evictions int) {
-	oldCount := 0
-	if n.metadata != nil {
-		oldCount = len(n.older) + 1
-	}
-	if oldCount == 0 || observations[0].effectiveFrom >= n.effectiveFrom {
-		for _, observation := range observations {
-			switch {
-			case n.metadata == nil:
-				n.effectiveFrom, n.metadata = observation.effectiveFrom, observation.metadata
-			case observation.effectiveFrom == n.effectiveFrom:
-				n.metadata = observation.metadata
-				if last := len(n.older) - 1; last >= 0 && equalNativeMetricMetadata(n.older[last].metadata, n.metadata) {
-					n.effectiveFrom = n.older[last].effectiveFrom
-					n.older[last] = nativeMetricMetadataPoint{}
-					n.older = n.older[:last]
-				}
-			case equalNativeMetricMetadata(observation.metadata, n.metadata):
-				// A repeated value does not advance the change point.
-			default:
-				previous := nativeMetricMetadataPoint{effectiveFrom: n.effectiveFrom, metadata: n.metadata}
-				if len(n.older) == maxNativeMetricMetadataVersions-1 {
-					copy(n.older, n.older[1:])
-					n.older[len(n.older)-1] = previous
-					evictions++
-				} else {
-					if len(n.older) == cap(n.older) {
-						grown := make([]nativeMetricMetadataPoint, len(n.older), max(1, 2*cap(n.older)))
-						copy(grown, n.older)
-						n.older = grown
-					}
-					n.older = append(n.older, previous)
-				}
-				n.effectiveFrom, n.metadata = observation.effectiveFrom, observation.metadata
-			}
-		}
-	} else {
-		var existing, retained [maxNativeMetricMetadataVersions]nativeMetricMetadataPoint
-		count := copy(existing[:], n.older)
-		existing[count] = nativeMetricMetadataPoint{effectiveFrom: n.effectiveFrom, metadata: n.metadata}
-		var versions []nativeMetricMetadataPoint
-		versions, evictions = mergeOverlappingNativeMetricMetadata(existing[:count+1], observations, retained[:0])
-		olderCount := len(versions) - 1
-		if cap(n.older) < olderCount {
-			capacity := 1
-			for capacity < olderCount {
-				capacity *= 2
-			}
-			n.older = make([]nativeMetricMetadataPoint, olderCount, capacity)
-		} else {
-			if len(n.older) > olderCount {
-				clear(n.older[olderCount:])
-			}
-			n.older = n.older[:olderCount]
-		}
-		copy(n.older, versions[:olderCount])
-		newest := versions[olderCount]
-		n.effectiveFrom, n.metadata = newest.effectiveFrom, newest.metadata
-	}
-	if len(n.older) == 0 {
-		n.older = nil
-	}
+	versionDelta, evictions = n.Merge(observations)
 	if evictions > 0 {
 		n.setFlag(nativeMetadataTruncated)
 	}
-	return len(n.older) + 1 - oldCount, evictions
-}
-
-// mergeOverlappingNativeMetricMetadata merges strictly timestamp-ordered inputs,
-// preferring observations at equal timestamps and coalescing adjacent equal values.
-// It leaves both inputs unchanged and appends retained points to versions,
-// returning that slice and the number evicted by the version cap.
-func mergeOverlappingNativeMetricMetadata(existing, observations, versions []nativeMetricMetadataPoint) ([]nativeMetricMetadataPoint, int) {
-	var retained [maxNativeMetricMetadataVersions]nativeMetricMetadataPoint
-	start, count, evictions := 0, 0, 0
-	var lastMetadata *metadata.Metadata
-	haveLastMetadata := false
-
-	appendPoint := func(point nativeMetricMetadataPoint) {
-		if haveLastMetadata && equalNativeMetricMetadata(lastMetadata, point.metadata) {
-			return
-		}
-		haveLastMetadata = true
-		lastMetadata = point.metadata
-
-		if count < len(retained) {
-			retained[(start+count)%len(retained)] = point
-			count++
-			return
-		}
-		retained[start] = point
-		start = (start + 1) % len(retained)
-		evictions++
-	}
-
-	for i, j := 0, 0; i < len(existing) || j < len(observations); {
-		switch {
-		case i == len(existing):
-			appendPoint(observations[j])
-			j++
-		case j == len(observations):
-			appendPoint(existing[i])
-			i++
-		case existing[i].effectiveFrom < observations[j].effectiveFrom:
-			appendPoint(existing[i])
-			i++
-		case existing[i].effectiveFrom > observations[j].effectiveFrom:
-			appendPoint(observations[j])
-			j++
-		default:
-			appendPoint(observations[j])
-			i++
-			j++
-		}
-	}
-
-	for i := range count {
-		versions = append(versions, retained[(start+i)%len(retained)])
-	}
-	return versions, evictions
+	return versionDelta, evictions
 }
 
 // nativeMetricMetadataSnapshot owns its copied points independently of the series.
@@ -281,7 +163,7 @@ type nativeMetricMetadataSnapshot struct {
 func (s *nativeMetricMetadataSnapshot) expand() []NativeMetricMetadataVersion {
 	versions := make([]NativeMetricMetadataVersion, s.count)
 	for i, point := range s.points[:s.count] {
-		versions[i] = NativeMetricMetadataVersion{EffectiveFrom: point.effectiveFrom, Metadata: *point.metadata}
+		versions[i] = NativeMetricMetadataVersion{EffectiveFrom: point.EffectiveFrom, Metadata: *point.Metadata}
 	}
 	return versions
 }
@@ -385,8 +267,8 @@ func (h *Head) nativeMetricMetadataForPostings(ctx context.Context, p index.Post
 			continue
 		}
 		var snapshot nativeMetricMetadataSnapshot
-		snapshot.count = copy(snapshot.points[:], native.older)
-		snapshot.points[snapshot.count] = nativeMetricMetadataPoint{effectiveFrom: native.effectiveFrom, metadata: native.metadata}
+		snapshot.count = copy(snapshot.points[:], native.Older)
+		snapshot.points[snapshot.count] = nativeMetricMetadataPoint{EffectiveFrom: native.EffectiveFrom, Metadata: native.Metadata}
 		snapshot.count++
 		snapshot.truncated = native.flags.Load()&nativeMetadataTruncated != 0
 		lset := series.lset

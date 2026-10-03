@@ -79,7 +79,7 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 				require.NoError(t, head.resetInMemoryState())
 			}
 			require.NotZero(t, native.flags.Load()&nativeMetadataRetired)
-			require.Equal(t, a, *native.metadata, "retirement must not change captured immutable history")
+			require.Equal(t, a, *native.Metadata, "retirement must not change captured immutable history")
 			if deleted != nil {
 				require.Len(t, deleted, 1)
 				require.True(t, store.has(chunks.HeadSeriesRef(ref)), "exercise the cleanup window")
@@ -434,16 +434,16 @@ func TestHeadLookupNativeMetricMetadata(t *testing.T) {
 			t.Fatal("deletion waited for metadata publication")
 		}
 		runtime.GC()
-		require.Equal(t, &b, native.metadata)
-		require.Equal(t, int64(200), native.effectiveFrom)
-		require.Len(t, native.older, 1)
-		require.Equal(t, a, *native.older[0].metadata)
-		require.Equal(t, int64(100), native.older[0].effectiveFrom)
+		require.Equal(t, &b, native.Metadata)
+		require.Equal(t, int64(200), native.EffectiveFrom)
+		require.Len(t, native.Older, 1)
+		require.Equal(t, a, *native.Older[0].Metadata)
+		require.Equal(t, int64(100), native.Older[0].EffectiveFrom)
 		require.Zero(t, store.series.Load())
 		require.Zero(t, store.versions.Load())
 		store.publication.Release(nativeMetricMetadataPublicationPermits)
 		released = true
-		lookups := []storage.NativeMetricMetadataLookup{{Ref: ref, Timestamp: 200, Metadata: native.metadata}}
+		lookups := []storage.NativeMetricMetadataLookup{{Ref: ref, Timestamp: 200, Metadata: native.Metadata}}
 		require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
 		require.Nil(t, lookups[0].Metadata, "a lookup starting after removal must miss")
 	})

@@ -84,13 +84,13 @@ func (h *Head) selectNativeMetricMetadataBatch(ctx context.Context, lookups []st
 		if native.flags.Load()&nativeMetadataRetired != 0 {
 			continue
 		}
-		if native.effectiveFrom <= lookup.Timestamp {
-			lookup.Metadata = native.metadata
+		if native.EffectiveFrom <= lookup.Timestamp {
+			lookup.Metadata = native.Metadata
 			continue
 		}
-		for _, point := range slices.Backward(native.older) {
-			if point.effectiveFrom <= lookup.Timestamp {
-				lookup.Metadata = point.metadata
+		for _, point := range slices.Backward(native.Older) {
+			if point.EffectiveFrom <= lookup.Timestamp {
+				lookup.Metadata = point.Metadata
 				break
 			}
 		}

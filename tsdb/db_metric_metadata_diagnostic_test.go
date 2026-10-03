@@ -45,6 +45,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/nativemetadata"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/tsdb/wlog"
 	"github.com/prometheus/prometheus/util/compression"
@@ -262,18 +263,18 @@ func (f *metadataDiagnosticFixture) validateState(tb testing.TB) metadataDiagnos
 		}
 		m := f.values[i%c.Values]
 		if c.Mode == "native" {
-			if native == nil || *native.metadata != m || native.effectiveFrom != metadataDiagnosticBase || len(native.older) != 0 || native.flags.Load() != 0 {
+			if native == nil || *native.Metadata != m || native.EffectiveFrom != metadataDiagnosticBase || len(native.Older) != 0 || native.flags.Load() != 0 {
 				tb.Fatalf("invalid native state for %d", ref)
 			}
-			id := owned[native.metadata]
+			id := owned[native.Metadata]
 			if id == 0 {
 				id = uint64(len(owned) + 1)
-				owned[native.metadata] = id
+				owned[native.Metadata] = id
 			}
 			var encoded [8]byte
 			binary.LittleEndian.PutUint64(encoded[:], id)
 			_, _ = ownership.Write(encoded[:])
-			for field, pair := range [][2]string{{string(native.metadata.Type), string(m.Type)}, {native.metadata.Unit, m.Unit}, {native.metadata.Help, m.Help}} {
+			for field, pair := range [][2]string{{string(native.Metadata.Type), string(m.Type)}, {native.Metadata.Unit, m.Unit}, {native.Metadata.Help, m.Help}} {
 				if unsafe.StringData(pair[0]) == unsafe.StringData(pair[1]) {
 					r.BackingEqual[field]++
 				}
@@ -643,7 +644,7 @@ func TestDBMetricMetadataDiagnostic(t *testing.T) {
 		}
 		check("nil", 100, nil, false)
 		check("missing committed state", 100, &m, true)
-		s.ensureMetadataLocked().native = &nativeSeriesMetadata{metadata: cloneNativeMetricMetadata(m), effectiveFrom: 100}
+		s.ensureMetadataLocked().native = &nativeSeriesMetadata{History: nativemetadata.History{Metadata: cloneNativeMetricMetadata(m), EffectiveFrom: 100}}
 		check("old timestamp", 99, &m, true)
 		check("unchanged", 101, &m, false)
 		changed := m
