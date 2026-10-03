@@ -185,16 +185,19 @@ metric types. Native forwarding is supported only in server mode, and
 `metadata_config.send` does not control Remote Write 2.0 metadata.
 
 On restart, the Head seeds each series with the newest version from the WAL and
-its checkpoint; older versions are not restored for queries. With memory
-snapshots on shutdown, only WAL records after the loaded snapshot are seeded.
-Metadata is not stored in snapshots or blocks, and is lost when the
-corresponding Head series is removed. Remote Write 1.0 does not populate this
-store. At most 5 versions are retained per series.
+its checkpoint; older versions are not restored for queries. The sender instead
+rebuilds every retained version from the WAL, so after a restart the forwarded
+history and the Head's differ even with one writer per series. Metadata is not
+stored in snapshots or blocks, and is lost when the corresponding Head series is
+removed. Remote Write 1.0 does not populate this store. At most 5 versions are
+retained per series.
 
-This prototype keeps forwarded metadata equal to the Head's only while each
-series has one writer at a time. Concurrent commits to one series can make them
-diverge, as can restarting after a series was removed and recreated under a new
-reference.
+This prototype supports only starts without a memory snapshot
+(`memory-snapshot-on-shutdown`): a loaded snapshot skips the WAL checkpoint, so
+seeding would miss metadata. Until the first restart, forwarded metadata matches
+the Head's only while each series has one writer at a time; concurrent commits
+to one series can make them diverge. Restarting after a series was removed and
+recreated under a new reference can also seed the wrong history.
 
 The store costs Head memory per series, along two axes. For example, retained-heap
 benchmarks on Go 1.27, darwin/arm64, measured roughly 100 extra bytes per series
