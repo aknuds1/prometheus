@@ -21,17 +21,41 @@ import (
 )
 
 func TestDecbufUvarintBytes(t *testing.T) {
-	for _, length := range []uint64{4, math.MaxInt64 + 1, math.MaxUint64} {
-		e := Encbuf{}
-		e.PutUvarint64(length)
-		e.PutString("abc")
-		d := Decbuf{B: e.Get()}
-		require.Empty(t, d.UvarintBytes())
-		require.ErrorIs(t, d.Err(), ErrInvalidSize)
+	const payload = "abc"
+	for _, tc := range []struct {
+		name   string
+		length uint64
+	}{
+		{name: "one byte beyond the buffer", length: uint64(len(payload)) + 1},
+		// int(length) is negative on 32-bit platforms.
+		{name: "above MaxInt32", length: math.MaxInt32 + 1},
+		// int(length) wraps to a length within the buffer on 32-bit platforms.
+		{name: "wraps to a valid length on 32-bit", length: math.MaxUint32 + 1 + uint64(len(payload)) - 1},
+		// int(length) is negative on 64-bit platforms.
+		{name: "above MaxInt64", length: math.MaxInt64 + 1},
+		{name: "MaxUint64", length: math.MaxUint64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := Encbuf{}
+			e.PutUvarint64(tc.length)
+			e.PutString(payload)
+			d := Decbuf{B: e.Get()}
+			require.Empty(t, d.UvarintBytes())
+			require.ErrorIs(t, d.Err(), ErrInvalidSize)
+
+			d = Decbuf{B: e.Get()}
+			require.Empty(t, d.UvarintStr())
+			require.ErrorIs(t, d.Err(), ErrInvalidSize)
+		})
 	}
-	e := Encbuf{}
-	e.PutUvarintStr("abc")
-	d := Decbuf{B: e.Get()}
-	require.Equal(t, "abc", d.UvarintStr())
-	require.NoError(t, d.Err())
+
+	t.Run("exact length", func(t *testing.T) {
+		e := Encbuf{}
+		e.PutUvarintStr(payload)
+		e.PutByte(1)
+		d := Decbuf{B: e.Get()}
+		require.Equal(t, payload, d.UvarintStr())
+		require.NoError(t, d.Err())
+		require.Equal(t, 1, d.Len())
+	})
 }
