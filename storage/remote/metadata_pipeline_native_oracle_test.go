@@ -233,6 +233,28 @@ func TestRemoteWriteMetadataPipelineNativeOracles(t *testing.T) {
 		require.Equal(t, 2+2, groups)
 	})
 
+	t.Run("unknown-entry counters", func(t *testing.T) {
+		// This build registers both counters; restarts report them while the
+		// sender still runs.
+		c := metadataPipelineConfig{Case: "restart", Source: "native", Series: 300, Values: 100, Sweeps: 200, RestartStep: 180, WALSegmentSize: 32 << 10, Writers: 4, Shards: 4, Batch: 20, Capacity: 100, CommitSize: 50, ReceiverProcs: 2, Base: time.Now().Add(time.Hour).UnixMilli()}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		f, err := newMetadataPipeline(ctx, c)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, f.close()) }()
+		dir := t.TempDir()
+		require.NoError(t, f.open(dir))
+		require.NoError(t, f.append(ctx, 0, 0))
+		_, err = f.drain(ctx, f.expectedItems(1))
+		require.NoError(t, err)
+		restart, err := f.restart(ctx, dir, false)
+		require.NoError(t, err)
+		require.Equal(t, map[string]float64{
+			"prometheus_remote_storage_native_metadata_unknown_entries_total":  0,
+			"prometheus_tsdb_native_metric_metadata_unknown_wal_entries_total": 0,
+		}, restart.UnknownEntryCounters)
+	})
+
 	t.Run("sender heap attribution", func(t *testing.T) {
 		defer func(rate int) { runtime.MemProfileRate = rate }(runtime.MemProfileRate)
 		runtime.MemProfileRate = 1
