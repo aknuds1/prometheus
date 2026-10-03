@@ -225,6 +225,9 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		require.NoError(b, f.append(ctx, 0, 0))
 		beforeReceiver, err = f.drain(ctx, f.expectedItems(1))
 		require.NoError(b, err)
+		seedMetrics, err := f.metrics()
+		require.NoError(b, err)
+		r.SeedWALBytes = seedMetrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
 		if c.RestartStep > 0 {
 			restart, err := f.restart(ctx, dir, r.Diagnostic)
 			require.NoError(b, err)
@@ -235,7 +238,6 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		beforeMetrics, err := f.metrics()
 		require.NoError(b, err)
 		beforeWAL = beforeMetrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
-		r.SeedWALBytes = beforeWAL
 		for i := range f.latency {
 			f.latency[i] = f.latency[i][:0]
 			f.peak[i] = 0
@@ -307,6 +309,11 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		require.NoError(b, err, "heap passes need -test.memprofilerate=1")
 		r.SenderHeap = &heap
 	}
+	// Queue metrics, including unknown-entry counters, unregister at shutdown.
+	live, err := f.metrics()
+	require.NoError(b, err)
+	require.NoError(b, checkMetadataPipelineMetrics(live))
+	r.UnknownEntryCounters = metadataPipelineUnknownCounters(live)
 	require.NoError(b, d.begin(ctx, f, "shutdown"))
 	stopStart := time.Now()
 	require.NoError(b, f.closeSender())
@@ -327,7 +334,6 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	metrics, err := f.metrics()
 	require.NoError(b, err)
 	require.NoError(b, checkMetadataPipelineMetrics(metrics))
-	r.UnknownEntryCounters = metadataPipelineUnknownCounters(metrics)
 	r.LifecycleWALBytes = metrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
 	r.WALBytes = r.LifecycleWALBytes - beforeWAL
 	require.NoError(b, d.begin(ctx, f, "db-close"))

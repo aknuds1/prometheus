@@ -138,7 +138,8 @@ func BenchmarkHeadMetricMetadataBackfillWAL(b *testing.B) {
 			w := metadataBackfill{series: 1000, rounds: 4, batched: batched}
 			b.Run(fmt.Sprintf("batched=%t/mode=%s", batched, mode), func(b *testing.B) {
 				var metadataBytes, walBytes, samples float64
-				for b.Loop() {
+				b.ResetTimer()
+				for range b.N {
 					b.StopTimer()
 					reg := prometheus.NewRegistry()
 					db := w.open(b, mode, reg)

@@ -1033,6 +1033,15 @@ func (f *metadataPipeline) restart(ctx context.Context, dir string, heap bool) (
 	if r.CheckpointPayloadBytes, err = metadataPipelinePayloadBytes(checkpoint, 0); err != nil {
 		return r, err
 	}
+	// Queue metrics, including unknown-entry counters, unregister at shutdown.
+	live, err := f.metrics()
+	if err != nil {
+		return r, err
+	}
+	if err := checkMetadataPipelineMetrics(live); err != nil {
+		return r, err
+	}
+	r.UnknownEntryCounters = metadataPipelineUnknownCounters(live)
 	if err := f.closeSender(); err != nil {
 		return r, err
 	}
@@ -1053,7 +1062,6 @@ func (f *metadataPipeline) restart(ctx context.Context, dir string, heap bool) (
 	}
 	r.WALTruncationSeconds = metrics["prometheus_tsdb_wal_truncate_duration_seconds"]
 	r.PreRestartWALBytes = metrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
-	r.UnknownEntryCounters = metadataPipelineUnknownCounters(metrics)
 	err = f.db.Close()
 	f.db = nil
 	if err != nil {
