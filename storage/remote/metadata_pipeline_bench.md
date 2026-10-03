@@ -310,6 +310,41 @@ the retained heap after replay, before the sender opens. Every run also reports
 decompressed WAL record bytes by type after the database closes, including the
 pre-restart segments that remain after truncation.
 
+## Per-run oracles and accounting
+
+Every run checks the metadata it leaves in the WAL against a model of the
+trace. The model covers every transaction's entries, their records and their
+exact decompressed payload, using the series refs that the WAL's series
+records actually assign, so concurrent series creation needs no assumed order.
+Builds describe their own semantics: by default, WAL-only sources log a legacy
+entry for each sample whose metadata differs from the series' committed
+metadata, and other sources log none. A restart run checks only the segments
+written after the restart. It checks the checkpoint separately: every series is
+kept, and its metadata holds the whole history the build retains. Unknown-kind
+entry counters must be zero.
+
+Results report the seed's compressed WAL bytes (`SeedWALBytes`) separately from
+the measured phase's (`WALBytes`), and the decompressed record bytes of the
+retained segments (`WALPayloadBytes`), which include the seed but never the
+checkpoint. Restart runs also report the decompressed bytes of the segments
+written after the restart, and of the checkpoint.
+
+Heap passes need `-test.memprofilerate=1`. After the drain and two collections,
+with the queues alive, they attribute in-use heap by allocation stack: to the
+sender (remote-write code, its WAL watcher and readers, and HTTP clients),
+to the fixture, or to everything else. Shared libraries, such as record
+decoding, belong to their caller, so metadata strings the watcher decodes count
+as the sender's. The process-wide interner is one allocation site, counted once
+however many endpoints share it. Allocation stacks approximate ownership; they
+do not establish which object retains an allocation. Results keep the whole
+process's heap as a cross-check. `Endpoints: 2` adds a second queue and receiver
+for heap passes.
+
+`BenchmarkHeadMetricMetadataBackfillWAL` reports the decompressed metadata and
+compressed WAL bytes per sample of an out-of-order backfill, after an untimed
+seed, for each metadata mode. It is encoding evidence only, not end-to-end
+backfill CPU or latency.
+
 ## Linux findings (2026-09-20)
 
 Measured on Debian 13.7, an eight-vCPU Xeon Platinum 8358 guest with 16 GB RAM,
