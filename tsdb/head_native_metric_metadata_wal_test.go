@@ -233,6 +233,9 @@ func TestNativeMetricMetadataWAL(t *testing.T) {
 				require.Equal(t, native.Versions, nativeMetadataVersions(state), "iteration %d, series %s", iteration, lset)
 				require.Equal(t, native.Truncated, state.Truncated, "iteration %d, series %s", iteration, lset)
 			}
+			// Every open DB maps its chunk segments; 40 of them exhaust a
+			// 32-bit address space.
+			require.NoError(t, db.Close())
 		}
 	})
 }
