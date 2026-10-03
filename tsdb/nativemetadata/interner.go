@@ -33,7 +33,10 @@ func (i *Interner) Intern(m metadata.Metadata) *metadata.Metadata {
 	if v, ok := i.values[m]; ok {
 		return v
 	}
-	v := &m
+	// Copy m here: taking m's address would move it to the heap on entry,
+	// allocating on every hit.
+	owned := m
+	v := &owned
 	if len(i.values) < i.limit {
 		i.values[m] = v
 	}

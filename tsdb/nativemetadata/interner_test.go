@@ -17,6 +17,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/prometheus/prometheus/model/metadata"
 )
 
 func TestInterner(t *testing.T) {
@@ -31,4 +33,11 @@ func TestInterner(t *testing.T) {
 	require.Equal(t, *value("c"), *c)
 	require.NotSame(t, c, i.Intern(*value("c")))
 	require.Same(t, a, i.Intern(*value("a")))
+
+	// Reducers call through a function value; hits must not allocate.
+	intern := i.Intern
+	m := *value("a")
+	var got *metadata.Metadata
+	require.Zero(t, testing.AllocsPerRun(100, func() { got = intern(m) }))
+	require.Same(t, a, got)
 }
