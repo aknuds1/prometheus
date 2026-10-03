@@ -66,10 +66,13 @@ func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
 	// must follow the metadata history: 30 leaves WAL records a margin of 11
 	// segments at 10,000 series.
 	restartStep := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_RESTART_STEP", 30)
+	// Additional endpoints are for heap passes; held backlogs and restarts
+	// reject them.
+	endpoints := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_ENDPOINTS", 1)
 	require.Zero(b, series%100, "series count must be a multiple of 100")
 	require.LessOrEqual(b, sweeps, 400, "changing traces must fit the five-version native history")
 	for _, workload := range []string{"cold", "unchanged", "changes", "newseries", "backlog", "cardinality", "distinct", "changes-distinct", "paced-unchanged", "paced-changes", "batched", "restart"} {
-		c := metadataPipelineConfig{Case: workload, Series: series, Values: 100, Sweeps: sweeps, Writers: 4, Shards: 4, CommitSize: 1000, Batch: 2000, Capacity: 10000, ReceiverProcs: receiverProcs}
+		c := metadataPipelineConfig{Case: workload, Series: series, Values: 100, Sweeps: sweeps, Writers: 4, Shards: 4, CommitSize: 1000, Batch: 2000, Capacity: 10000, ReceiverProcs: receiverProcs, Endpoints: endpoints}
 		switch workload {
 		case "backlog":
 			c.Writers, c.Shards, c.Sweeps = 1, 1, 4
