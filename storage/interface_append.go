@@ -65,6 +65,12 @@ type AppendV2Options struct {
 	// are safe for reuse.
 	Metadata metadata.Metadata
 
+	// MetadataOwned reports that the caller will never modify Metadata's
+	// strings and that each is its own exact-size allocation, so storage may
+	// keep them instead of copying. Callers must not set it for strings that
+	// share a larger backing allocation, such as substrings of a buffer.
+	MetadataOwned bool
+
 	// RejectOutOfOrder tells implementation that this append should not be out
 	// of order. An OOO append MUST be rejected with storage.ErrOutOfOrderSample
 	// error.

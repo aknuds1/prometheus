@@ -26,6 +26,7 @@ import (
 	"reflect"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,6 +49,7 @@ import (
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/storage/remote/otlptranslator/prometheusremotewrite"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/util/teststorage"
 )
@@ -260,6 +262,85 @@ func TestOTLPWriteHandler(t *testing.T) {
 			teststorage.RequireEqual(t, expectedSamples, appendable.ResultSamples())
 		})
 	}
+
+	t.Run("native metadata keeps no backing of translated units or descriptions", func(t *testing.T) {
+		// OTLP does not declare its metadata strings owned: a translated unit
+		// can be a short substring of a buffer as long as its padded input,
+		// and generic translator callers can pass substring descriptions.
+		const families, padding = 32, 256 << 10
+		newMetrics := func(unit, description func(int) string) pmetric.Metrics {
+			metrics := pmetric.NewMetrics()
+			scope := metrics.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty()
+			for i := range families {
+				metric := scope.Metrics().AppendEmpty()
+				metric.SetName(fmt.Sprintf("padded_%02d", i))
+				metric.SetUnit(unit(i))
+				metric.SetDescription(description(i))
+				point := metric.SetEmptyGauge().DataPoints().AppendEmpty()
+				point.SetTimestamp(pcommon.NewTimestampFromTime(ts))
+				point.SetDoubleValue(1)
+			}
+			return metrics
+		}
+		heap := func() int64 {
+			runtime.GC()
+			runtime.GC()
+			var stats runtime.MemStats
+			runtime.ReadMemStats(&stats)
+			return int64(stats.HeapAlloc)
+		}
+		requireRetained := func(t *testing.T, db *teststorage.TestStorage, before int64, unit, help string) {
+			t.Helper()
+			result, _, err := db.NativeMetricMetadata(t.Context(), [][]*labels.Matcher{{labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, "padded_.+")}}, 0)
+			require.NoError(t, err)
+			require.Len(t, result, families)
+			for _, s := range result {
+				m := s.Versions[0].Metadata
+				require.Equal(t, unit, m.Unit)
+				require.True(t, strings.HasPrefix(m.Help, help), m.Help)
+			}
+			require.Less(t, heap()-before, int64(families*padding/4), "native metadata must not keep padded backings")
+			runtime.KeepAlive(result)
+		}
+
+		t.Run("wire-decoded units padded with underscores", func(t *testing.T) {
+			db := teststorage.New(t, func(opts *tsdb.Options) { opts.EnableNativeMetadata = true })
+			handler := NewOTLPWriteHandler(promslog.NewNopLogger(), prometheus.NewRegistry(), db, func() config.Config {
+				return config.Config{OTLPConfig: config.OTLPConfig{TranslationStrategy: otlptranslator.UnderscoreEscapingWithSuffixes}}
+			}, OTLPOptions{})
+			before := heap()
+			func() {
+				payload, err := pmetricotlp.NewExportRequestFromMetrics(newMetrics(
+					func(int) string { return "By" + strings.Repeat("_", padding) },
+					func(i int) string { return fmt.Sprintf("description %02d", i) },
+				)).MarshalProto()
+				require.NoError(t, err)
+				req, err := http.NewRequest(http.MethodPost, "", bytes.NewReader(payload))
+				require.NoError(t, err)
+				req.Header.Set("Content-Type", "application/x-protobuf")
+				recorder := httptest.NewRecorder()
+				handler.ServeHTTP(recorder, req)
+				require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			}()
+			requireRetained(t, db, before, "By", "description ")
+		})
+
+		t.Run("translator descriptions that are substrings", func(t *testing.T) {
+			db := teststorage.New(t, func(opts *tsdb.Options) { opts.EnableNativeMetadata = true })
+			before := heap()
+			func() {
+				metrics := newMetrics(
+					func(int) string { return "By" },
+					func(i int) string { return (fmt.Sprintf("description %02d ", i) + strings.Repeat("x", padding))[:15] },
+				)
+				app := db.AppenderV2(t.Context())
+				_, err := prometheusremotewrite.NewPrometheusConverter(app).FromMetrics(t.Context(), metrics, prometheusremotewrite.Settings{})
+				require.NoError(t, err)
+				require.NoError(t, app.Commit())
+			}()
+			requireRetained(t, db, before, "bytes", "description ")
+		})
+	})
 
 	t.Run("native metadata store", func(t *testing.T) {
 		db := teststorage.New(t, func(opts *tsdb.Options) {

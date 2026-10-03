@@ -30,9 +30,12 @@ const (
 
 // nativeMetricMetadataValue retains raw metadata for comparisons without
 // cloning. Once resolved, owned identifies an immutable copy of the same value.
+// callerOwned reports whether the observation that supplied metadata's strings
+// allows storage to keep them.
 type nativeMetricMetadataValue struct {
-	metadata metadata.Metadata
-	owned    *metadata.Metadata
+	metadata    metadata.Metadata
+	owned       *metadata.Metadata
+	callerOwned bool
 }
 
 // nativeMetricMetadataValueRef selects a one-based raw value, or a zero-based
@@ -111,33 +114,34 @@ func (a *nativeMetricMetadataAppender) metadataPointer(series *memSeries, ref na
 	}
 	value := &a.values[ref-1]
 	if value.owned == nil {
-		value.owned = a.resolveMetadata(series, value.metadata)
+		value.owned = a.resolveMetadata(series, value.metadata, value.callerOwned)
 	}
 	return value.owned
 }
 
 // metadataReference returns a transaction-local reference to m. It deduplicates
 // a bounded set of raw values, deferring their cloning until needed. Values
-// outside that set use direct owned pointers.
-func (a *nativeMetricMetadataAppender) metadataReference(series *memSeries, m metadata.Metadata) nativeMetricMetadataValueRef {
+// outside that set use direct owned pointers. A deduplicated value keeps the
+// strings, and the ownership, of its first observation.
+func (a *nativeMetricMetadataAppender) metadataReference(series *memSeries, m metadata.Metadata, callerOwned bool) nativeMetricMetadataValueRef {
 	if valueRef, ok := a.valueRefs[m]; ok {
 		return valueRef
 	}
 	if len(a.values) < maxNativeMetricMetadataValues {
-		a.values = append(a.values, nativeMetricMetadataValue{metadata: m})
+		a.values = append(a.values, nativeMetricMetadataValue{metadata: m, callerOwned: callerOwned})
 		valueRef := nativeMetricMetadataValueRef(len(a.values))
 		a.valueRefs[m] = valueRef
 		return valueRef
 	}
 
 	valueRef := nativeMetricMetadataDirectRefMask | nativeMetricMetadataValueRef(len(a.directValues))
-	a.directValues = append(a.directValues, a.resolveMetadata(series, m))
+	a.directValues = append(a.directValues, a.resolveMetadata(series, m, callerOwned))
 	return valueRef
 }
 
 // resolveMetadata reuses immutable values still owned by the series before
 // consulting the shared cache. The caller must not hold the series lock.
-func (a *nativeMetricMetadataAppender) resolveMetadata(series *memSeries, m metadata.Metadata) *metadata.Metadata {
+func (a *nativeMetricMetadataAppender) resolveMetadata(series *memSeries, m metadata.Metadata, callerOwned bool) *metadata.Metadata {
 	var retained [maxNativeMetricMetadataVersions]*metadata.Metadata
 	var count int
 	series.Lock()
@@ -167,7 +171,7 @@ func (a *nativeMetricMetadataAppender) resolveMetadata(series *memSeries, m meta
 			return value
 		}
 	}
-	return a.valueCache.resolve(m)
+	return a.valueCache.resolve(m, callerOwned)
 }
 
 // mayHaveObservedSeries reports whether ref may have a buffered observation
@@ -189,12 +193,13 @@ func (a *nativeMetricMetadataAppender) mayHaveObservedSeries(ref chunks.HeadSeri
 
 // observe buffers m for the series at effectiveFrom without updating committed
 // metadata. Every call adds an observation, even when m is unchanged.
-func (a *nativeMetricMetadataAppender) observe(s *memSeries, effectiveFrom int64, m metadata.Metadata) {
+// callerOwned reports whether storage may keep m's strings.
+func (a *nativeMetricMetadataAppender) observe(s *memSeries, effectiveFrom int64, m metadata.Metadata, callerOwned bool) {
 	var metadataRef nativeMetricMetadataValueRef
 	if a.haveLast && a.lastMetadata == m {
 		metadataRef = a.observations[a.lastObservation-1].metadataRef
 	} else {
-		metadataRef = a.metadataReference(s, m)
+		metadataRef = a.metadataReference(s, m, callerOwned)
 	}
 
 	// Group observations by stripe for commit.

@@ -512,10 +512,16 @@ func (a *headAppenderBase) rememberNativeMetadataEquality(owned *metadata.Metada
 }
 
 func (a *headAppenderBase) recordNativeMetricMetadata(s *memSeries, timestamp int64, m metadata.Metadata) {
+	a.recordOwnedNativeMetricMetadata(s, timestamp, m, false)
+}
+
+// recordOwnedNativeMetricMetadata buffers m; callerOwned reports whether
+// storage may keep m's strings, as for storage.AppendV2Options.MetadataOwned.
+func (a *headAppenderBase) recordOwnedNativeMetricMetadata(s *memSeries, timestamp int64, m metadata.Metadata, callerOwned bool) {
 	if a.nativeMetricMetadata == nil {
 		a.nativeMetricMetadata = a.head.nativeMetricMetadata.getAppender()
 	}
-	a.nativeMetricMetadata.observe(s, timestamp, m)
+	a.nativeMetricMetadata.observe(s, timestamp, m, callerOwned)
 }
 
 func (a *headAppenderBase) clearNativeMetricMetadata() {

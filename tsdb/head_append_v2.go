@@ -215,7 +215,7 @@ func (a *headAppenderV2) Append(ref storage.SeriesRef, ls labels.Labels, st, t i
 	}
 	s = appended
 	if observeMetadata {
-		a.recordNativeMetricMetadata(s, t, *nativeMetadata)
+		a.recordOwnedNativeMetricMetadata(s, t, *nativeMetadata, opts.MetadataOwned)
 	}
 
 	if isStale {

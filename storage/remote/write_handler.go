@@ -370,7 +370,9 @@ func (h *writeHandler) appendV2(app *remoteWriteAppenderV2, req *writev2.Request
 		var ref storage.SeriesRef
 		opts := storage.AOptions{}
 		if h.appendMetadata {
-			opts.Metadata = m
+			// Decoding copies every symbol into its own string, and metadata
+			// passes through untranslated.
+			opts.Metadata, opts.MetadataOwned = m, true
 		}
 		for _, s := range ts.Samples {
 			var st int64

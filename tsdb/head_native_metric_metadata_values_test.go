@@ -33,11 +33,11 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 		cache := newNativeMetricMetadataValueCache()
 		backing := "gaugesecondsdescription" + strings.Repeat("padding", 100_000)
 		input := metadata.Metadata{Type: model.MetricType(backing[:5]), Unit: backing[5:12], Help: backing[12:23]}
-		first := cache.resolve(input)
+		first := cache.resolve(input, false)
 		require.Zero(t, cache.bytes.Load(), "first observation must not admit a value")
-		second := cache.resolve(input)
+		second := cache.resolve(input, false)
 		require.NotSame(t, first, second)
-		require.Same(t, second, cache.resolve(input))
+		require.Same(t, second, cache.resolve(input, false))
 		require.Equal(t, int64(23), cache.bytes.Load())
 		for _, owned := range []*metadata.Metadata{first, second} {
 			require.Equal(t, input, *owned)
@@ -55,6 +55,81 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 		}
 	})
 
+	t.Run("an unowned value allocates only its copy", func(t *testing.T) {
+		// Measured through resolve, whose results escape as in ingestion.
+		m := metadata.Metadata{Type: model.MetricTypeCounter, Unit: "seconds", Help: "description"}
+		var sink *metadata.Metadata
+		clone := testing.AllocsPerRun(100, func() { sink = cloneNativeMetricMetadata(m) })
+		runtime.KeepAlive(sink)
+
+		cache := newNativeMetricMetadataValueCache()
+		oversized := metadata.Metadata{Help: strings.Repeat("x", nativeMetadataSharedStringBytes+1)}
+		require.Equal(t, testing.AllocsPerRun(100, func() { cloneNativeMetricMetadata(oversized) }),
+			testing.AllocsPerRun(100, func() { cache.resolve(oversized, false) }))
+		require.Equal(t, 1.0, testing.AllocsPerRun(100, func() { cache.resolve(oversized, true) }))
+
+		// First sightings in shards that already exist cost their value and
+		// the same overhead whoever owns the strings.
+		for i := 0; ; i++ {
+			cache.resolve(metadata.Metadata{Help: fmt.Sprintf("warm-%d", i)}, false)
+			warm := true
+			for j := range cache.shards {
+				warm = warm && cache.shards[j].Load() != nil
+			}
+			if warm {
+				break
+			}
+		}
+		const runs = 100
+		sighting := func(owned bool, prefix string) float64 {
+			values := make([]metadata.Metadata, runs+1)
+			for i := range values {
+				values[i] = metadata.Metadata{Type: model.MetricTypeCounter, Unit: "seconds", Help: fmt.Sprintf("%s-%d", prefix, i)}
+			}
+			next := 0
+			return testing.AllocsPerRun(runs, func() {
+				cache.resolve(values[next], owned)
+				next++
+			})
+		}
+		require.Equal(t, clone-1, sighting(false, "unowned")-sighting(true, "owned"))
+	})
+
+	t.Run("caller-owned strings are kept and unowned strings never are", func(t *testing.T) {
+		for _, ownedFirst := range []bool{true, false} {
+			cache := newNativeMetricMetadataValueCache()
+			backing := "gaugesecondsdescription" + strings.Repeat("padding", 100_000)
+			unowned := metadata.Metadata{Type: model.MetricType(backing[:5]), Unit: backing[5:12], Help: backing[12:23]}
+			owned := metadata.Metadata{Type: model.MetricTypeGauge, Unit: strings.Clone("seconds"), Help: strings.Clone("description")}
+			require.Equal(t, owned, unowned)
+			var first, admitted *metadata.Metadata
+			if ownedFirst {
+				first = cache.resolve(owned, true)
+				require.Same(t, unsafe.StringData(owned.Help), unsafe.StringData(first.Help), "owned strings must not be copied")
+				admitted = cache.resolve(unowned, false)
+				require.NotSame(t, unsafe.StringData(owned.Help), unsafe.StringData(admitted.Help), "admission copies the unowned observation")
+			} else {
+				first = cache.resolve(unowned, false)
+				admitted = cache.resolve(owned, true)
+				require.Same(t, unsafe.StringData(owned.Help), unsafe.StringData(admitted.Help), "admission keeps the owned observation's strings")
+			}
+			require.NotSame(t, first, admitted)
+			require.Same(t, admitted, cache.resolve(unowned, false), "admission shares the value")
+			require.Same(t, admitted, cache.resolve(owned, true))
+			require.Equal(t, int64(23), cache.bytes.Load())
+			for _, m := range []*metadata.Metadata{first, admitted} {
+				require.Equal(t, owned, *m)
+				for _, field := range [][2]string{{string(m.Type), string(unowned.Type)}, {m.Unit, unowned.Unit}, {m.Help, unowned.Help}} {
+					require.NotSame(t, unsafe.StringData(field[0]), unsafe.StringData(field[1]), "unowned strings must never be kept")
+				}
+			}
+		}
+		cache := newNativeMetricMetadataValueCache()
+		oversized := metadata.Metadata{Help: strings.Repeat("x", nativeMetadataSharedStringBytes+1)}
+		require.Same(t, unsafe.StringData(oversized.Help), unsafe.StringData(cache.resolve(oversized, true).Help))
+		require.NotSame(t, unsafe.StringData(oversized.Help), unsafe.StringData(cache.resolve(oversized, false).Help))
+	})
+
 	t.Run("FIFO limits entries and never mutates evicted values", func(t *testing.T) {
 		cache := newNativeMetricMetadataValueCache()
 		var values []metadata.Metadata
@@ -66,8 +141,8 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 		}
 		var retained *metadata.Metadata
 		for i, m := range values {
-			cache.resolve(m)
-			value := cache.resolve(m)
+			cache.resolve(m, false)
+			value := cache.resolve(m, false)
 			if i == 0 {
 				retained = value
 			}
@@ -89,8 +164,8 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 	t.Run("fingerprint false positives cannot substitute values", func(t *testing.T) {
 		cache := newNativeMetricMetadataValueCache()
 		first := metadata.Metadata{Help: "first"}
-		cache.resolve(first)
-		cached := cache.resolve(first)
+		cache.resolve(first, false)
+		cached := cache.resolve(first, false)
 		index := maphash.Comparable(cache.seed, first) % nativeMetadataValueShards
 		var other metadata.Metadata
 		for i := 0; ; i++ {
@@ -103,20 +178,20 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 		// Model a recent unrelated miss having the other value's fingerprint.
 		shard.recent[0] = maphash.Comparable(cache.seed, other)
 		shard.recentCount = 1
-		resolved := cache.resolve(other)
+		resolved := cache.resolve(other, false)
 		require.Equal(t, other, *resolved)
 		require.NotSame(t, cached, resolved)
-		require.Same(t, cached, cache.resolve(first))
-		require.Same(t, resolved, cache.resolve(other))
+		require.Same(t, cached, cache.resolve(first, false))
+		require.Same(t, resolved, cache.resolve(other, false))
 	})
 
 	t.Run("large values share but oversized values bypass", func(t *testing.T) {
 		cache := newNativeMetricMetadataValueCache()
 		for i := range 4 {
 			m := metadata.Metadata{Help: strings.Repeat(string(rune('a'+i)), 256<<10)}
-			cache.resolve(m)
-			owned := cache.resolve(m)
-			require.Same(t, owned, cache.resolve(m))
+			cache.resolve(m, false)
+			owned := cache.resolve(m, false)
+			require.Same(t, owned, cache.resolve(m, false))
 		}
 		require.Equal(t, int64(1<<20), cache.bytes.Load())
 		for _, m := range []metadata.Metadata{
@@ -124,9 +199,9 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 			{Type: model.MetricType(strings.Repeat("x", nativeMetadataSharedStringBytes+1))},
 			{Type: "x", Unit: strings.Repeat("x", nativeMetadataSharedStringBytes)},
 		} {
-			owned := cache.resolve(m)
+			owned := cache.resolve(m, false)
 			require.Equal(t, m, *owned)
-			require.NotSame(t, owned, cache.resolve(m))
+			require.NotSame(t, owned, cache.resolve(m, false))
 			require.Equal(t, int64(1<<20), cache.bytes.Load())
 		}
 	})
@@ -139,8 +214,8 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 			workers.Go(func() {
 				for i := range 64 {
 					m := metadata.Metadata{Help: fmt.Sprintf("%d/%d/", worker, i) + strings.Repeat("x", 64<<10)}
-					cache.resolve(m)
-					owned := cache.resolve(m)
+					cache.resolve(m, false)
+					owned := cache.resolve(m, false)
 					if *owned != m {
 						t.Error("cache changed the value")
 						return
@@ -171,8 +246,8 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 	t.Run("reset drops cache ownership and pooled appenders use the new cache", func(t *testing.T) {
 		store := newNativeMetricMetadataStore()
 		m := metadata.Metadata{Help: "retained result"}
-		store.values.resolve(m)
-		retained := store.values.resolve(m)
+		store.values.resolve(m, false)
+		retained := store.values.resolve(m, false)
 		old := store.values
 		appender := store.getAppender()
 		store.putAppender(appender)

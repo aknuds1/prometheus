@@ -317,6 +317,8 @@ loop:
 					// Metric family name has the same source as metadata.
 					appOpts.MetricFamilyName = yoloString(lastMFName)
 					appOpts.Metadata = lastMeta.Metadata
+					// The cache's strings are immutable, exact-size copies.
+					appOpts.MetadataOwned = true
 				}
 			}
 

@@ -194,11 +194,13 @@ func appendMetricMetadataBenchmarkRound(b *testing.B, h *Head, fixture *metricMe
 }
 
 // freshOptions copies a variant's options into newly allocated strings, as a
-// producer that decodes every request would supply them.
+// producer that decodes every request would supply them. The copies are
+// exact-size, so they are declared owned.
 func (f *metricMetadataBenchmarkFixture) freshOptions(variant int) []storage.AOptions {
 	options := make([]storage.AOptions, len(f.options[variant]))
 	for i, o := range f.options[variant] {
 		o.Metadata = metadata.Metadata{Type: model.MetricType(strings.Clone(string(o.Metadata.Type))), Unit: strings.Clone(o.Metadata.Unit), Help: strings.Clone(o.Metadata.Help)}
+		o.MetadataOwned = true
 		options[i] = o
 	}
 	return options
@@ -862,7 +864,9 @@ func BenchmarkHeadMetricMetadataDistinctChurn(b *testing.B) {
 							value := (round*numSeries + i) / seen
 							lsets[i] = labels.FromStrings(labels.MetricName, "distinct_churn_total", "series", strconv.Itoa(round*numSeries+i))
 							help := fmt.Sprintf("Distinct churn value %d ", value)
-							options[i] = storage.AOptions{Metadata: metadata.Metadata{Type: model.MetricTypeCounter, Unit: "requests", Help: help + strings.Repeat("x", helpBytes-len(help))}}
+							// Concatenation allocates exactly; decoded remote-write
+							// symbols are owned the same way.
+							options[i] = storage.AOptions{Metadata: metadata.Metadata{Type: model.MetricTypeCounter, Unit: "requests", Help: help + strings.Repeat("x", helpBytes-len(help))}, MetadataOwned: true}
 						}
 						clear(refs)
 						timestamp := 100 + int64(round)*roundSpacing

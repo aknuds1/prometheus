@@ -47,16 +47,18 @@ func newNativeMetricMetadataValueCache() *nativeMetricMetadataValueCache {
 
 // resolve returns an immutable owned value. Callers must not hold series locks.
 // Sharing is opportunistic; exact value equality never depends on admission.
-func (c *nativeMetricMetadataValueCache) resolve(m metadata.Metadata) *metadata.Metadata {
+// callerOwned allows keeping m's strings, as for
+// storage.AppendV2Options.MetadataOwned; otherwise new values own copies.
+func (c *nativeMetricMetadataValueCache) resolve(m metadata.Metadata, callerOwned bool) *metadata.Metadata {
 	// Check without overflowing int, including on 32-bit builds. Oversized
 	// values are fully retained by their users, but never by the sharing cache.
 	size := len(m.Type)
 	if size > nativeMetadataSharedStringBytes || len(m.Unit) > nativeMetadataSharedStringBytes-size {
-		return cloneNativeMetricMetadata(m)
+		return ownNativeMetricMetadata(m, callerOwned)
 	}
 	size += len(m.Unit)
 	if len(m.Help) > nativeMetadataSharedStringBytes-size {
-		return cloneNativeMetricMetadata(m)
+		return ownNativeMetricMetadata(m, callerOwned)
 	}
 	size += len(m.Help)
 	hash := maphash.Comparable(c.seed, m)
@@ -75,7 +77,7 @@ func (c *nativeMetricMetadataValueCache) resolve(m metadata.Metadata) *metadata.
 	}
 	shard.Unlock()
 
-	owned := cloneNativeMetricMetadata(m)
+	owned := ownNativeMetricMetadata(m, callerOwned)
 	shard.Lock()
 	defer shard.Unlock()
 	if existing := shard.values[m]; existing != nil {
@@ -104,7 +106,8 @@ func (c *nativeMetricMetadataValueCache) resolve(m metadata.Metadata) *metadata.
 		shard.values = make(map[metadata.Metadata]*metadata.Metadata)
 	}
 	// The key must own strings too: using m here could pin caller buffers even
-	// though the returned value has been cloned.
+	// though the returned value has been cloned. Owned callers' strings are the
+	// value's own.
 	shard.values[*owned] = owned
 	shard.fifo[(shard.first+shard.count)%len(shard.fifo)] = owned
 	shard.count++
@@ -137,6 +140,18 @@ type nativeMetricMetadataValueShard struct {
 	recent      [nativeMetadataRecentMisses]uint64
 	recentCount int
 	recentNext  int
+}
+
+// ownNativeMetricMetadata returns an immutable value equal to m. It keeps m's
+// strings only if the caller owns them; otherwise it copies them.
+func ownNativeMetricMetadata(m metadata.Metadata, callerOwned bool) *metadata.Metadata {
+	if callerOwned {
+		// A copy declared here is allocated only for owned values; taking m's
+		// address would allocate m for every caller.
+		owned := m
+		return &owned
+	}
+	return cloneNativeMetricMetadata(m)
 }
 
 func cloneNativeMetricMetadata(m metadata.Metadata) *metadata.Metadata {
