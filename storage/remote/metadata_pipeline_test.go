@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,6 +50,7 @@ import (
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
+	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/tsdb/wlog"
 	"github.com/prometheus/prometheus/util/compression"
@@ -60,7 +62,9 @@ const metadataPipelineReceiverEnv = "PROMETHEUS_METADATA_PIPELINE_RECEIVER"
 // cases; cold initialization measures only step zero. IDs survive WAL ref changes.
 // StepsPerCommit batches consecutive steps of each series into one transaction.
 // The restart case checkpoints the WAL after RestartStep, then restarts storage
-// and sender before the remaining steps.
+// and sender before the remaining steps. HelpBytes lengthens help strings beyond
+// the default 64 bytes. Endpoints adds remote-write queues, each with its own
+// receiver.
 type metadataPipelineConfig struct {
 	Group                            string
 	Case, Source                     string
@@ -69,6 +73,7 @@ type metadataPipelineConfig struct {
 	CommitSize, ReceiverProcs        int
 	StepsPerCommit, RestartStep      int
 	WALSegmentSize                   int
+	HelpBytes, Endpoints             int
 	Base                             int64
 	Mixed                            bool
 	SweepInterval                    time.Duration
@@ -110,6 +115,22 @@ func (c metadataPipelineConfig) version(slot, step int) int {
 	return 0
 }
 
+// writers returns the number of concurrent producers appending steps first
+// through last. The seed, and a checkpointed prefix, use one producer in ID
+// order, so that WAL refs, shard assignments and segment cuts are identical
+// across runs.
+func (c metadataPipelineConfig) writers(first, last int) int {
+	if (first == 0 && last == 0 && c.Case != "cold") || (c.RestartStep > 0 && last <= c.RestartStep) {
+		return 1
+	}
+	return c.Writers
+}
+
+// timestamp returns the logical timestamp of step.
+func (c metadataPipelineConfig) timestamp(step int) int64 {
+	return c.Base + int64(step)*15000
+}
+
 // lastStepInCommit returns the final step of the transaction containing step.
 // Steps after the seed are batched from step one.
 func (c metadataPipelineConfig) lastStepInCommit(step int) int {
@@ -145,7 +166,7 @@ func (c metadataPipelineConfig) metadata(slot, version int) metadata.Metadata {
 	if c.Mixed && slot%3 != 0 {
 		typ = model.MetricTypeHistogram
 	}
-	return metadata.Metadata{Type: typ, Unit: "seconds", Help: prefix + strings.Repeat("x", 64-len(prefix))}
+	return metadata.Metadata{Type: typ, Unit: "seconds", Help: prefix + strings.Repeat("x", max(64, c.HelpBytes)-len(prefix))}
 }
 
 // metadataPipelineReceiver validates each series independently, allowing shard
@@ -483,11 +504,13 @@ type metadataPipeline struct {
 	metadata                 [][]metadata.Metadata
 	refs                     []storage.SeriesRef
 	receiver                 *metadataPipelineReceiverProcess
+	extraReceivers           []*metadataPipelineReceiverProcess
 	registry                 *prometheus.Registry
 	observer                 *prometheus.Registry
 	db                       *tsdb.DB
 	sender                   *Storage
 	queue                    *QueueManager
+	extraQueues              []*QueueManager
 	latency                  [][]time.Duration
 	peak                     []int64
 	lateness                 [][]time.Duration
@@ -507,6 +530,9 @@ func newMetadataPipeline(ctx context.Context, c metadataPipelineConfig) (*metada
 	}
 	if (c.Case == "restart") != (c.RestartStep > 0) || (c.RestartStep > 0 && (c.Group != "" || c.RestartStep <= metadataPipelineRestartHistory || c.RestartStep >= c.lastStep())) {
 		return nil, errors.New("restarts require an ungrouped restart trace with steps after the history and after the restart")
+	}
+	if c.Endpoints < 0 || (c.Endpoints > 1 && (c.Case == "backlog" || c.RestartStep > 0)) {
+		return nil, errors.New("additional endpoints are supported only without held backlogs and restarts")
 	}
 	f := &metadataPipeline{
 		config: c, registry: prometheus.NewRegistry(), observer: prometheus.NewRegistry(), refs: make([]storage.SeriesRef, c.Series),
@@ -533,6 +559,16 @@ func newMetadataPipeline(ctx context.Context, c metadataPipelineConfig) (*metada
 	}
 	var err error
 	f.receiver, err = startMetadataPipelineReceiver(ctx, c)
+	for range max(1, c.Endpoints) - 1 {
+		if err != nil {
+			break
+		}
+		var receiver *metadataPipelineReceiverProcess
+		receiver, err = startMetadataPipelineReceiver(ctx, c)
+		if receiver != nil {
+			f.extraReceivers = append(f.extraReceivers, receiver)
+		}
+	}
 	return f, err
 }
 
@@ -605,26 +641,46 @@ func (f *metadataPipeline) openSender(dir string) error {
 		rw.QueueConfig.MinBackoff = model.Duration(f.diagnostics.BackoffCap)
 		rw.QueueConfig.MaxBackoff = model.Duration(f.diagnostics.BackoffCap)
 	}
-	if err := f.sender.ApplyConfig(&config.Config{RemoteWriteConfigs: []*config.RemoteWriteConfig{rw}}); err != nil {
+	configs := []*config.RemoteWriteConfig{rw}
+	for _, receiver := range f.extraReceivers {
+		extra := *rw
+		extra.URL = baseRemoteWriteConfig(receiver.address).URL
+		configs = append(configs, &extra)
+	}
+	if err := f.sender.ApplyConfig(&config.Config{RemoteWriteConfigs: configs}); err != nil {
 		return err
 	}
 	// Configuration is now fixed. Only observe counters; never lock queue internals
 	// to control when the watcher reads metadata or samples.
+	f.queue, f.extraQueues = nil, nil
 	for _, queue := range f.sender.rws.queues {
-		f.queue = queue
+		if queue.storeClient.Endpoint() == rw.URL.String() {
+			f.queue = queue
+		} else {
+			f.extraQueues = append(f.extraQueues, queue)
+		}
+	}
+	if f.queue == nil || len(f.extraQueues) != len(f.extraReceivers) {
+		return errors.New("remote-write queues do not match the receivers")
 	}
 	// Retain collectors after sender shutdown so validation and metric collection
 	// need not run inside the measured interval.
-	m := f.queue.metrics
-	f.observer.MustRegister(m.failedSamplesTotal, m.failedHistogramsTotal, m.failedExemplarsTotal,
-		m.retriedSamplesTotal, m.retriedHistogramsTotal, m.retriedExemplarsTotal,
-		m.droppedSamplesTotal, m.droppedHistogramsTotal, m.droppedExemplarsTotal)
+	for _, queue := range append([]*QueueManager{f.queue}, f.extraQueues...) {
+		m := queue.metrics
+		f.observer.MustRegister(m.failedSamplesTotal, m.failedHistogramsTotal, m.failedExemplarsTotal,
+			m.retriedSamplesTotal, m.retriedHistogramsTotal, m.retriedExemplarsTotal,
+			m.droppedSamplesTotal, m.droppedHistogramsTotal, m.droppedExemplarsTotal)
+	}
 	f.db.SetWriteNotified(f.sender)
 	return nil
 }
 
 func (f *metadataPipeline) pending() int64 {
-	return f.queue.shards.enqueuedSamples.Load() + f.queue.shards.enqueuedHistograms.Load() + f.queue.shards.enqueuedExemplars.Load()
+	var pending int64
+	for _, queue := range append([]*QueueManager{f.queue}, f.extraQueues...) {
+		pending += queue.shards.enqueuedSamples.Load() + queue.shards.enqueuedHistograms.Load() + queue.shards.enqueuedExemplars.Load()
+	}
+	return pending
 }
 
 func (f *metadataPipeline) holdReceiver(ctx context.Context) error {
@@ -690,13 +746,7 @@ func (p *metadataPipelinePacer) waitUntil(ctx context.Context, deadline time.Tim
 func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 	c := f.config
 	group, ctx := errgroup.WithContext(ctx)
-	writers := c.Writers
-	if (first == 0 && last == 0 && c.Case != "cold") || (c.RestartStep > 0 && last <= c.RestartStep) {
-		// Seed in ID order so warm cases start with identical WAL refs and
-		// shard assignments; a checkpointed prefix also gets identical segment
-		// cuts. Measured sweeps still use concurrent producers.
-		writers = 1
-	}
+	writers := c.writers(first, last)
 	var paceStart time.Time
 	if (c.SweepInterval > 0 || c.SamplesPerSecond > 0) && first > 0 {
 		paceStart = time.Now()
@@ -744,7 +794,7 @@ func (f *metadataPipeline) append(ctx context.Context, first, last int) error {
 							if generation > 0 && step == c.firstStep(id) {
 								f.refs[slot] = 0
 							}
-							timestamp, value := c.Base+int64(step)*15000, float64(step+1)
+							timestamp, value := c.timestamp(step), float64(step+1)
 							var h *histogram.Histogram
 							var fh *histogram.FloatHistogram
 							if c.Mixed {
@@ -800,7 +850,18 @@ func (f *metadataPipeline) drain(ctx context.Context, expected int64) (metadataP
 		if stats.items() > expected {
 			return stats, fmt.Errorf("received %d items, expected %d", stats.items(), expected)
 		}
-		if stats.items() == expected && f.pending() == 0 {
+		done := stats.items() == expected && f.pending() == 0
+		for _, receiver := range f.extraReceivers {
+			extra, err := receiver.command(ctx, "stats")
+			if err != nil {
+				return stats, err
+			}
+			if extra.items() > expected {
+				return stats, fmt.Errorf("an additional receiver received %d items, expected %d", extra.items(), expected)
+			}
+			done = done && extra.items() == expected
+		}
+		if done {
 			return stats, nil
 		}
 		select {
@@ -829,7 +890,8 @@ func (f *metadataPipeline) metrics() (map[string]float64, error) {
 	return values, nil
 }
 
-// checkMetadataPipelineMetrics rejects lost forwarding work and history evictions.
+// checkMetadataPipelineMetrics rejects lost forwarding work, history
+// evictions, and metadata entries of unknown kind.
 func checkMetadataPipelineMetrics(metrics map[string]float64) error {
 	if v := metrics["prometheus_tsdb_head_native_metric_metadata_version_evictions_total"]; v != 0 {
 		return fmt.Errorf("%g native metadata version evictions", v)
@@ -839,7 +901,24 @@ func checkMetadataPipelineMetrics(metrics map[string]float64) error {
 			return fmt.Errorf("%s = %g", name, value)
 		}
 	}
+	for name, value := range metadataPipelineUnknownCounters(metrics) {
+		if value != 0 {
+			return fmt.Errorf("%s = %g", name, value)
+		}
+	}
 	return nil
+}
+
+// metadataPipelineUnknownCounters returns the counters of metadata entries of
+// unknown kind. Builds without native WAL entries have none.
+func metadataPipelineUnknownCounters(metrics map[string]float64) map[string]float64 {
+	counters := map[string]float64{}
+	for name, value := range metrics {
+		if strings.HasSuffix(name, "_unknown_entries_total") || strings.HasSuffix(name, "_unknown_wal_entries_total") {
+			counters[name] = value
+		}
+	}
+	return counters
 }
 
 // metadataPipelineRestartHistory is the last step that changes metadata in the
@@ -852,12 +931,16 @@ type metadataPipelineRestart struct {
 	Truncation, Replay                              time.Duration
 	WALTruncationSeconds, ReplaySeconds             float64
 	HistorySegment, Checkpoint                      int
+	FirstSegment                                    int // The first segment written after the restart.
 	CheckpointBytes                                 int64
-	CheckpointPayloadBytes                          map[string]int64
+	CheckpointPayloadBytes, PostRestartPayloadBytes map[string]int64
 	TruncationAllocatedBytes, TruncationAllocations uint64
 	TruncationBaseHeap, TruncationPeakHeap          uint64
 	ReplayedHeap                                    uint64
 	PreRestartWALBytes                              float64
+	UnknownEntryCounters                            map[string]float64
+	// Series refs by ID, from the checkpoint.
+	refs map[int]chunks.HeadSeriesRef
 }
 
 // drainNotified drains while repeating write notifications. A watcher that moves
@@ -918,7 +1001,7 @@ func (f *metadataPipeline) restart(ctx context.Context, dir string, heap bool) (
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	start := time.Now()
-	err = f.db.Head().Truncate(f.config.Base + int64(f.config.RestartStep/2)*15000)
+	err = f.db.Head().Truncate(f.config.timestamp(f.config.RestartStep / 2))
 	r.Truncation = time.Since(start)
 	runtime.ReadMemStats(&after)
 	if heap {
@@ -937,6 +1020,9 @@ func (f *metadataPipeline) restart(ctx context.Context, dir string, heap bool) (
 	if index < history {
 		return r, fmt.Errorf("checkpoint %d ends before the history in segment %d", index, history)
 	}
+	if r.refs, err = checkMetadataPipelineCheckpoint(f.config, checkpoint); err != nil {
+		return r, err
+	}
 	entries, err := os.ReadDir(checkpoint)
 	if err != nil {
 		return r, err
@@ -948,7 +1034,7 @@ func (f *metadataPipeline) restart(ctx context.Context, dir string, heap bool) (
 		}
 		r.CheckpointBytes += info.Size()
 	}
-	if r.CheckpointPayloadBytes, err = metadataPipelinePayloadBytes(checkpoint); err != nil {
+	if r.CheckpointPayloadBytes, err = metadataPipelinePayloadBytes(checkpoint, 0); err != nil {
 		return r, err
 	}
 	if err := f.closeSender(); err != nil {
@@ -971,6 +1057,7 @@ func (f *metadataPipeline) restart(ctx context.Context, dir string, heap bool) (
 	}
 	r.WALTruncationSeconds = metrics["prometheus_tsdb_wal_truncate_duration_seconds"]
 	r.PreRestartWALBytes = metrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
+	r.UnknownEntryCounters = metadataPipelineUnknownCounters(metrics)
 	err = f.db.Close()
 	f.db = nil
 	if err != nil {
@@ -985,6 +1072,10 @@ func (f *metadataPipeline) restart(ctx context.Context, dir string, heap bool) (
 		return r, err
 	}
 	r.Replay = time.Since(start)
+	// Opening storage starts a new segment.
+	if _, r.FirstSegment, err = wlog.Segments(filepath.Join(dir, "wal")); err != nil {
+		return r, err
+	}
 	if metrics, err = f.metrics(); err != nil {
 		return r, err
 	}
@@ -997,10 +1088,11 @@ func (f *metadataPipeline) restart(ctx context.Context, dir string, heap bool) (
 }
 
 // metadataPipelinePayloadBytes sums decompressed record bytes by record type
-// over the segments in dir, excluding checkpoints. Page padding and compression
-// make file sizes too coarse to compare record encodings.
-func metadataPipelinePayloadBytes(dir string) (map[string]int64, error) {
-	segments, err := wlog.NewSegmentsReader(dir)
+// over the segments in dir from index first, excluding checkpoints. Page
+// padding and compression make file sizes too coarse to compare record
+// encodings.
+func metadataPipelinePayloadBytes(dir string, first int) (map[string]int64, error) {
+	segments, err := wlog.NewSegmentsRangeReader(wlog.SegmentRange{Dir: dir, First: first, Last: math.MaxInt32})
 	if err != nil {
 		return nil, err
 	}
@@ -1062,6 +1154,10 @@ func (f *metadataPipeline) close() error {
 		errs = append(errs, f.receiver.close())
 		f.receiver = nil
 	}
+	for _, receiver := range f.extraReceivers {
+		errs = append(errs, receiver.close())
+	}
+	f.extraReceivers = nil
 	return errors.Join(errs...)
 }
 
@@ -1130,10 +1226,12 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 						f.latency[w] = f.latency[w][:0]
 					}
 				}
+				var restart *metadataPipelineRestart
 				if workload != "cold" {
 					first := 1
 					if c.RestartStep > 0 {
-						restart, err := f.restart(ctx, dir, true)
+						r, err := f.restart(ctx, dir, true)
+						restart = &r
 						require.NoError(t, err)
 						require.Positive(t, restart.Checkpoint)
 						require.Positive(t, restart.CheckpointBytes)
@@ -1173,6 +1271,7 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, checkMetadataPipelineMetrics(metrics))
 				require.NoError(t, f.closeSender())
+				require.NoError(t, checkMetadataPipelineWAL(c, filepath.Join(dir, "wal"), restart))
 				cancelled, stop := context.WithCancel(ctx)
 				stop()
 				require.ErrorIs(t, f.append(cancelled, 1, 1), context.Canceled)

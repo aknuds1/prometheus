@@ -38,7 +38,11 @@ type metadataPipelineResult struct {
 	AllocatedBytes, Allocations                    uint64
 	LifecycleAllocatedBytes, LifecycleAllocations  uint64
 	WALBytes, LifecycleWALBytes                    float64
+	SeedWALBytes                                   float64
 	WALPayloadBytes                                map[string]int64
+	MetadataOracle                                 bool
+	UnknownEntryCounters                           map[string]float64
+	SenderHeap                                     *metadataPipelineHeapAttribution `json:",omitempty"`
 	Requests, RequestBytes, ReceiverServiceNanos   int64
 	OutstandingAtWriterEnd, PeakSampledQueue       int64
 	ResidentSeries                                 uint64
@@ -228,6 +232,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		beforeMetrics, err := f.metrics()
 		require.NoError(b, err)
 		beforeWAL = beforeMetrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
+		r.SeedWALBytes = beforeWAL
 		for i := range f.latency {
 			f.latency[i] = f.latency[i][:0]
 			f.peak[i] = 0
@@ -294,6 +299,10 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	require.NoError(b, d.end(ctx, f, "drain"))
 	if r.Diagnostic {
 		r.DrainedHeap = metadataPipelineRetainedHeap(f)
+		// Attribute the heap while the queues and their state are alive.
+		heap, err := metadataPipelineSenderHeap()
+		require.NoError(b, err, "heap passes need -test.memprofilerate=1")
+		r.SenderHeap = &heap
 	}
 	require.NoError(b, d.begin(ctx, f, "shutdown"))
 	stopStart := time.Now()
@@ -315,6 +324,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	metrics, err := f.metrics()
 	require.NoError(b, err)
 	require.NoError(b, checkMetadataPipelineMetrics(metrics))
+	r.UnknownEntryCounters = metadataPipelineUnknownCounters(metrics)
 	r.LifecycleWALBytes = metrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
 	r.WALBytes = r.LifecycleWALBytes - beforeWAL
 	require.NoError(b, d.begin(ctx, f, "db-close"))
@@ -329,8 +339,15 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	r.LifecycleCPU = lifecycleEndCPU.sub(lifecycleCPU)
 	runtime.ReadMemStats(&afterMemory)
 	r.LifecycleAllocatedBytes, r.LifecycleAllocations = afterMemory.TotalAlloc-lifecycleMemory.TotalAlloc, afterMemory.Mallocs-lifecycleMemory.Mallocs
-	r.WALPayloadBytes, err = metadataPipelinePayloadBytes(filepath.Join(dir, "wal"))
+	walDir := filepath.Join(dir, "wal")
+	r.WALPayloadBytes, err = metadataPipelinePayloadBytes(walDir, 0)
 	require.NoError(b, err)
+	if r.Restart != nil {
+		r.Restart.PostRestartPayloadBytes, err = metadataPipelinePayloadBytes(walDir, r.Restart.FirstSegment)
+		require.NoError(b, err)
+	}
+	require.NoError(b, checkMetadataPipelineWAL(c, walDir, r.Restart))
+	r.MetadataOracle = true
 	var latencies []time.Duration
 	var lateness []time.Duration
 	for i := range f.latency {
