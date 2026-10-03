@@ -395,10 +395,10 @@ func TestQueueManagerAppendBackpressure(t *testing.T) {
 					current = newest
 					q.Batch()
 					synctest.Wait()
-					if !native {
+					if protoMsg == remoteapi.WriteV1MessageType {
 						require.Nil(t, q.spaceAvailable)
 						require.Nil(t, qm.shards.nextReady)
-						require.Empty(t, done, "legacy producers retain their original backoff after capacity returns")
+						require.Empty(t, done, "RW1 producers retain their original backoff after capacity returns")
 						backoff := 5 * time.Millisecond
 						if kind == "exemplar" {
 							backoff = time.Duration(cfg.MinBackoff)
@@ -442,7 +442,8 @@ func TestQueueManagerCapacityPolicy(t *testing.T) {
 					if withReader {
 						reader = nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error { return nil })
 					}
-					native := withReader && protoMsg == remoteapi.WriteV2MessageType
+					// Every RW2 queue waits for capacity, whatever its metadata source.
+					waiting := protoMsg == remoteapi.WriteV2MessageType
 					entered := make(chan struct{}, 1)
 					client := &MockWriteClient{
 						NameFunc: func() string { return "test" }, EndpointFunc: func() string { return "http://test" },
@@ -457,14 +458,14 @@ func TestQueueManagerCapacityPolicy(t *testing.T) {
 					qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, defaultFlushDeadline, client, protoMsg, reader)
 					for _, shards := range []int{1, 2} {
 						qm.shards.start(shards)
-						require.Equal(t, native, qm.shards.nextReady != nil)
+						require.Equal(t, waiting, qm.shards.nextReady != nil)
 						for _, q := range qm.shards.queues {
-							require.Equal(t, native, q.notifyCapacity)
+							require.Equal(t, waiting, q.notifyCapacity)
 							require.Nil(t, q.spaceAvailable)
 						}
 						q := qm.shards.queues[0]
-						// Legacy receives must reach HTTP without taking batchMtx.
-						if !native {
+						// RW1 receives must reach HTTP without taking batchMtx.
+						if !waiting {
 							q.batchMtx.Lock()
 						}
 						qm.metrics.pendingSamples.Inc()
@@ -472,7 +473,7 @@ func TestQueueManagerCapacityPolicy(t *testing.T) {
 						q.batchQueue <- []timeSeries{{seriesLabels: labels.FromStrings("__name__", "test"), timestamp: 1000}}
 						synctest.Wait()
 						require.Len(t, entered, 1)
-						if !native {
+						if !waiting {
 							q.batchMtx.Unlock()
 						}
 						synctest.Wait()

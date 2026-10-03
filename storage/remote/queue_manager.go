@@ -467,6 +467,9 @@ type QueueManager struct {
 	metadataReader  storage.NativeMetricMetadataReader
 	metadataContext context.Context
 	cancelMetadata  context.CancelFunc
+	// waitForCapacity makes RW2 producers wait for queue capacity or replacement
+	// shards instead of retrying with backoff. It is immutable.
+	waitForCapacity bool
 }
 
 // NewQueueManager builds a new QueueManager and starts a new
@@ -546,6 +549,7 @@ func NewQueueManager(
 	}
 
 	walMetadata := t.protoMsg != remoteapi.WriteV1MessageType
+	t.waitForCapacity = walMetadata
 	if walMetadata && metadataReader != nil {
 		t.metadataReader = metadataReader
 		t.metadataContext, t.cancelMetadata = context.WithCancel(context.Background())
@@ -762,12 +766,19 @@ outer:
 		// See https://github.com/prometheus/prometheus/issues/14405
 		meta := t.seriesMetadata[s.Ref]
 		t.seriesMtx.Unlock()
+		ts := timeSeries{
+			seriesLabels: lbls, metadata: meta, startTimestamp: s.ST,
+			timestamp: s.T, value: s.V, sType: tSample,
+		}
 		if batch != nil {
-			batch.series[batch.count] = timeSeries{
-				seriesLabels: lbls, metadata: meta, startTimestamp: s.ST,
-				timestamp: s.T, value: s.V, sType: tSample,
-			}
+			batch.series[batch.count] = ts
 			if !batch.append(t, s.Ref) {
+				return false
+			}
+			continue
+		}
+		if t.waitForCapacity {
+			if !t.shards.enqueueWait(s.Ref, ts) {
 				return false
 			}
 			continue
@@ -783,10 +794,7 @@ outer:
 				return false
 			default:
 			}
-			if t.shards.enqueue(s.Ref, timeSeries{
-				seriesLabels: lbls, metadata: meta, startTimestamp: s.ST,
-				timestamp: s.T, value: s.V, sType: tSample,
-			}) {
+			if t.shards.enqueue(s.Ref, ts) {
 				continue outer
 			}
 
@@ -832,12 +840,19 @@ outer:
 		}
 		meta := t.seriesMetadata[e.Ref]
 		t.seriesMtx.Unlock()
+		ts := timeSeries{
+			seriesLabels: lbls, metadata: meta, timestamp: e.T, value: e.V,
+			exemplarLabels: e.Labels, sType: tExemplar,
+		}
 		if batch != nil {
-			batch.series[batch.count] = timeSeries{
-				seriesLabels: lbls, metadata: meta, timestamp: e.T, value: e.V,
-				exemplarLabels: e.Labels, sType: tExemplar,
-			}
+			batch.series[batch.count] = ts
 			if !batch.append(t, e.Ref) {
+				return false
+			}
+			continue
+		}
+		if t.waitForCapacity {
+			if !t.shards.enqueueWait(e.Ref, ts) {
 				return false
 			}
 			continue
@@ -850,10 +865,7 @@ outer:
 				return false
 			default:
 			}
-			if t.shards.enqueue(e.Ref, timeSeries{
-				seriesLabels: lbls, metadata: meta, timestamp: e.T, value: e.V,
-				exemplarLabels: e.Labels, sType: tExemplar,
-			}) {
+			if t.shards.enqueue(e.Ref, ts) {
 				continue outer
 			}
 
@@ -902,12 +914,19 @@ outer:
 		}
 		meta := t.seriesMetadata[h.Ref]
 		t.seriesMtx.Unlock()
+		ts := timeSeries{
+			seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
+			timestamp: h.T, histogram: h.H, sType: tHistogram,
+		}
 		if batch != nil {
-			batch.series[batch.count] = timeSeries{
-				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
-				timestamp: h.T, histogram: h.H, sType: tHistogram,
-			}
+			batch.series[batch.count] = ts
 			if !batch.append(t, h.Ref) {
+				return false
+			}
+			continue
+		}
+		if t.waitForCapacity {
+			if !t.shards.enqueueWait(h.Ref, ts) {
 				return false
 			}
 			continue
@@ -920,10 +939,7 @@ outer:
 				return false
 			default:
 			}
-			if t.shards.enqueue(h.Ref, timeSeries{
-				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
-				timestamp: h.T, histogram: h.H, sType: tHistogram,
-			}) {
+			if t.shards.enqueue(h.Ref, ts) {
 				continue outer
 			}
 
@@ -972,12 +988,19 @@ outer:
 		}
 		meta := t.seriesMetadata[h.Ref]
 		t.seriesMtx.Unlock()
+		ts := timeSeries{
+			seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
+			timestamp: h.T, floatHistogram: h.FH, sType: tFloatHistogram,
+		}
 		if batch != nil {
-			batch.series[batch.count] = timeSeries{
-				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
-				timestamp: h.T, floatHistogram: h.FH, sType: tFloatHistogram,
-			}
+			batch.series[batch.count] = ts
 			if !batch.append(t, h.Ref) {
+				return false
+			}
+			continue
+		}
+		if t.waitForCapacity {
+			if !t.shards.enqueueWait(h.Ref, ts) {
 				return false
 			}
 			continue
@@ -990,10 +1013,7 @@ outer:
 				return false
 			default:
 			}
-			if t.shards.enqueue(h.Ref, timeSeries{
-				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
-				timestamp: h.T, floatHistogram: h.FH, sType: tFloatHistogram,
-			}) {
+			if t.shards.enqueue(h.Ref, ts) {
 				continue outer
 			}
 
@@ -1083,11 +1103,11 @@ func (t *QueueManager) StoreMetadata(meta []record.RefMetadata) {
 	t.seriesMtx.Lock()
 	defer t.seriesMtx.Unlock()
 	for _, m := range meta {
-		t.seriesMetadata[m.Ref] = &metadata.Metadata{
+		t.seriesMetadata[m.Ref] = walMetadataInterner.intern(metadata.Metadata{
 			Type: record.ToMetricType(m.Type),
 			Unit: m.Unit,
 			Help: m.Help,
-		}
+		})
 	}
 }
 
@@ -1296,7 +1316,7 @@ func (t *QueueManager) newShards() *shards {
 		qm:   t,
 		done: make(chan struct{}),
 	}
-	if t.metadataReader != nil {
+	if t.waitForCapacity {
 		s.nextReady = make(chan struct{})
 	}
 	return s
@@ -1319,8 +1339,8 @@ type shards struct {
 
 	// Soft shutdown context will prevent new enqueues and deadlocks.
 	softShutdown chan struct{}
-	// nextReady is nil for legacy queues; otherwise it closes when replacement
-	// queues are installed. The constructor selects this policy after RW1 filtering.
+	// nextReady is nil for RW1 queues; otherwise it closes when replacement
+	// queues are installed. The constructor selects this policy by protocol.
 	nextReady chan struct{}
 
 	// Hard shutdown context is used to terminate outgoing HTTP connections
@@ -1408,7 +1428,7 @@ func (s *shards) stop() {
 	logDroppedError("histograms", s.histogramsDroppedOnHardShutdown)
 }
 
-// enqueue attempts a legacy append without waiting for capacity or replacement.
+// enqueue attempts an RW1 append without waiting for capacity or replacement.
 func (s *shards) enqueue(ref chunks.HeadSeriesRef, data timeSeries) bool {
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
@@ -1425,9 +1445,9 @@ func (s *shards) enqueue(ref chunks.HeadSeriesRef, data timeSeries) bool {
 	return true
 }
 
-// enqueueNative waits for capacity or replacement shards. It returns false on shutdown.
+// enqueueWait waits for capacity or replacement shards. It returns false on shutdown.
 // A notification permits a retry, not a reservation in the previously full queue.
-func (s *shards) enqueueNative(ref chunks.HeadSeriesRef, data timeSeries) bool {
+func (s *shards) enqueueWait(ref chunks.HeadSeriesRef, data timeSeries) bool {
 	for {
 		select {
 		case <-s.qm.quit:

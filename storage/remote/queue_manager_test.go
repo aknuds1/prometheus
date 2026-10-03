@@ -1816,10 +1816,10 @@ func TestQueueCapacityNotification(t *testing.T) {
 			q := newQueue(1, 1)
 			q.notifyCapacity = true
 			qm.shards.queues = []*queue{q}
-			require.True(t, qm.shards.enqueueNative(1, timeSeries{timestamp: 0}))
+			require.True(t, qm.shards.enqueueWait(1, timeSeries{timestamp: 0}))
 			done := make(chan bool, 2)
 			for i := range 2 {
-				go func() { done <- qm.shards.enqueueNative(1, timeSeries{timestamp: int64(i + 1)}) }()
+				go func() { done <- qm.shards.enqueueWait(1, timeSeries{timestamp: int64(i + 1)}) }()
 			}
 			synctest.Wait()
 			require.Empty(t, done)
@@ -1842,7 +1842,7 @@ func TestShardsEnqueueWakeup(t *testing.T) {
 			qm.shards.softShutdown = make(chan struct{})
 			close(qm.shards.softShutdown)
 			done := make(chan bool, 1)
-			go func() { done <- qm.shards.enqueueNative(1, timeSeries{}) }()
+			go func() { done <- qm.shards.enqueueWait(1, timeSeries{}) }()
 			synctest.Wait()
 			require.Empty(t, done)
 			close(qm.quit)
@@ -1873,11 +1873,11 @@ func TestShardsEnqueueWakeup(t *testing.T) {
 				qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, time.Second, client, remoteapi.WriteV2MessageType, nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error { return nil }))
 				qm.shards.start(1)
 				data := timeSeries{seriesLabels: labels.FromStrings("__name__", "test"), timestamp: 1000}
-				require.True(t, qm.shards.enqueueNative(1, data))
+				require.True(t, qm.shards.enqueueWait(1, data))
 				<-entered
-				require.True(t, qm.shards.enqueueNative(1, data))
+				require.True(t, qm.shards.enqueueWait(1, data))
 				done := make(chan bool, 1)
-				go func() { done <- qm.shards.enqueueNative(1, data) }()
+				go func() { done <- qm.shards.enqueueWait(1, data) }()
 				synctest.Wait()
 				require.Empty(t, done)
 				switch event {
