@@ -27,7 +27,6 @@ import (
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
-	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/record"
 )
 
@@ -59,15 +58,11 @@ func BenchmarkQueueManagerEnqueue(b *testing.B) {
 	}
 }
 
-func newMetadataBenchmarkQueueManager(b *testing.B, cfg config.QueueConfig, mcfg config.MetadataConfig, deadline time.Duration, client WriteClient, protoMsg remoteapi.WriteMessageType, reader storage.NativeMetricMetadataReader) *QueueManager {
-	qm := NewQueueManager(newQueueManagerMetrics(nil, "", ""), nil, nil, nil, b.TempDir(),
+func newMetadataBenchmarkQueueManager(b *testing.B, cfg config.QueueConfig, mcfg config.MetadataConfig, deadline time.Duration, client WriteClient, protoMsg remoteapi.WriteMessageType, nativeMetadata bool) *QueueManager {
+	return NewQueueManager(newQueueManagerMetrics(nil, "", ""), nil, nil, nil, b.TempDir(),
 		newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, labels.EmptyLabels(), nil,
 		client, deadline, newPool(), newHighestTimestampMetric(), nil, false, false, false,
-		protoMsg, record.NewBuffersPool(), false, reader)
-	if qm.cancelMetadata != nil {
-		b.Cleanup(qm.cancelMetadata)
-	}
-	return qm
+		protoMsg, record.NewBuffersPool(), false, nativeMetadata)
 }
 
 // BenchmarkQueueManagerEnqueuePolicy isolates enqueueing under the policy selected
@@ -80,15 +75,6 @@ func BenchmarkQueueManagerEnqueuePolicy(b *testing.B) {
 				cfg.MaxSamplesPerSend, cfg.Capacity = 1, 1
 				cfg.BatchSendDeadline = model.Duration(time.Hour)
 				m := metadata.Metadata{Type: model.MetricTypeCounter, Help: "fixed"}
-				var reader storage.NativeMetricMetadataReader
-				if native {
-					reader = nativeMetadataReaderFunc(func(_ context.Context, lookups []storage.NativeMetricMetadataLookup) error {
-						for i := range lookups {
-							lookups[i].Metadata = &m
-						}
-						return nil
-					})
-				}
 				entered, release := make(chan struct{}, 1), make(chan struct{})
 				client := &MockWriteClient{
 					NameFunc: func() string { return "test" }, EndpointFunc: func() string { return "http://test" },
@@ -107,18 +93,18 @@ func BenchmarkQueueManagerEnqueuePolicy(b *testing.B) {
 					newEWMARate(ewmaWeight, shardUpdateDuration), cfg, config.DefaultMetadataConfig,
 					labels.EmptyLabels(), nil, client, defaultFlushDeadline, newPool(),
 					newHighestTimestampMetric(), nil, false, false, false, remoteapi.WriteV2MessageType,
-					record.NewBuffersPool(), false, reader)
-				if qm.cancelMetadata != nil {
-					b.Cleanup(qm.cancelMetadata)
-				}
+					record.NewBuffersPool(), false, native)
 				qm.StoreSeries([]record.RefSeries{{Ref: 1, Labels: labels.FromStrings("__name__", "test")}}, 0)
+				if native {
+					nativeMetadataWriter{qm}.StoreNativeMetadata([]record.RefNativeMetadata{{Ref: 1, Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{{EffectiveFrom: 0, Type: record.GetMetricType(m.Type), Help: m.Help}}}})
+				}
 				samples := []record.RefSample{{Ref: 1, T: 1000}}
-				// Verify lookup outside timing, without instrumentation in the fixed reader.
+				// Verify metadata selection outside timing.
 				probe := newQueue(2, 2)
 				qm.shards.queues = []*queue{probe}
 				require.True(b, qm.Append(samples))
 				if native {
-					require.Same(b, &m, probe.batch[0].metadata)
+					require.Equal(b, &m, probe.batch[0].metadata)
 				} else {
 					require.Nil(b, probe.batch[0].metadata)
 				}

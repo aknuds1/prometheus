@@ -71,7 +71,7 @@ type WriteStorage struct {
 	flushDeadline     time.Duration
 	interner          *pool
 	scraper           ReadyScrapeManager
-	metadataReader    storage.NativeMetricMetadataReader
+	nativeMetadata    bool
 	quit              chan struct{}
 
 	recordBuf *record.BuffersPool
@@ -82,7 +82,7 @@ type WriteStorage struct {
 }
 
 // NewWriteStorage creates and runs a WriteStorage.
-func NewWriteStorage(logger *slog.Logger, reg prometheus.Registerer, dir string, flushDeadline time.Duration, sm ReadyScrapeManager, enableTypeAndUnitLabels bool, metadataReader storage.NativeMetricMetadataReader) *WriteStorage {
+func NewWriteStorage(logger *slog.Logger, reg prometheus.Registerer, dir string, flushDeadline time.Duration, sm ReadyScrapeManager, enableTypeAndUnitLabels, nativeMetadata bool) *WriteStorage {
 	if logger == nil {
 		logger = promslog.NewNopLogger()
 	}
@@ -97,7 +97,7 @@ func NewWriteStorage(logger *slog.Logger, reg prometheus.Registerer, dir string,
 		dir:               dir,
 		interner:          newPool(),
 		scraper:           sm,
-		metadataReader:    metadataReader,
+		nativeMetadata:    nativeMetadata,
 		quit:              make(chan struct{}),
 		highestTimestamp: &maxTimestamp{
 			Gauge: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -223,7 +223,7 @@ func (rws *WriteStorage) ApplyConfig(conf *config.Config) error {
 			rwConf.ProtobufMessage,
 			rws.recordBuf,
 			rwConf.FailedRequestLogging,
-			rws.metadataReader,
+			rws.nativeMetadata,
 		)
 		// Keep track of which queues are new so we know which to start.
 		newHashes = append(newHashes, hash)

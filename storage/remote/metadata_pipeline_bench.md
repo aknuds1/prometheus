@@ -265,22 +265,10 @@ available. Preserve late observations and report the deviation from the offered
 schedule; a late trace must not silently be described as keeping pace. Scheduling
 waits are cancellable and do not count toward append/commit transaction latency.
 
-`BenchmarkHeadMetricMetadataLookup` supplies a complementary fixed-history lookup
-control with 100 shared, 1,000 distinct, 4,096 distinct, or four oversized historical
-metadata values. Every series has the same current value, so the current controls
-do not measure distinct current metadata. It covers current/history/missing/disabled
-states and independent parallel readers sharing one Head. Each operation visits
-4,096 series; this isolates lookup and value materialization rather than WAL,
-encoding, or HTTP delivery. The existing append/encode benchmarks retain their
-original loop shapes.
-
-The `historical-full` cases select the oldest of five retained versions, with
-shared or 4,096-distinct historical values. `missing-full` scans the same full
-history for a timestamp before its oldest version. Both include serial and
-parallel readers; existing two-version cases are unchanged.
-`BenchmarkHeadMetricMetadataLookupAppendConcurrent/lookup=oldest/changing=true/destinations=2`
-adds the corresponding full-history lookup while eight ingestion workers replace
-versions and wait for two lookup destinations before advancing their own series.
+Senders no longer look up Head history: they reduce native metadata entries from
+the WAL, so the Head lookup benchmarks were removed. `BenchmarkQueueManagerMetadataAppend`
+and `BenchmarkQueueManagerMetadataAppendEncode` measure version selection in the
+sender, from legacy or native WAL metadata.
 
 ## Batched and restart companions
 

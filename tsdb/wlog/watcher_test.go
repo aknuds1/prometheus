@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -30,8 +31,10 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/nativemetadata"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/util/compression"
 	"github.com/prometheus/prometheus/util/testutil"
@@ -899,4 +902,194 @@ func TestRun_AvoidNotifyWhenBehind(t *testing.T) {
 			})
 		}
 	}
+}
+
+// nativeWriteToMock records native metadata entries since its last reset.
+type nativeWriteToMock struct {
+	*writeToMock
+	entries []record.RefNativeMetadata
+	resets  int
+}
+
+func (m *nativeWriteToMock) StoreNativeMetadata(entries []record.RefNativeMetadata) {
+	for _, e := range entries {
+		e.Points = append([]record.RefNativeMetadataPoint(nil), e.Points...)
+		m.entries = append(m.entries, e)
+	}
+}
+
+func (m *nativeWriteToMock) ResetNativeMetadata() {
+	m.entries = nil
+	m.resets++
+}
+
+func reduceNativeMetadata(entries []record.RefNativeMetadata) map[chunks.HeadSeriesRef]string {
+	states := map[chunks.HeadSeriesRef]*nativemetadata.State{}
+	intern := func(m metadata.Metadata) *metadata.Metadata { return &m }
+	for _, e := range entries {
+		if states[e.Ref] == nil {
+			states[e.Ref] = &nativemetadata.State{}
+		}
+		states[e.Ref].Apply(e.Kind, e.Truncated, nativemetadata.AppendRecordPoints(nil, e.Points, intern))
+	}
+	out := map[chunks.HeadSeriesRef]string{}
+	for ref, s := range states {
+		out[ref] = fmt.Sprintf("truncated=%v", s.Truncated)
+		for _, p := range s.AppendPoints(nil) {
+			out[ref] += fmt.Sprintf(" %s@%d", p.Metadata.Help, p.EffectiveFrom)
+		}
+	}
+	return out
+}
+
+func TestWatcher_NativeMetadata(t *testing.T) {
+	var enc record.Encoder
+	group := func(ref chunks.HeadSeriesRef, points ...string) []byte {
+		e := record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataGroup}
+		for _, p := range points {
+			var help string
+			var from int64
+			_, err := fmt.Sscanf(p, "%1s@%d", &help, &from)
+			require.NoError(t, err)
+			e.Points = append(e.Points, record.RefNativeMetadataPoint{EffectiveFrom: from, Type: uint8(record.Gauge), Help: help})
+		}
+		return enc.NativeMetadata([]record.RefNativeMetadata{e}, nil)
+	}
+	// Each segment holds one series record and the listed records.
+	segments := [][][]byte{
+		{group(1, "A@100"), group(2, "A@10", "B@20", "C@30", "D@40", "E@50")},
+		{group(1, "B@150", "C@180"), group(2, "F@60")},
+		{enc.Metadata([]record.RefMetadata{{Ref: 3, Help: "L"}}, nil), group(1, "D@200")},
+		{group(2, "D@50"), group(3, "M@5")},
+		{group(1, "A@120"), group(2, "G@70")},
+	}
+	type setup struct {
+		dir     string
+		w       *WL
+		entries []record.RefNativeMetadata
+	}
+	newWAL := func(t *testing.T) setup {
+		dir := t.TempDir()
+		w, err := NewSize(nil, nil, filepath.Join(dir, "wal"), 32*1024, compression.None)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, w.Close()) })
+		var all []record.RefNativeMetadata
+		var dec record.Decoder
+		for i, recs := range segments {
+			require.NoError(t, w.Log(enc.Series([]record.RefSeries{{Ref: chunks.HeadSeriesRef(i + 1), Labels: labels.FromStrings("__name__", strconv.Itoa(i))}}, nil)))
+			for _, rec := range recs {
+				require.NoError(t, w.Log(rec))
+				entries, _, err := dec.NativeMetadata(rec, nil, nil)
+				require.NoError(t, err)
+				all = append(all, entries...)
+			}
+			// Leave an empty tail segment, so that replay reads every segment
+			// to its end and returns.
+			_, err := w.NextSegment()
+			require.NoError(t, err)
+		}
+		return setup{dir: dir, w: w, entries: all}
+	}
+	newWatcher := func(s setup) (*Watcher, *nativeWriteToMock) {
+		wt := &nativeWriteToMock{writeToMock: newWriteToMock(0)}
+		watcher := NewWatcher(wMetrics, nil, nil, "", wt, s.dir, false, false, true, nil)
+		watcher.SetMetrics()
+		watcher.MaxSegment = len(segments) - 1
+		return watcher, wt
+	}
+	checkpoint := func(t *testing.T, s setup, from, to int) {
+		_, err := Checkpoint(promslog.NewNopLogger(), s.w, from, to, func(chunks.HeadSeriesRef) bool { return true }, 0, false)
+		require.NoError(t, err)
+	}
+
+	t.Run("entries are forwarded in WAL order", func(t *testing.T) {
+		s := newWAL(t)
+		watcher, wt := newWatcher(s)
+		require.NoError(t, watcher.Run())
+		require.Equal(t, s.entries, wt.entries)
+		require.Zero(t, wt.metadataStores, "legacy metadata is forwarded as native entries")
+	})
+
+	t.Run("each replay starts from reset state", func(t *testing.T) {
+		for _, withCheckpoint := range []bool{false, true} {
+			s := newWAL(t)
+			if withCheckpoint {
+				checkpoint(t, s, 0, 1)
+				require.NoError(t, s.w.Truncate(2))
+			}
+			watcher, wt := newWatcher(s)
+			require.NoError(t, watcher.Run())
+			first := wt.entries
+			require.NoError(t, watcher.Run())
+			require.Equal(t, 2, wt.resets)
+			require.Equal(t, first, wt.entries)
+			require.Equal(t, reduceNativeMetadata(s.entries), reduceNativeMetadata(wt.entries))
+		}
+	})
+
+	t.Run("replay starts after the checkpoint's own segment", func(t *testing.T) {
+		// A failed truncation leaves the checkpointed segments in place.
+		s := newWAL(t)
+		checkpoint(t, s, 0, 1)
+		watcher, wt := newWatcher(s)
+		require.NoError(t, watcher.Run())
+		var segment1 []record.RefNativeMetadata
+		var dec record.Decoder
+		for _, rec := range segments[1] {
+			entries, _, err := dec.NativeMetadata(rec, nil, nil)
+			require.NoError(t, err)
+			segment1 = append(segment1, entries...)
+		}
+		for _, e := range wt.entries {
+			for _, skipped := range segment1 {
+				require.NotEqual(t, skipped, e, "segment 1 is in the checkpoint")
+			}
+		}
+		require.Equal(t, reduceNativeMetadata(s.entries), reduceNativeMetadata(wt.entries))
+	})
+
+	t.Run("a newer checkpoint restarts replay", func(t *testing.T) {
+		s := newWAL(t)
+		checkpoint(t, s, 0, 1)
+		require.NoError(t, s.w.Truncate(2))
+		watcher, wt := newWatcher(s)
+		raced := false
+		watcher.testAfterCheckpoint = func() {
+			if raced {
+				return
+			}
+			raced = true
+			// Checkpointing races the watcher, deleting the next segments.
+			checkpoint(t, s, 2, 3)
+			require.NoError(t, s.w.Truncate(4))
+			require.NoError(t, DeleteCheckpoints(s.w.Dir(), 3))
+		}
+		require.NoError(t, watcher.Run())
+		require.Equal(t, 2, wt.resets)
+		_, index, err := LastCheckpoint(s.w.Dir())
+		require.NoError(t, err)
+		require.Equal(t, 3, index)
+		require.Equal(t, reduceNativeMetadata(s.entries), reduceNativeMetadata(wt.entries))
+	})
+
+	t.Run("missing segments without a newer checkpoint", func(t *testing.T) {
+		s := newWAL(t)
+		checkpoint(t, s, 0, 1)
+		require.NoError(t, s.w.Truncate(2))
+		require.NoError(t, os.Remove(SegmentName(s.w.Dir(), 2)))
+		watcher, wt := newWatcher(s)
+		require.NoError(t, watcher.Run())
+		require.Equal(t, 1, wt.resets)
+		require.NotEmpty(t, wt.entries)
+	})
+
+	t.Run("legacy writers keep legacy metadata", func(t *testing.T) {
+		s := newWAL(t)
+		wt := newWriteToMock(0)
+		watcher := NewWatcher(wMetrics, nil, nil, "", wt, s.dir, false, false, true, nil)
+		watcher.SetMetrics()
+		watcher.MaxSegment = len(segments) - 1
+		require.NoError(t, watcher.Run())
+		require.Len(t, wt.metadataStored, len(s.entries))
+	})
 }

@@ -389,8 +389,6 @@ func (h *Head) resetInMemoryState() error {
 		// reset the existing series to make sure we call the appropriated hooks
 		// and increment the series removed metrics
 		fs := h.series.iterForDeletion(func(_ int, _ uint64, s *memSeries, flushedForCallback map[chunks.HeadSeriesRef]labels.Labels) {
-			// Reset excludes mutations; retire native state before replacing Head membership.
-			s.retireNativeMetadata()
 			// All series should be flushed
 			flushedForCallback[s.ref] = s.lset
 		})
@@ -2541,8 +2539,6 @@ func (h *Head) deleteSeriesByID(refs []chunks.HeadSeriesRef) {
 			h.series.locks[stripe].Unlock()
 			continue
 		}
-		// Replay excludes mutations, so retirement needs no series lock here.
-		series.retireNativeMetadata()
 		delete(h.series.series[stripe], series.ref)
 		h.series.locks[stripe].Unlock()
 
@@ -2837,9 +2833,8 @@ type memSeries struct {
 	lset labels.Labels // Locking required with -tags dedupelabels, not otherwise.
 
 	// Lazily allocated after either metadata path commits state for this series.
-	// The pointer is atomic so native lookups can read it under the publication
-	// barrier. Writers hold the series lock; legacy fields require that lock too,
-	// except during legacy WAL replay, which exclusively owns metadata.
+	// Writers hold the series lock; legacy fields require that lock too, except
+	// during legacy WAL replay, which exclusively owns metadata.
 	metadata atomic.Pointer[memSeriesMetadata]
 
 	// Immutable chunks on disk that have not yet gone into a block, in order of ascending time stamps.
@@ -2966,7 +2961,6 @@ func (s *memSeries) isGCed() bool {
 
 func (s *memSeries) setGCed() {
 	s.state |= seriesGCedFlag
-	s.retireNativeMetadata()
 }
 
 func (s *memSeries) hasComputedHistogramChunkEndTime() bool {

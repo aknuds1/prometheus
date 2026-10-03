@@ -996,10 +996,8 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 			require.Equal(t, int64(1), head.nativeMetricMetadata.versions.Load())
 			require.True(t, head.nativeMetricMetadata.has(chunks.HeadSeriesRef(ref)))
 			require.Equal(t, legacyValue, *legacyMetadataForTest(series))
-			lookups := []storage.NativeMetricMetadataLookup{{Ref: ref, Timestamp: 200}}
-			require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
-			require.Equal(t, &meta, lookups[0].Metadata)
-			retained := lookups[0].Metadata
+			retained := nativeMetadataForTest(series).Metadata
+			require.Equal(t, meta, *retained)
 			first = series.metadata.Load()
 			series.Lock()
 			backing := series.nativeMetadataLocked()
@@ -1016,8 +1014,7 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 			series.Unlock()
 			require.True(t, unchanged, "legacy updates must retain the native backing")
 			require.Equal(t, legacyValue, *legacyMetadataForTest(series))
-			require.NoError(t, head.LookupNativeMetricMetadata(t.Context(), lookups))
-			require.Same(t, retained, lookups[0].Metadata)
+			require.Same(t, retained, nativeMetadataForTest(series).Metadata)
 		})
 	}
 	for _, tc := range []struct {

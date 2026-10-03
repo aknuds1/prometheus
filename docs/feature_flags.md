@@ -167,28 +167,34 @@ and Remote Write 2.0 as versioned metadata attached to each series. The
 metadata is exposed by the experimental `/api/v1/series/metadata` endpoint.
 
 Remote Write 2.0 also sends this metadata with samples, native histograms, and
-exemplars. At enqueue time, the sender selects the newest retained version at
-or before the sample or exemplar timestamp, using the original series reference
-before write relabeling. Once queued, metadata is unchanged by later observations
-or retries. Type and unit labels still take precedence when that feature is enabled.
+exemplars. Commits write metadata changes to the WAL, and the sender reduces
+them in WAL order: each sample or exemplar gets the newest version at or before
+its own timestamp, as of its position in the WAL. Metadata committed later, such
+as a backfilled older version, does not relabel it, while a backlog keeps
+versions that the Head has since evicted. The sender uses the original series
+reference before write relabeling. Once queued, metadata is unchanged by retries.
+Type and unit labels still take precedence when that feature is enabled.
 
-This does not require `metadata-wal-records`. If native history is unavailable,
-the sender falls back to legacy WAL metadata when present, otherwise it sends
-unspecified metadata. This includes timestamps before the first retained version,
-such as synthetic start-timestamp zero samples and older exemplars. Receivers may
-reject unspecified metric types. Native forwarding is supported only in server
-mode, and `metadata_config.send` does not control Remote Write 2.0 metadata.
+This does not require `metadata-wal-records`. Legacy metadata WAL records, for
+example from before this feature was enabled, apply at every timestamp. With
+both features enabled, each transaction's legacy records follow its native ones,
+so they replace the forwarded history with their latest value. Items
+before the first version, such as synthetic start-timestamp zero samples and
+older exemplars, get unspecified metadata. Receivers may reject unspecified
+metric types. Native forwarding is supported only in server mode, and
+`metadata_config.send` does not control Remote Write 2.0 metadata.
 
-This prototype stores metadata only in the Head's memory. It is not written to
-the WAL, checkpoints, snapshots, or blocks, so it is lost on restart and when
-the corresponding Head series is removed. Remote Write 1.0 does not populate
-this store. At most 5 versions are retained per series.
+On restart, the Head seeds each series with the newest version from the WAL and
+its checkpoint; older versions are not restored for queries. With memory
+snapshots on shutdown, only WAL records after the loaded snapshot are seeded.
+Metadata is not stored in snapshots or blocks, and is lost when the
+corresponding Head series is removed. Remote Write 1.0 does not populate this
+store. At most 5 versions are retained per series.
 
-Consequently, native forwarding is best effort: it cannot guarantee metadata for
-WAL backlog after a restart, series removal, or history eviction. It uses retained
-Head history, not an exact record of the metadata originally supplied with every
-sample. Keeping legacy metadata WAL records enabled preserves the existing fallback,
-but does not make native history persistent or the fallback timestamp-aware.
+This prototype keeps forwarded metadata equal to the Head's only while each
+series has one writer at a time. Concurrent commits to one series can make them
+diverge, as can restarting after a series was removed and recreated under a new
+reference.
 
 The store costs Head memory per series, along two axes. For example, retained-heap
 benchmarks on Go 1.27, darwin/arm64, measured roughly 100 extra bytes per series

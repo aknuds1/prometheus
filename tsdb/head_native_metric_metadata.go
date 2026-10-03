@@ -16,11 +16,9 @@ package tsdb
 import (
 	"context"
 	"errors"
-	"math"
 	"sync"
 
 	"go.uber.org/atomic"
-	"golang.org/x/sync/semaphore"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
@@ -31,14 +29,12 @@ import (
 )
 
 const (
-	nativeMetricMetadataStripes            = 256
-	maxNativeMetricMetadataVersions        = nativemetadata.MaxVersions
-	nativeMetricMetadataPublicationPermits = math.MaxInt64
+	nativeMetricMetadataStripes     = 256
+	maxNativeMetricMetadataVersions = nativemetadata.MaxVersions
 )
 
 const (
 	nativeMetadataTruncated uint32 = 1 << iota
-	nativeMetadataRetired
 )
 
 // ErrNativeMetadataDisabled is returned when native metadata storage is not enabled.
@@ -62,9 +58,9 @@ type NativeMetricMetadataSeries struct {
 
 type nativeMetricMetadataPoint = nativemetadata.Point
 
-// nativeMetricMetadataStore indexes series-owned native histories and coordinates
-// their publication to senders. Index entries retain retired series until cleanup;
-// they are not a substitute for revalidating membership in the Head.
+// nativeMetricMetadataStore indexes series-owned native histories for queries.
+// Index entries retain deleted series until cleanup; they are not a substitute
+// for revalidating membership in the Head.
 type nativeMetricMetadataStore struct {
 	// Keep the 64-bit atomics first for alignment on 32-bit platforms.
 	// Stores are allocated individually by newNativeMetricMetadataStore.
@@ -75,22 +71,17 @@ type nativeMetricMetadataStore struct {
 	directoryGeneration atomic.Uint64
 
 	// directory maps full-width page keys to singleton series or typed pages.
-	// Membership implies initialized native state, but forwarding checks retirement.
+	// Membership implies initialized native state.
 	directory      sync.Map
 	directoryLocks [nativeMetricMetadataStripes]sync.Mutex
 	appenderPool   sync.Pool
 	equalityPool   sync.Pool
 	values         *nativeMetricMetadataValueCache
-	// Commits hold one permit from before WAL logging through cache publication.
-	// Senders acquire all permits for a bounded lookup batch. FIFO acquisition
-	// prevents a steady stream of commits from starving senders.
-	publication *semaphore.Weighted
 }
 
 func newNativeMetricMetadataStore() *nativeMetricMetadataStore {
 	return &nativeMetricMetadataStore{
-		publication: semaphore.NewWeighted(nativeMetricMetadataPublicationPermits),
-		values:      newNativeMetricMetadataValueCache(),
+		values: newNativeMetricMetadataValueCache(),
 	}
 }
 
@@ -117,20 +108,11 @@ func (s *nativeMetricMetadataStore) reset() {
 // nativeSeriesMetadata owns a series' committed history, with its newest point
 // inline and up to four chronological older points. Adjacent values differ;
 // Truncation remains set after an eviction, even if the history later collapses.
-// The series lock protects updates. Forwarding may read native state under the
-// publication barrier; deletion must therefore leave retired history unchanged.
+// The series lock protects reads and updates. Senders reproduce the history
+// from the WAL instead of reading it.
 type nativeSeriesMetadata struct {
 	nativemetadata.History
-	// Retirement is also visible to readers holding a detached directory page.
 	flags atomic.Uint32
-}
-
-// retireNativeMetadata invalidates future lookups without changing captured history.
-// Callers hold the series lock, except mutation-quiescent reset and WAL replay.
-func (s *memSeries) retireNativeMetadata() {
-	if sidecar := s.metadata.Load(); sidecar != nil && sidecar.native != nil {
-		sidecar.native.setFlag(nativeMetadataRetired)
-	}
 }
 
 func (n *nativeSeriesMetadata) setFlag(flag uint32) {

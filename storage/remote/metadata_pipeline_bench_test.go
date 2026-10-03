@@ -56,7 +56,7 @@ type metadataPipelineResult struct {
 }
 
 // BenchmarkRemoteWriteMetadataPipeline includes ingestion, WAL reading, metadata
-// population/lookup, and acknowledged HTTP forwarding. One operation is a finite
+// population and selection, and acknowledged HTTP forwarding. One operation is a finite
 // trace, not a sample. See metadata_pipeline_bench.md for boundaries and controls.
 func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
 	series := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_SERIES", 10000)
@@ -271,7 +271,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	if c.Case == "backlog" {
 		require.NoError(b, f.awaitBacklog(ctx))
 		// More samples than the queue and one decoded WAL record can hold must
-		// remain unread. This exercises historical lookup, not just HTTP delay.
+		// remain unread. This exercises historical selection, not just HTTP delay.
 		require.Greater(b, r.Samples-f.pending(), int64(c.CommitSize+256))
 		if r.Diagnostic {
 			r.BacklogHeap = metadataPipelineRetainedHeap(f)

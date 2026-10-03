@@ -1900,31 +1900,14 @@ func (a *headAppenderBase) Commit() (err error) {
 		a.closed = true
 	}()
 
-	metadataPending := a.nativeMetricMetadata != nil
-	if metadataPending {
-		// The WAL watcher also polls, so notification ordering alone cannot
-		// prevent it from reading samples before their metadata is published.
-		// Background acquisition cannot fail and preserves Commit's context semantics.
-		_ = h.nativeMetricMetadata.publication.Acquire(context.Background(), 1)
-		defer func() {
-			if metadataPending {
-				h.nativeMetricMetadata.publication.Release(1)
-			}
-		}()
-	}
-
 	if err := a.log(true); err != nil {
 		_ = a.Rollback() // Most likely the same error will happen again.
 		return fmt.Errorf("write to WAL: %w", err)
 	}
 
-	if metadataPending {
-		// Publish before sample commits release their series reservations, and
-		// release the barrier before Notify, which can wait for queue shutdown.
-		a.commitNativeMetricMetadata()
-		h.nativeMetricMetadata.publication.Release(1)
-		metadataPending = false
-	}
+	// Merge native metadata before sample commits release their series
+	// reservations. Senders read it from the WAL, not from the Head.
+	a.commitNativeMetricMetadata()
 
 	if h.writeNotified != nil {
 		h.writeNotified.Notify()

@@ -72,6 +72,19 @@ type WriteTo interface {
 	SeriesReset(int)
 }
 
+// NativeMetadataWriteTo is a WriteTo that forwards native metadata histories.
+// A watcher passes it every metadata entry in WAL order, instead of legacy
+// metadata. Merge groups are not idempotent, so each replay starts from reset
+// state and reads segments only after the last checkpoint's own.
+type NativeMetadataWriteTo interface {
+	WriteTo
+	// StoreNativeMetadata applies entries in WAL order. It must not retain the
+	// entries or their points, but may retain their strings.
+	StoreNativeMetadata([]record.RefNativeMetadata)
+	// ResetNativeMetadata discards all native metadata before a replay.
+	ResetNativeMetadata()
+}
+
 // WriteNotified notifies the watcher that data has been written so that it can read.
 type WriteNotified interface {
 	Notify()
@@ -90,6 +103,7 @@ type WatcherMetrics struct {
 type Watcher struct {
 	name           string
 	writer         WriteTo
+	native         NativeMetadataWriteTo // Set when writer forwards native metadata.
 	recordBuf      *record.BuffersPool
 	logger         *slog.Logger
 	walDir         string
@@ -116,6 +130,8 @@ type Watcher struct {
 
 	// For testing, stop when we hit this segment.
 	MaxSegment int
+	// For testing, called after each replay of the last checkpoint.
+	testAfterCheckpoint func()
 }
 
 func NewWatcherMetrics(reg prometheus.Registerer) *WatcherMetrics {
@@ -209,10 +225,15 @@ func NewWatcher(
 	if recordBuf == nil {
 		recordBuf = record.NewBuffersPool()
 	}
+	var native NativeMetadataWriteTo
+	if sendMetadata {
+		native, _ = writer.(NativeMetadataWriteTo)
+	}
 	return &Watcher{
 		logger:         logger,
 		recordBuf:      recordBuf,
 		writer:         writer,
+		native:         native,
 		metrics:        metrics,
 		readerMetrics:  readerMetrics,
 		walDir:         filepath.Join(dir, "wal"),
@@ -311,24 +332,12 @@ func (w *Watcher) Run() error {
 	w.logger.Info("Replaying WAL", "queue", w.name)
 
 	// Backfill from the checkpoint first if it exists.
-	lastCheckpoint, checkpointIndex, err := LastCheckpoint(w.walDir)
-	if err != nil && !errors.Is(err, record.ErrNotFound) {
-		return fmt.Errorf("tsdb.LastCheckpoint: %w", err)
-	}
-
-	if err == nil {
-		if err = w.readCheckpoint(lastCheckpoint, (*Watcher).readSegment); err != nil {
-			return fmt.Errorf("readCheckpoint: %w", err)
-		}
-	}
-	w.lastCheckpoint = lastCheckpoint
-
-	currentSegment, err := w.findSegmentForIndex(checkpointIndex)
+	currentSegment, err := w.replayCheckpoint()
 	if err != nil {
 		return err
 	}
 
-	w.logger.Debug("Tailing WAL", "lastCheckpoint", lastCheckpoint, "checkpointIndex", checkpointIndex, "currentSegment", currentSegment, "lastSegment", lastSegment)
+	w.logger.Debug("Tailing WAL", "lastCheckpoint", w.lastCheckpoint, "currentSegment", currentSegment, "lastSegment", lastSegment)
 	for !isClosed(w.quit) {
 		w.currentSegmentMetric.Set(float64(currentSegment))
 
@@ -348,6 +357,43 @@ func (w *Watcher) Run() error {
 	}
 
 	return nil
+}
+
+// replayCheckpoint reads the last checkpoint, if any, and returns the first
+// segment to read after it. For native metadata, that is the segment after the
+// checkpoint's own. If a newer checkpoint deleted it, replay restarts from the
+// newer checkpoint.
+func (w *Watcher) replayCheckpoint() (int, error) {
+	for {
+		if w.native != nil {
+			w.native.ResetNativeMetadata()
+		}
+		lastCheckpoint, checkpointIndex, err := LastCheckpoint(w.walDir)
+		if err != nil && !errors.Is(err, record.ErrNotFound) {
+			return -1, fmt.Errorf("tsdb.LastCheckpoint: %w", err)
+		}
+		if err == nil {
+			if err = w.readCheckpoint(lastCheckpoint, (*Watcher).readSegment); err != nil {
+				return -1, fmt.Errorf("readCheckpoint: %w", err)
+			}
+		}
+		w.lastCheckpoint = lastCheckpoint
+		if hook := w.testAfterCheckpoint; hook != nil {
+			hook()
+		}
+		if w.native == nil || lastCheckpoint == "" {
+			return w.findSegmentForIndex(checkpointIndex)
+		}
+		segment, err := w.findSegmentForIndex(checkpointIndex + 1)
+		if err != nil || segment == checkpointIndex+1 {
+			return segment, err
+		}
+		if newer, _, err := LastCheckpoint(w.walDir); err == nil && newer != lastCheckpoint {
+			continue
+		}
+		w.logger.Warn("WAL segments are missing after the last checkpoint", "checkpoint", lastCheckpoint, "next_segment", segment)
+		return segment, nil
+	}
 }
 
 // findSegmentForIndex finds the first segment greater than or equal to index.
@@ -654,23 +700,23 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 			if !w.sendMetadata {
 				break
 			}
-			// Native metadata entries are not forwarded; senders look up
-			// native metadata instead.
-			nativeEntries, nativePoints, err = dec.NativeMetadata(rec, nativeEntries[:0], nativePoints[:0])
+			if w.native != nil {
+				nativeEntries, nativePoints, err = dec.NativeMetadata(rec, nativeEntries[:0], nativePoints[:0])
+				if err != nil {
+					w.recordDecodeFailsMetric.Inc()
+					return err
+				}
+				w.native.StoreNativeMetadata(nativeEntries)
+				clear(nativeEntries)
+				clear(nativePoints)
+				break
+			}
+			metadata, err = dec.Metadata(rec, metadata[:0])
 			if err != nil {
 				w.recordDecodeFailsMetric.Inc()
 				return err
 			}
-			metadata = metadata[:0]
-			for _, e := range nativeEntries {
-				if e.Kind == record.NativeMetadataLegacy {
-					p := e.Points[0]
-					metadata = append(metadata, record.RefMetadata{Ref: e.Ref, Type: p.Type, Unit: p.Unit, Help: p.Help})
-				}
-			}
-			if len(metadata) > 0 {
-				w.writer.StoreMetadata(metadata)
-			}
+			w.writer.StoreMetadata(metadata)
 
 		case record.Unknown:
 			// Could be corruption, or reading from a WAL from a newer Prometheus.

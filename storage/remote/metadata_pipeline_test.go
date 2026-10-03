@@ -621,15 +621,11 @@ func (f *metadataPipeline) openDB(dir string) error {
 
 func (f *metadataPipeline) openSender(dir string) error {
 	c := f.config
-	var reader storage.NativeMetricMetadataReader
-	if c.Source == "native" {
-		reader = f.db
-	}
 	var reg prometheus.Registerer = f.registry
 	if f.diagnostics != nil && f.diagnostics.Accounting {
 		reg = &metadataPipelineDiagnosticRegisterer{Registerer: reg, watcher: f.diagnostics.watcher}
 	}
-	f.sender = NewStorage(nil, reg, f.db.StartTime, dir, 5*time.Second, nil, false, reader)
+	f.sender = NewStorage(nil, reg, f.db.StartTime, dir, 5*time.Second, nil, false, c.Source == "native")
 	rw := baseRemoteWriteConfig(f.receiver.address)
 	rw.ProtobufMessage = remoteapi.WriteV2MessageType
 	rw.SendExemplars, rw.SendNativeHistograms = c.Mixed, c.Mixed

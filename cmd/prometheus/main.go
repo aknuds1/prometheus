@@ -950,15 +950,13 @@ func main() {
 	template.RegisterFeatures(features.DefaultRegistry)
 
 	var (
-		localStorage   = &readyStorage{stats: tsdb.NewDBStats()}
-		scraper        = &readyScrapeManager{}
-		metadataReader storage.NativeMetricMetadataReader
+		localStorage = &readyStorage{stats: tsdb.NewDBStats()}
+		scraper      = &readyScrapeManager{}
+		// Native metadata is forwarded from the WAL, as merged by the TSDB.
+		nativeMetadata = cfg.tsdb.EnableNativeMetadata && !agentMode
 	)
-	if cfg.tsdb.EnableNativeMetadata && !agentMode {
-		metadataReader = localStorage
-	}
 	var (
-		remoteStorage = remote.NewStorage(logger.With("component", "remote"), prometheus.DefaultRegisterer, localStorage.StartTime, localStoragePath, time.Duration(cfg.RemoteFlushDeadline), scraper, cfg.scrape.EnableTypeAndUnitLabels, metadataReader)
+		remoteStorage = remote.NewStorage(logger.With("component", "remote"), prometheus.DefaultRegisterer, localStorage.StartTime, localStoragePath, time.Duration(cfg.RemoteFlushDeadline), scraper, cfg.scrape.EnableTypeAndUnitLabels, nativeMetadata)
 		fanoutStorage = storage.NewFanout(logger, localStorage, remoteStorage)
 	)
 
@@ -1956,18 +1954,6 @@ func (s *readyStorage) NativeMetricMetadata(ctx context.Context, matcherSets [][
 		}
 	}
 	return nil, false, tsdb.ErrNotReady
-}
-
-// LookupNativeMetricMetadata implements storage.NativeMetricMetadataReader.
-// Storage that is not ready or does not support native metadata yields misses.
-func (s *readyStorage) LookupNativeMetricMetadata(ctx context.Context, lookups []storage.NativeMetricMetadataLookup) error {
-	if reader, ok := s.get().(storage.NativeMetricMetadataReader); ok {
-		return reader.LookupNativeMetricMetadata(ctx, lookups)
-	}
-	for i := range lookups {
-		lookups[i].Metadata = nil
-	}
-	return ctx.Err()
 }
 
 // Appender implements the Storage interface.

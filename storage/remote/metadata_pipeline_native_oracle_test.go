@@ -14,10 +14,13 @@
 package remote
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -228,5 +231,28 @@ func TestRemoteWriteMetadataPipelineNativeOracles(t *testing.T) {
 			}
 		}
 		require.Equal(t, 2+2, groups)
+	})
+
+	t.Run("sender heap attribution", func(t *testing.T) {
+		defer func(rate int) { runtime.MemProfileRate = rate }(runtime.MemProfileRate)
+		runtime.MemProfileRate = 1
+		const series, help = 200, 4096
+		c := metadataPipelineConfig{Case: "unchanged", Source: "native", Series: series, Values: series, HelpBytes: help, Sweeps: 2, Writers: 2, Shards: 2, Batch: 50, Capacity: 100, CommitSize: 50, ReceiverProcs: 2, Base: time.Now().Add(time.Hour).UnixMilli()}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		f, err := newMetadataPipeline(ctx, c)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, f.close()) }()
+		require.NoError(t, f.open(t.TempDir()))
+		require.NoError(t, f.append(ctx, 0, c.Sweeps))
+		_, err = f.drain(ctx, f.expectedItems(c.Sweeps+1))
+		require.NoError(t, err)
+		a, err := metadataPipelineSenderHeap()
+		require.NoError(t, err)
+		// Native histories retain the strings the watcher decoded.
+		decoded := a.SenderBytesByFunction["github.com/prometheus/prometheus/tsdb/wlog.(*Watcher).readSegment"]
+		t.Logf("sender %d (decoded by the watcher %d), fixture %d, other %d, profiled %d, heap %d", a.Sender, decoded, a.Fixture, a.Other, a.ProfiledInUse, a.HeapAlloc)
+		require.GreaterOrEqual(t, decoded, int64(series*help))
+		require.Less(t, a.Sender, int64(a.ProfiledInUse))
 	})
 }

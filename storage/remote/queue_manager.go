@@ -45,8 +45,8 @@ import (
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	"github.com/prometheus/prometheus/schema"
 	"github.com/prometheus/prometheus/scrape"
-	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/nativemetadata"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/tsdb/wlog"
 	"github.com/prometheus/prometheus/util/compression"
@@ -86,6 +86,7 @@ type queueManagerMetrics struct {
 	droppedExemplarsTotal  *prometheus.CounterVec
 	droppedHistogramsTotal *prometheus.CounterVec
 	enqueueRetriesTotal    prometheus.Counter
+	unknownMetadataTotal   prometheus.Counter
 	sentBatchDuration      prometheus.Histogram
 	highestTimestamp       *maxTimestamp
 	highestSentTimestamp   *maxTimestamp
@@ -223,6 +224,13 @@ func newQueueManagerMetrics(r prometheus.Registerer, rn, e string) *queueManager
 		Help:        "Total number of times enqueue has failed because a shards queue was full.",
 		ConstLabels: constLabels,
 	})
+	m.unknownMetadataTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace:   namespace,
+		Subsystem:   subsystem,
+		Name:        "native_metadata_unknown_entries_total",
+		Help:        "Total number of native metadata WAL entries of unknown kind, applied as single-point overrides.",
+		ConstLabels: constLabels,
+	})
 	m.sentBatchDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace:                       namespace,
 		Subsystem:                       subsystem,
@@ -352,6 +360,7 @@ func (m *queueManagerMetrics) register() {
 			m.droppedExemplarsTotal,
 			m.droppedHistogramsTotal,
 			m.enqueueRetriesTotal,
+			m.unknownMetadataTotal,
 			m.sentBatchDuration,
 			m.highestTimestamp,
 			m.highestSentTimestamp,
@@ -388,6 +397,7 @@ func (m *queueManagerMetrics) unregister() {
 		m.reg.Unregister(m.droppedExemplarsTotal)
 		m.reg.Unregister(m.droppedHistogramsTotal)
 		m.reg.Unregister(m.enqueueRetriesTotal)
+		m.reg.Unregister(m.unknownMetadataTotal)
 		m.reg.Unregister(m.sentBatchDuration)
 		m.reg.Unregister(m.highestTimestamp)
 		m.reg.Unregister(m.highestSentTimestamp)
@@ -443,11 +453,15 @@ type QueueManager struct {
 	protoMsg    remoteapi.WriteMessageType
 	compr       compression.Type
 
-	seriesMtx      sync.Mutex // Covers seriesLabels, seriesMetadata, droppedSeries and builder.
+	seriesMtx      sync.Mutex // Covers seriesLabels, seriesMetadata, seriesNativeMetadata, nativePoints, droppedSeries and builder.
 	seriesLabels   map[chunks.HeadSeriesRef]labels.Labels
 	seriesMetadata map[chunks.HeadSeriesRef]*metadata.Metadata
-	droppedSeries  map[chunks.HeadSeriesRef]struct{}
-	builder        *labels.Builder
+	// seriesNativeMetadata holds native metadata histories reduced from the
+	// WAL in order, by WAL ref, including refs whose series record is unread.
+	seriesNativeMetadata map[chunks.HeadSeriesRef]nativemetadata.State
+	nativePoints         []nativemetadata.Point
+	droppedSeries        map[chunks.HeadSeriesRef]struct{}
+	builder              *labels.Builder
 
 	seriesSegmentMtx     sync.Mutex // Covers seriesSegmentIndexes - if you also lock seriesMtx, take seriesMtx first.
 	seriesSegmentIndexes map[chunks.HeadSeriesRef]int
@@ -464,12 +478,12 @@ type QueueManager struct {
 	interner             *pool
 	highestRecvTimestamp *maxTimestamp
 
-	metadataReader  storage.NativeMetricMetadataReader
-	metadataContext context.Context
-	cancelMetadata  context.CancelFunc
 	// waitForCapacity makes RW2 producers wait for queue capacity or replacement
 	// shards instead of retrying with backoff. It is immutable.
 	waitForCapacity bool
+	// nativeMetadata labels each item with the native metadata version in
+	// effect at its timestamp, as of its WAL position. It is immutable.
+	nativeMetadata bool
 }
 
 // NewQueueManager builds a new QueueManager and starts a new
@@ -499,7 +513,7 @@ func NewQueueManager(
 	protoMsg remoteapi.WriteMessageType,
 	recordBuf *record.BuffersPool,
 	failedRequestLogging bool,
-	metadataReader storage.NativeMetricMetadataReader,
+	nativeMetadata bool,
 ) *QueueManager {
 	if logger == nil {
 		logger = promslog.NewNopLogger()
@@ -550,12 +564,14 @@ func NewQueueManager(
 
 	walMetadata := t.protoMsg != remoteapi.WriteV1MessageType
 	t.waitForCapacity = walMetadata
-	if walMetadata && metadataReader != nil {
-		t.metadataReader = metadataReader
-		t.metadataContext, t.cancelMetadata = context.WithCancel(context.Background())
+	var writer wlog.WriteTo = t
+	if walMetadata && nativeMetadata {
+		t.nativeMetadata = true
+		t.seriesNativeMetadata = make(map[chunks.HeadSeriesRef]nativemetadata.State)
+		writer = nativeMetadataWriter{t}
 	}
 
-	t.watcher = wlog.NewWatcher(watcherMetrics, readerMetrics, logger, client.Name(), t, dir, enableExemplarRemoteWrite, enableNativeHistogramRemoteWrite, walMetadata, recordBuf)
+	t.watcher = wlog.NewWatcher(watcherMetrics, readerMetrics, logger, client.Name(), writer, dir, enableExemplarRemoteWrite, enableNativeHistogramRemoteWrite, walMetadata, recordBuf)
 
 	// MetadataWatcher sends separate metric-family metadata for RW1. RW2
 	// instead includes per-series metadata from native storage or WAL records.
@@ -740,8 +756,6 @@ func isV2TimeSeriesOldFilter(metrics *queueManagerMetrics, baseTime time.Time, s
 // Append queues a sample to be sent to the remote storage. Blocks until all samples are
 // enqueued on their shards or a shutdown signal is received.
 func (t *QueueManager) Append(samples []record.RefSample) bool {
-	batch := t.getNativeMetadataBatch()
-	defer batch.release()
 	currentTime := time.Now()
 outer:
 	for _, s := range samples {
@@ -764,18 +778,11 @@ outer:
 		}
 		// TODO(cstyan): Handle or at least log an error if no metadata is found.
 		// See https://github.com/prometheus/prometheus/issues/14405
-		meta := t.seriesMetadata[s.Ref]
+		meta := t.metadataAtLocked(s.Ref, s.T)
 		t.seriesMtx.Unlock()
 		ts := timeSeries{
 			seriesLabels: lbls, metadata: meta, startTimestamp: s.ST,
 			timestamp: s.T, value: s.V, sType: tSample,
-		}
-		if batch != nil {
-			batch.series[batch.count] = ts
-			if !batch.append(t, s.Ref) {
-				return false
-			}
-			continue
 		}
 		if t.waitForCapacity {
 			if !t.shards.enqueueWait(s.Ref, ts) {
@@ -808,15 +815,13 @@ outer:
 			}
 		}
 	}
-	return batch.flush(t)
+	return true
 }
 
 func (t *QueueManager) AppendExemplars(exemplars []record.RefExemplar) bool {
 	if !t.sendExemplars {
 		return true
 	}
-	batch := t.getNativeMetadataBatch()
-	defer batch.release()
 	currentTime := time.Now()
 outer:
 	for _, e := range exemplars {
@@ -838,18 +843,11 @@ outer:
 			t.seriesMtx.Unlock()
 			continue
 		}
-		meta := t.seriesMetadata[e.Ref]
+		meta := t.metadataAtLocked(e.Ref, e.T)
 		t.seriesMtx.Unlock()
 		ts := timeSeries{
 			seriesLabels: lbls, metadata: meta, timestamp: e.T, value: e.V,
 			exemplarLabels: e.Labels, sType: tExemplar,
-		}
-		if batch != nil {
-			batch.series[batch.count] = ts
-			if !batch.append(t, e.Ref) {
-				return false
-			}
-			continue
 		}
 		if t.waitForCapacity {
 			if !t.shards.enqueueWait(e.Ref, ts) {
@@ -877,15 +875,13 @@ outer:
 			}
 		}
 	}
-	return batch.flush(t)
+	return true
 }
 
 func (t *QueueManager) AppendHistograms(histograms []record.RefHistogramSample) bool {
 	if !t.sendNativeHistograms {
 		return true
 	}
-	batch := t.getNativeMetadataBatch()
-	defer batch.release()
 	currentTime := time.Now()
 outer:
 	for _, h := range histograms {
@@ -912,18 +908,11 @@ outer:
 			t.seriesMtx.Unlock()
 			continue
 		}
-		meta := t.seriesMetadata[h.Ref]
+		meta := t.metadataAtLocked(h.Ref, h.T)
 		t.seriesMtx.Unlock()
 		ts := timeSeries{
 			seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
 			timestamp: h.T, histogram: h.H, sType: tHistogram,
-		}
-		if batch != nil {
-			batch.series[batch.count] = ts
-			if !batch.append(t, h.Ref) {
-				return false
-			}
-			continue
 		}
 		if t.waitForCapacity {
 			if !t.shards.enqueueWait(h.Ref, ts) {
@@ -951,15 +940,13 @@ outer:
 			}
 		}
 	}
-	return batch.flush(t)
+	return true
 }
 
 func (t *QueueManager) AppendFloatHistograms(floatHistograms []record.RefFloatHistogramSample) bool {
 	if !t.sendNativeHistograms {
 		return true
 	}
-	batch := t.getNativeMetadataBatch()
-	defer batch.release()
 	currentTime := time.Now()
 outer:
 	for _, h := range floatHistograms {
@@ -986,18 +973,11 @@ outer:
 			t.seriesMtx.Unlock()
 			continue
 		}
-		meta := t.seriesMetadata[h.Ref]
+		meta := t.metadataAtLocked(h.Ref, h.T)
 		t.seriesMtx.Unlock()
 		ts := timeSeries{
 			seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
 			timestamp: h.T, floatHistogram: h.FH, sType: tFloatHistogram,
-		}
-		if batch != nil {
-			batch.series[batch.count] = ts
-			if !batch.append(t, h.Ref) {
-				return false
-			}
-			continue
 		}
 		if t.waitForCapacity {
 			if !t.shards.enqueueWait(h.Ref, ts) {
@@ -1025,7 +1005,7 @@ outer:
 			}
 		}
 	}
-	return batch.flush(t)
+	return true
 }
 
 // Start the queue manager sending samples to the remote storage.
@@ -1057,9 +1037,6 @@ func (t *QueueManager) Stop() {
 	defer t.logger.Info("Remote storage stopped.")
 
 	close(t.quit)
-	if t.cancelMetadata != nil {
-		t.cancelMetadata()
-	}
 	// Wait for all QueueManager routines to end before stopping shards, metadata watcher, and WAL watcher. This
 	// is to ensure we don't end up executing a reshard and shards.stop() at the same time, which
 	// causes a closed channel panic.
@@ -1111,6 +1088,47 @@ func (t *QueueManager) StoreMetadata(meta []record.RefMetadata) {
 	}
 }
 
+// metadataAtLocked returns the metadata to send for ref's item at timestamp
+// ts, or nil. The caller holds seriesMtx.
+func (t *QueueManager) metadataAtLocked(ref chunks.HeadSeriesRef, ts int64) *metadata.Metadata {
+	if t.nativeMetadata {
+		state := t.seriesNativeMetadata[ref]
+		return state.At(ts)
+	}
+	return t.seriesMetadata[ref]
+}
+
+// nativeMetadataWriter is the watcher's destination for queues that forward
+// native metadata.
+type nativeMetadataWriter struct{ *QueueManager }
+
+// StoreNativeMetadata implements wlog.NativeMetadataWriteTo.
+func (w nativeMetadataWriter) StoreNativeMetadata(entries []record.RefNativeMetadata) {
+	t := w.QueueManager
+	t.seriesMtx.Lock()
+	defer t.seriesMtx.Unlock()
+	for _, e := range entries {
+		if e.Ref == 0 {
+			continue
+		}
+		t.nativePoints = nativemetadata.AppendRecordPoints(t.nativePoints[:0], e.Points, walMetadataInterner.intern)
+		state := t.seriesNativeMetadata[e.Ref]
+		if state.Apply(e.Kind, e.Truncated, t.nativePoints) {
+			t.metrics.unknownMetadataTotal.Inc()
+		}
+		t.seriesNativeMetadata[e.Ref] = state
+	}
+	clear(t.nativePoints)
+}
+
+// ResetNativeMetadata implements wlog.NativeMetadataWriteTo.
+func (w nativeMetadataWriter) ResetNativeMetadata() {
+	t := w.QueueManager
+	t.seriesMtx.Lock()
+	defer t.seriesMtx.Unlock()
+	clear(t.seriesNativeMetadata)
+}
+
 // UpdateSeriesSegment updates the segment number held against the series,
 // so we can trim older ones in SeriesReset.
 func (t *QueueManager) UpdateSeriesSegment(series []record.RefSeries, index int) {
@@ -1132,12 +1150,14 @@ func (t *QueueManager) SeriesReset(index int) {
 	// Check for series that are in segments older than the checkpoint
 	// that were not also present in the checkpoint.
 	for k, v := range t.seriesSegmentIndexes {
-		if v < index {
-			delete(t.seriesSegmentIndexes, k)
-			delete(t.seriesLabels, k)
-			delete(t.seriesMetadata, k)
-			delete(t.droppedSeries, k)
+		if v >= index {
+			continue
 		}
+		delete(t.seriesSegmentIndexes, k)
+		delete(t.seriesLabels, k)
+		delete(t.seriesMetadata, k)
+		delete(t.seriesNativeMetadata, k)
+		delete(t.droppedSeries, k)
 	}
 }
 

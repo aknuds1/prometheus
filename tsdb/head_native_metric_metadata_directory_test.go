@@ -166,10 +166,9 @@ func TestNativeMetricMetadataDirectory(t *testing.T) {
 			}
 		}
 		// This descriptor was detached by growth. Later deletion affects newer
-		// pages, so forwarding must check retirement even after resolving a pointer.
+		// pages; the captured series keeps its history unchanged.
 		series := nativeMetadataDirectorySeries(captured, 0)
 		require.NotNil(t, series)
-		require.NotZero(t, series.metadata.Load().native.flags.Load()&nativeMetadataRetired)
 		require.Equal(t, "test", series.metadata.Load().native.Metadata.Help)
 		require.Zero(t, store.versions.Load())
 	})

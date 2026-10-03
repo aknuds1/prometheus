@@ -47,7 +47,6 @@ import (
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	"github.com/prometheus/prometheus/schema"
 	"github.com/prometheus/prometheus/scrape"
-	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/util/compression"
@@ -141,7 +140,7 @@ func TestBasicContentNegotiation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false, nil)
+			s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false, false)
 			defer s.Close()
 
 			recs := testwal.GenerateRecords(recCase{
@@ -226,7 +225,7 @@ func TestSampleDelivery(t *testing.T) {
 		} {
 			t.Run(fmt.Sprintf("proto=%s/case=%s", protoMsg, rc.Name), func(t *testing.T) {
 				dir := t.TempDir()
-				s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false, nil)
+				s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false, false)
 				defer s.Close()
 
 				rc.NoST = protoMsg == remoteapi.WriteV1MessageType // RW1 does not support ST.
@@ -304,19 +303,12 @@ func newTestClientAndQueueManager(t testing.TB, flushDeadline time.Duration, pro
 	return c, newTestQueueManager(t, cfg, mcfg, flushDeadline, c, protoMsg)
 }
 
-func newTestQueueManager(t testing.TB, cfg config.QueueConfig, mcfg config.MetadataConfig, deadline time.Duration, c WriteClient, protoMsg remoteapi.WriteMessageType, readers ...storage.NativeMetricMetadataReader) *QueueManager {
-	var reader storage.NativeMetricMetadataReader
-	if len(readers) > 0 {
-		reader = readers[0]
-	}
+// newTestQueueManager returns a queue manager that forwards native metadata
+// if nativeMetadata holds true.
+func newTestQueueManager(t testing.TB, cfg config.QueueConfig, mcfg config.MetadataConfig, deadline time.Duration, c WriteClient, protoMsg remoteapi.WriteMessageType, nativeMetadata ...bool) *QueueManager {
 	dir := t.TempDir()
 	metrics := newQueueManagerMetrics(nil, "", "")
-	m := NewQueueManager(metrics, nil, nil, nil, dir, newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, labels.EmptyLabels(), nil, c, deadline, newPool(), newHighestTimestampMetric(), nil, false, false, false, protoMsg, record.NewBuffersPool(), false, reader)
-	if m.cancelMetadata != nil {
-		t.Cleanup(m.cancelMetadata)
-	}
-
-	return m
+	return NewQueueManager(metrics, nil, nil, nil, dir, newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, labels.EmptyLabels(), nil, c, deadline, newPool(), newHighestTimestampMetric(), nil, false, false, false, protoMsg, record.NewBuffersPool(), false, len(nativeMetadata) > 0 && nativeMetadata[0])
 }
 
 func testDefaultQueueConfig() config.QueueConfig {
@@ -355,7 +347,7 @@ func TestMetadataDelivery(t *testing.T) {
 
 func TestWALMetadataDelivery(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false, nil)
+	s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false, false)
 	defer s.Close()
 
 	cfg := config.DefaultQueueConfig
@@ -802,7 +794,7 @@ func TestDisableReshardOnRetry(t *testing.T) {
 		}
 	)
 
-	m := NewQueueManager(metrics, nil, nil, nil, "", newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, labels.EmptyLabels(), nil, client, 0, newPool(), newHighestTimestampMetric(), nil, false, false, false, remoteapi.WriteV1MessageType, nil, false, nil)
+	m := NewQueueManager(metrics, nil, nil, nil, "", newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, labels.EmptyLabels(), nil, client, 0, newPool(), newHighestTimestampMetric(), nil, false, false, false, remoteapi.WriteV1MessageType, nil, false, false)
 	m.StoreSeries(recs.Series, 0)
 
 	// Attempt to samples while the manager is running. We immediately stop the
@@ -1410,7 +1402,7 @@ func BenchmarkStoreSeries(b *testing.B) {
 				mcfg := config.DefaultMetadataConfig
 				metrics := newQueueManagerMetrics(nil, "", "")
 
-				m := NewQueueManager(metrics, nil, nil, nil, dir, newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, labels.EmptyLabels(), nil, c, defaultFlushDeadline, newPool(), newHighestTimestampMetric(), nil, false, false, false, remoteapi.WriteV1MessageType, record.NewBuffersPool(), false, nil)
+				m := NewQueueManager(metrics, nil, nil, nil, dir, newEWMARate(ewmaWeight, shardUpdateDuration), cfg, mcfg, labels.EmptyLabels(), nil, c, defaultFlushDeadline, newPool(), newHighestTimestampMetric(), nil, false, false, false, remoteapi.WriteV1MessageType, record.NewBuffersPool(), false, false)
 				m.externalLabels = tc.externalLabels
 				m.relabelConfigs = tc.relabelConfigs
 
@@ -1812,7 +1804,7 @@ func TestQueueCapacityNotification(t *testing.T) {
 
 	t.Run("multiple producers retry without reservations", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error { return nil }))
+			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType)
 			q := newQueue(1, 1)
 			q.notifyCapacity = true
 			qm.shards.queues = []*queue{q}
@@ -1838,7 +1830,7 @@ func TestQueueCapacityNotification(t *testing.T) {
 func TestShardsEnqueueWakeup(t *testing.T) {
 	t.Run("quit while waiting for replacement", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error { return nil }))
+			qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType)
 			qm.shards.softShutdown = make(chan struct{})
 			close(qm.shards.softShutdown)
 			done := make(chan bool, 1)
@@ -1870,7 +1862,7 @@ func TestShardsEnqueueWakeup(t *testing.T) {
 				cfg := testDefaultQueueConfig()
 				cfg.MaxSamplesPerSend, cfg.Capacity = 1, 1
 				cfg.BatchSendDeadline = model.Duration(time.Hour)
-				qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, time.Second, client, remoteapi.WriteV2MessageType, nativeMetadataReaderFunc(func(context.Context, []storage.NativeMetricMetadataLookup) error { return nil }))
+				qm := newTestQueueManager(t, cfg, config.DefaultMetadataConfig, time.Second, client, remoteapi.WriteV2MessageType)
 				qm.shards.start(1)
 				data := timeSeries{seriesLabels: labels.FromStrings("__name__", "test"), timestamp: 1000}
 				require.True(t, qm.shards.enqueueWait(1, data))

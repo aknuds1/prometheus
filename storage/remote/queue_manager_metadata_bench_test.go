@@ -14,7 +14,6 @@
 package remote
 
 import (
-	"context"
 	"fmt"
 	"runtime"
 	"strconv"
@@ -36,27 +35,19 @@ import (
 	"github.com/prometheus/prometheus/util/compression"
 )
 
-// BenchmarkQueueManagerMetadataAppend isolates staging from Head lookup and
-// encoding costs by returning fixed metadata from the native reader.
+// BenchmarkQueueManagerMetadataAppend isolates metadata selection from WAL
+// reading and encoding costs, with one fixed version per series.
 func BenchmarkQueueManagerMetadataAppend(b *testing.B) {
 	const numSeries = 1000
 	for _, kind := range []string{"samples", "exemplars", "histograms", "float histograms"} {
 		for _, source := range []string{"legacy", "native"} {
 			b.Run(kind+"/source="+source, func(b *testing.B) {
 				m := metadata.Metadata{Type: model.MetricTypeCounter, Help: "fixed metadata", Unit: "seconds"}
-				var reader storage.NativeMetricMetadataReader
-				if source == "native" {
-					reader = nativeMetadataReaderFunc(func(_ context.Context, lookups []storage.NativeMetricMetadataLookup) error {
-						for i := range lookups {
-							lookups[i].Metadata = &m
-						}
-						return nil
-					})
-				}
-				qm := newMetadataBenchmarkQueueManager(b, config.DefaultQueueConfig, config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, reader)
+				qm := newMetadataBenchmarkQueueManager(b, config.DefaultQueueConfig, config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, source == "native")
 				qm.sendExemplars, qm.sendNativeHistograms = true, true
 				series := make([]record.RefSeries, numSeries)
 				legacy := make([]record.RefMetadata, numSeries)
+				native := make([]record.RefNativeMetadata, numSeries)
 				samples := make([]record.RefSample, numSeries)
 				exemplars := make([]record.RefExemplar, numSeries)
 				histograms := make([]record.RefHistogramSample, numSeries)
@@ -65,6 +56,7 @@ func BenchmarkQueueManagerMetadataAppend(b *testing.B) {
 					ref := chunks.HeadSeriesRef(i + 1)
 					series[i] = record.RefSeries{Ref: ref, Labels: labels.FromStrings(labels.MetricName, "metric", "id", strconv.Itoa(i))}
 					legacy[i] = record.RefMetadata{Ref: ref, Type: record.GetMetricType(m.Type), Help: m.Help, Unit: m.Unit}
+					native[i] = record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{{EffectiveFrom: 100, Type: record.GetMetricType(m.Type), Help: m.Help, Unit: m.Unit}}}
 					samples[i] = record.RefSample{Ref: ref, ST: 100, T: 200, V: float64(i)}
 					exemplars[i] = record.RefExemplar{Ref: ref, T: 200, V: float64(i), Labels: labels.FromStrings("trace_id", strconv.Itoa(i))}
 					histograms[i] = record.RefHistogramSample{Ref: ref, ST: 100, T: 200, H: &histogram.Histogram{Count: 1, Sum: float64(i)}}
@@ -73,6 +65,8 @@ func BenchmarkQueueManagerMetadataAppend(b *testing.B) {
 				qm.StoreSeries(series, 0)
 				if source == "legacy" {
 					qm.StoreMetadata(legacy)
+				} else {
+					nativeMetadataWriter{qm}.StoreNativeMetadata(native)
 				}
 				appendItems := map[string]func() bool{
 					"samples":          func() bool { return qm.Append(samples) },
@@ -103,7 +97,7 @@ func BenchmarkQueueManagerMetadataAppend(b *testing.B) {
 }
 
 // BenchmarkQueueManagerMetadataAppendEncode compares identical RW2 payloads
-// obtained from legacy WAL metadata or native Head lookups. Encoding is synchronous
+// obtained from legacy or native WAL metadata. Encoding is synchronous
 // so no unfinished asynchronous sends are excluded from the timed work.
 // Run with -benchmem -count=6 and compare source sub-benchmarks with benchstat.
 func BenchmarkQueueManagerMetadataAppendEncode(b *testing.B) {
@@ -123,6 +117,7 @@ func BenchmarkQueueManagerMetadataAppendEncode(b *testing.B) {
 					series := make([]record.RefSeries, numSeries)
 					samples := make([]record.RefSample, numSeries)
 					legacy := make([]record.RefMetadata, numSeries)
+					var native []record.RefNativeMetadata
 					for version := range 2 {
 						app := head.AppenderV2(b.Context())
 						for i := range series {
@@ -137,18 +132,20 @@ func BenchmarkQueueManagerMetadataAppendEncode(b *testing.B) {
 							if state == "current" && version == 1 || state == "historical" && version == 0 {
 								legacy[i] = record.RefMetadata{Ref: chunks.HeadSeriesRef(ref), Type: record.GetMetricType(m.Type), Help: m.Help, Unit: m.Unit}
 							}
+							if !m.IsEmpty() {
+								native = append(native, record.RefNativeMetadata{Ref: chunks.HeadSeriesRef(ref), Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{{EffectiveFrom: int64(100 + version*100), Type: record.GetMetricType(m.Type), Help: m.Help, Unit: m.Unit}}})
+							}
 							samples[i] = record.RefSample{Ref: chunks.HeadSeriesRef(ref), T: map[string]int64{"current": 200, "historical": 100, "missing": 50, "absent": 200}[state], V: 1}
 						}
 						require.NoError(b, app.Commit())
 					}
-					var reader storage.NativeMetricMetadataReader
-					if source == "native" {
-						reader = head
-					}
-					qm := newMetadataBenchmarkQueueManager(b, config.DefaultQueueConfig, config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, reader)
+					qm := newMetadataBenchmarkQueueManager(b, config.DefaultQueueConfig, config.DefaultMetadataConfig, defaultFlushDeadline, NewNopWriteClient(), remoteapi.WriteV2MessageType, source == "native")
 					qm.StoreSeries(series, 0)
 					if source == "legacy" && (state == "current" || state == "historical") {
 						qm.StoreMetadata(legacy)
+					}
+					if source == "native" {
+						nativeMetadataWriter{qm}.StoreNativeMetadata(native)
 					}
 					q := newQueue(numSeries+1, numSeries+1)
 					qm.shards.queues = []*queue{q}
@@ -175,8 +172,8 @@ func BenchmarkQueueManagerMetadataAppendEncode(b *testing.B) {
 					}
 					b.StopTimer()
 					b.ReportMetric(float64(size), "wire-bytes/op")
-					// Validate the selected values without warming lookup scratch before
-					// a single-iteration run, which also exercises cold allocations.
+					// Validate the selected values after timing, so that a single-iteration
+					// run also exercises cold allocations.
 					require.True(b, qm.Append(samples))
 					for i, s := range q.batch {
 						if state == "current" || state == "historical" {
@@ -188,9 +185,9 @@ func BenchmarkQueueManagerMetadataAppendEncode(b *testing.B) {
 					}
 					clear(q.batch)
 					q.batch = q.batch[:0]
-					// Measure metadata retained by a backlog separately from lookup
-					// scratch and the queue's unchanged allocation. Two GCs discard
-					// sync.Pool victim caches as well as transient historical maps.
+					// Measure metadata retained by a backlog separately from the
+					// queue's unchanged allocation. Two GCs discard sync.Pool victim
+					// caches as well as transient historical maps.
 					const rounds = 100
 					q = newQueue(rounds*numSeries+1, rounds*numSeries+1)
 					qm.shards.queues[0] = q
