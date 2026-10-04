@@ -193,7 +193,8 @@ func benchmarkMetadataPipeline(b *testing.B, c metadataPipelineConfig) {
 }
 
 func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPipelineResult {
-	ctx, cancel := context.WithTimeout(b.Context(), 5*time.Minute)
+	timeout := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_TIMEOUT_MINUTES", 5)
+	ctx, cancel := context.WithTimeout(b.Context(), time.Duration(timeout)*time.Minute)
 	defer cancel()
 	dir := b.TempDir()
 	f, err := newMetadataPipeline(ctx, c)
@@ -334,8 +335,14 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	metrics, err := f.metrics()
 	require.NoError(b, err)
 	require.NoError(b, checkMetadataPipelineMetrics(metrics))
-	r.LifecycleWALBytes = metrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
-	r.WALBytes = r.LifecycleWALBytes - beforeWAL
+	walBytes := metrics["prometheus_tsdb_wal_record_parts_bytes_written_total"]
+	r.WALBytes = walBytes - beforeWAL
+	// A restart replaces the registry, so add the bytes written before it.
+	// Checkpoints are written without metrics and never count.
+	r.LifecycleWALBytes = walBytes
+	if r.Restart != nil {
+		r.LifecycleWALBytes += r.Restart.PreRestartWALBytes
+	}
 	require.NoError(b, d.begin(ctx, f, "db-close"))
 	closeStart := time.Now()
 	require.NoError(b, f.db.Close())
