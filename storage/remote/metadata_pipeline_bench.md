@@ -45,7 +45,8 @@ changes the default 200 measured sweeps (at most 400 to preserve native history)
 Backlog always uses four sweeps. Counts below the queue's capacity are not suitable
 for the backlog case. `PROMETHEUS_METADATA_PIPELINE_RECEIVER_PROCS` controls receiver
 `GOMAXPROCS` (default 2). `PROMETHEUS_METADATA_PIPELINE_HEAP=1` enables diagnostic GCs;
-its timings must not be used as throughput measurements. The cohort script pins
+its timings must not be used as throughput measurements.
+`PROMETHEUS_METADATA_PIPELINE_TIMEOUT_MINUTES` bounds one run (default 5). The cohort script pins
 these settings, so diagnostic overrides cannot silently change its workload.
 
 ## Workloads
@@ -311,11 +312,15 @@ written after the restart. It checks the checkpoint separately: every series is
 kept, and its metadata holds the whole history the build retains. Unknown-kind
 entry counters must be zero.
 
-Results report the seed's compressed WAL bytes (`SeedWALBytes`) separately from
-the measured phase's (`WALBytes`), and the decompressed record bytes of the
-retained segments (`WALPayloadBytes`), which include the seed but never the
-checkpoint. Restart runs also report the decompressed bytes of the segments
-written after the restart, and of the checkpoint.
+Results report compressed WAL bytes for the seed (`SeedWALBytes`), the measured
+phase (`WALBytes`) and the whole run (`LifecycleWALBytes`). In restart runs, the
+whole run includes the bytes written before the restart
+(`Restart.PreRestartWALBytes`). Checkpoints are never counted. Results also
+report the decompressed record bytes of the segments that remain at the end
+(`WALPayloadBytes`), never including the checkpoint. Truncation deletes the
+segments a checkpoint covers, so after a restart these no longer hold the seed.
+Restart runs also report the decompressed bytes of the segments written after
+the restart, and of the checkpoint.
 
 Heap passes need `-test.memprofilerate=1`. After the drain and two collections,
 with the queues alive, they attribute in-use heap by allocation stack: to the
