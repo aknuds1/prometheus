@@ -86,13 +86,15 @@ func (i *metadataInterner) internValue(m metadata.Metadata, borrowed bool) *meta
 }
 
 // newInternedValue returns a new value equal to m, owning copies of m's
-// strings if they are borrowed. Taking m's address here rather than in the
-// caller keeps hits from moving m to the heap.
+// strings if they are borrowed.
 func newInternedValue(m metadata.Metadata, borrowed bool) *metadata.Metadata {
 	if borrowed {
 		return ownMetadata(m)
 	}
-	return &m
+	// Copy m only in this branch: taking the parameter's address would move it
+	// to the heap on entry, allocating on the borrowed path too.
+	owned := m
+	return &owned
 }
 
 // ownMetadata returns a copy of m that does not alias m's memory. Known metric
@@ -109,10 +111,13 @@ func ownMetadata(m metadata.Metadata) *metadata.Metadata {
 	fields := [...]*string{&typ, &owned.Unit, &owned.Help}
 	size, count := 0, 0
 	for _, f := range fields {
-		if *f != "" {
-			size += len(*f)
-			count++
+		if *f == "" {
+			// An empty substring still refers to its backing.
+			*f = ""
+			continue
 		}
+		size += len(*f)
+		count++
 	}
 	switch count {
 	case 0:
