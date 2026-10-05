@@ -31,6 +31,10 @@ func stageAPreparePreLog(testing.TB, stageAWriterCase) (func() int, func(), stri
 	return nil, nil, "no pre-log pass"
 }
 
+func stageANativeRecordStarts(testing.TB, []byte) []stageAStart {
+	panic("stage A: no native metadata records on this base")
+}
+
 func stageAEncodeNativeRecord([]stageAChange, []byte) ([]byte, bool) { return nil, false }
 
 func stageANativeEncodeWork([]stageAChange, *[]byte) func() {
