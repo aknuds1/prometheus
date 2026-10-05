@@ -104,6 +104,28 @@ func TestHistory(t *testing.T) {
 		require.Zero(t, empty.Len())
 		require.Equal(t, 2, h.Len())
 	})
+	t.Run("merges grow older versions to one, then to the version bound", func(t *testing.T) {
+		var h History
+		var capacities []int
+		for i, help := range []string{"A", "B", "C", "D", "E", "F"} {
+			h.Merge(points(fmt.Sprintf("%s@%d", help, 10*(i+1))))
+			capacities = append(capacities, cap(h.Older))
+		}
+		require.Equal(t, []int{0, 1, MaxVersions - 1, MaxVersions - 1, MaxVersions - 1, MaxVersions - 1}, capacities)
+		// An out-of-order merge takes the overlapping path.
+		overlapping := history("A@10 B@20")
+		require.Equal(t, 1, cap(overlapping.Older))
+		overlapping.Merge(points("C@15"))
+		require.Equal(t, "A@10 C@15 B@20", format(&overlapping))
+		require.Equal(t, MaxVersions-1, cap(overlapping.Older))
+		// Replace keeps growing by append.
+		replaced := history("A@10 B@20 C@30")
+		require.Equal(t, 2, cap(replaced.Older))
+		for i := range 1000 {
+			replaced.Merge(points(fmt.Sprintf("X%d@%d", i%3, 40+i*7%50)))
+			require.LessOrEqual(t, cap(replaced.Older), MaxVersions-1)
+		}
+	})
 	t.Run("replace coalesces adjacent values", func(t *testing.T) {
 		h := history("A@1 A@2 B@3 B@4 A@5")
 		require.Equal(t, "A@1 B@3 A@5", format(&h))

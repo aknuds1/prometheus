@@ -252,7 +252,8 @@ func TestNativeMetricMetadataStore(t *testing.T) {
 	t.Run("older storage grows lazily and is reused at the cap", func(t *testing.T) {
 		series := &memSeries{}
 		native := &nativeSeriesMetadata{}
-		capacities := []int{0, 1, 2, 4, 4}
+		// One older version keeps its own allocation; more grow to the cap.
+		capacities := []int{0, 1, 4, 4, 4}
 		for i, capacity := range capacities {
 			point := makeNativeMetricMetadataPoint(int64(i), metadata.Metadata{Help: strconv.Itoa(i)})
 			series.Lock()

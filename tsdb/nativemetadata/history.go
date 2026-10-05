@@ -124,7 +124,7 @@ func (h *History) Merge(observations []Point) (versionDelta, evictions int) {
 					evictions++
 				} else {
 					if len(h.Older) == cap(h.Older) {
-						grown := make([]Point, len(h.Older), max(1, 2*cap(h.Older)))
+						grown := make([]Point, len(h.Older), olderCapacity(len(h.Older)+1))
 						copy(grown, h.Older)
 						h.Older = grown
 					}
@@ -141,11 +141,7 @@ func (h *History) Merge(observations []Point) (versionDelta, evictions int) {
 		versions, evictions = mergeOverlapping(existing[:count+1], observations, retained[:0])
 		olderCount := len(versions) - 1
 		if cap(h.Older) < olderCount {
-			capacity := 1
-			for capacity < olderCount {
-				capacity *= 2
-			}
-			h.Older = make([]Point, olderCount, capacity)
+			h.Older = make([]Point, olderCount, olderCapacity(olderCount))
 		} else {
 			if len(h.Older) > olderCount {
 				clear(h.Older[olderCount:])
@@ -214,6 +210,16 @@ func mergeOverlapping(existing, observations, versions []Point) ([]Point, int) {
 		versions = append(versions, retained[(start+i)%len(retained)])
 	}
 	return versions, evictions
+}
+
+// olderCapacity returns the capacity merges give older versions that must hold
+// n points: a single older version keeps its own allocation, and more grow
+// straight to the version bound.
+func olderCapacity(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	return MaxVersions - 1
 }
 
 // Equal reports whether a and b are both nil or hold equal metadata.
