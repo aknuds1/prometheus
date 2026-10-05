@@ -60,9 +60,12 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 		start := uintptr(unsafe.Pointer(unsafe.StringData(backing)))
 		inBacking := func(s string) bool {
 			p := uintptr(unsafe.Pointer(unsafe.StringData(s)))
-			return s != "" && p >= start && p < start+uintptr(len(backing))
+			return p >= start && p < start+uintptr(len(backing))
 		}
 		counter, custom, unit, help := backing[:7], backing[7:13], backing[13:20], backing[20:31]
+		// Zero-length substrings still refer to the backing.
+		empty := backing[40:40]
+		require.True(t, inBacking(empty))
 		for _, tc := range []struct {
 			name   string
 			input  metadata.Metadata
@@ -75,6 +78,10 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 			{"empty type", metadata.Metadata{Unit: unit, Help: help}, 2},
 			{"unknown type", metadata.Metadata{Type: model.MetricType(custom), Unit: unit, Help: help}, 2},
 			{"unknown type alone", metadata.Metadata{Type: model.MetricType(custom)}, 2},
+			{"empty substrings", metadata.Metadata{Type: model.MetricType(empty), Unit: empty, Help: empty}, 1},
+			{"known type and empty substrings", metadata.Metadata{Type: model.MetricType(counter), Unit: empty, Help: empty}, 1},
+			{"unknown type, empty unit substring and help", metadata.Metadata{Type: model.MetricType(custom), Unit: empty, Help: help}, 2},
+			{"empty type substring, unit and help", metadata.Metadata{Type: model.MetricType(empty), Unit: unit, Help: help}, 2},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				owned := cloneNativeMetricMetadata(tc.input)
@@ -82,6 +89,9 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 				fields := []string{string(owned.Type), owned.Unit, owned.Help}
 				for _, field := range fields {
 					require.False(t, inBacking(field), "a clone must not alias caller memory")
+					if field == "" {
+						require.Nil(t, unsafe.StringData(field), "an empty field refers to no memory")
+					}
 				}
 				if owned.Type == model.MetricTypeCounter {
 					require.Same(t, unsafe.StringData(string(model.MetricTypeCounter)), unsafe.StringData(string(owned.Type)))
