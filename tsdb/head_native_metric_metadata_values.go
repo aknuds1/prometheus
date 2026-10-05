@@ -180,15 +180,18 @@ func knownMetricType(t model.MetricType) model.MetricType {
 }
 
 // ownCompactStrings replaces the non-empty strings with copies. A single
-// string gets its own allocation; several share one exact-size payload.
+// string gets its own allocation; several share one exact-size payload. Empty
+// strings become "", since an empty substring still refers to its backing.
 // Concatenation cannot be used: it returns an operand when the others are empty.
 func ownCompactStrings(fields ...*string) {
 	size, owned := 0, 0
 	for _, f := range fields {
-		if *f != "" {
-			size += len(*f)
-			owned++
+		if *f == "" {
+			*f = ""
+			continue
 		}
+		size += len(*f)
+		owned++
 	}
 	switch owned {
 	case 0:
