@@ -37,11 +37,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/grafana/regexp"
 	"github.com/prometheus/common/promslog"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -74,13 +74,10 @@ var (
 	schema    = flag.String("schema", "registry/registry.yaml", "Embedded schema file to resolve renames against")
 )
 
-// legacyNameRE matches the classic Prometheus name grammar. PromQL accepts
-// those bare; every other name - a native OTel one with dots, say - has to be
-// quoted, so the flags must not be interpolated into a query unchecked.
-var legacyNameRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_:]*$`)
+// legacyLabelNameRE matches PromQL's unquoted label-name grammar.
 var legacyLabelNameRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
-// lbl renders a label name for a matcher or a grouping clause.
+// lbl renders a label name for a matcher.
 func lbl(name string) string {
 	if legacyLabelNameRE.MatchString(name) {
 		return name
@@ -88,29 +85,27 @@ func lbl(name string) string {
 	return strconv.Quote(name)
 }
 
-// sel renders a bare metric name as a PromQL selector.
+// sel quotes a metric name so PromQL cannot interpret it as a keyword or number.
 func sel(metric string) string {
-	if legacyNameRE.MatchString(metric) {
-		return metric
-	}
 	return fmt.Sprintf("{%s}", strconv.Quote(metric))
 }
 
-// selWith renders a metric name with matchers. A quoted metric name has to move
-// inside the braces, so it cannot simply be prefixed onto them.
+// selWith renders a quoted metric name with matchers.
 func selWith(metric string, matchers ...string) string {
-	inner := strings.Join(matchers, ", ")
-	if legacyNameRE.MatchString(metric) {
-		return fmt.Sprintf("%s{%s}", metric, inner)
-	}
-	return fmt.Sprintf("{%s, %s}", strconv.Quote(metric), inner)
+	parts := append([]string{strconv.Quote(metric)}, matchers...)
+	return fmt.Sprintf("{%s}", strings.Join(parts, ", "))
 }
 
 // schemaQuery builds the schema-aware selector for the later version.
 func schemaQuery() string {
 	return selWith(*newMetric,
-		fmt.Sprintf("__semconv_url__=\"registry/%s\"", *newVer),
+		fmt.Sprintf("__semconv_url__=%q", "registry/"+*newVer),
 		fmt.Sprintf("__schema_url__=%q", *schema))
+}
+
+// attributeQuery groups the schema-aware selector by the later attribute name.
+func attributeQuery() string {
+	return fmt.Sprintf("sum by (%s) (%s)", strconv.Quote(*newAttr), schemaQuery())
 }
 
 // eraSeries renders the series one era writes, as a selector the reader can paste.
@@ -232,7 +227,7 @@ func run() error {
 		fmt.Printf("    %s%s%s   # Both eras under %q\n\n", colorMagenta, schemaQuery(), colorReset, *newMetric)
 		if *oldAttr != *newAttr {
 			fmt.Printf("  %sAttribute rename - __schema_url__ also normalises %s → %s:%s\n", colorGreen, *oldAttr, *newAttr, colorReset)
-			fmt.Printf("    %ssum by (%s) (%s)%s   # %s %q folds into %q\n\n", colorMagenta, lbl(*newAttr), schemaQuery(), colorReset, *oldVer, *oldAttr, *newAttr)
+			fmt.Printf("    %s%s%s   # %s %q folds into %q\n\n", colorMagenta, attributeQuery(), colorReset, *oldVer, *oldAttr, *newAttr)
 		}
 		return nil
 	}
@@ -278,7 +273,7 @@ func run() error {
 		fmt.Printf("the %s era (labelled %q) in rather than dropping it.\n\n", *oldVer, *oldAttr)
 
 		runRangeQueryWithDetails(ctx, engine, semconvStorage, now,
-			fmt.Sprintf("sum by (%s) (%s)", lbl(*newAttr), schemaQuery()),
+			attributeQuery(),
 			fmt.Sprintf("sum by (%s) - groups both eras under the canonical attribute name", *newAttr))
 		fmt.Printf("  %s=> The %s %q series is grouped under %q, spanning the rename%s\n\n", colorGreen, *oldVer, *oldAttr, *newAttr, colorReset)
 	}
