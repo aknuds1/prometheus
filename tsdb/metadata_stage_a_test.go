@@ -17,11 +17,16 @@ package tsdb
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/metrics"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,9 +131,10 @@ func stageAInputFor(values int) *stageAWriterInput {
 
 type stageAWriterResult struct {
 	depth int
-	// walMetadataBytes is the uncompressed payload of the WAL's metadata
-	// records, seed included.
-	walMetadataBytes int
+	// The WAL's metadata records, seed included: their uncompressed payload
+	// bytes, their entries, and a digest of their bytes in WAL order.
+	walMetadataBytes, walMetadataEntries int
+	walMetadataDigest                    uint64
 }
 
 // stageARunWriter runs one iteration of c against a fresh database: the seed
@@ -169,51 +175,143 @@ func stageARunWriter(tb testing.TB, c stageAWriterCase, timed func(work func()))
 		}
 	})
 
-	r := stageAWriterResult{depth: 1}
+	last := 0
 	if c.changes() {
-		r.depth = stageAVersions + 1
+		last = stageAVersions
 	}
+	r := stageAWriterResult{depth: last + 1}
 	if c.mode == "native" {
 		series, _, err := db.NativeMetricMetadata(ctx, [][]*labels.Matcher{{labels.MustNewMatcher(labels.MatchEqual, "job", "pipeline")}}, 0)
 		require.NoError(tb, err)
 		require.Len(tb, series, stageASeries)
 		for _, s := range series {
-			require.Len(tb, s.Versions, r.depth)
+			slot, err := strconv.Atoi(s.Labels.Get("id"))
+			require.NoError(tb, err)
+			require.Len(tb, s.Versions, r.depth, "series %d", slot)
+			newest := s.Versions[len(s.Versions)-1]
+			require.Equal(tb, in.metadata[slot][last], newest.Metadata, "series %d", slot)
+			require.Equal(tb, stageATimestamp(last), newest.EffectiveFrom, "series %d", slot)
 		}
 	}
 	require.NoError(tb, db.Close())
-	r.walMetadataBytes = stageAWALMetadataBytes(tb, filepath.Join(dir, "wal"))
+	records := stageAWALMetadata(tb, filepath.Join(dir, "wal"))
+	r.walMetadataBytes, r.walMetadataEntries, r.walMetadataDigest, err = stageACheckWALMetadata(tb, c, in, refs, records)
+	require.NoError(tb, err)
 	return r
 }
 
-func stageAWALMetadataBytes(tb testing.TB, dir string) int {
+// stageAWALMetadata returns copies of the WAL's metadata records in order.
+func stageAWALMetadata(tb testing.TB, dir string) [][]byte {
 	segments, err := wlog.NewSegmentsReader(dir)
 	require.NoError(tb, err)
 	defer segments.Close()
 	var dec record.Decoder
-	total := 0
-	for r := wlog.NewReader(segments); r.Next(); {
+	var records [][]byte
+	r := wlog.NewReader(segments)
+	for r.Next() {
 		if rec := r.Record(); dec.Type(rec) == record.Metadata {
-			total += len(rec)
+			records = append(records, slices.Clone(rec))
 		}
-		require.NoError(tb, r.Err())
 	}
-	return total
+	require.NoError(tb, r.Err())
+	return records
+}
+
+// stageAStart is a native metadata entry's series, help and start.
+type stageAStart struct {
+	ref  chunks.HeadSeriesRef
+	help string
+	from int64
+}
+
+// stageACheckWALMetadata checks the WAL's metadata records against the
+// fixture: every change point the base logs appears exactly once, as legacy
+// readers see it, each record holds one step, and records follow step order.
+// Native records must also carry each step's start. It returns the records'
+// payload bytes, their entries, and the top 48 bits of a SHA-256 digest of
+// their bytes in order, which a float64 metric holds exactly.
+func stageACheckWALMetadata(tb testing.TB, c stageAWriterCase, in *stageAWriterInput, refs []storage.SeriesRef, records [][]byte) (int, int, uint64, error) {
+	type change struct {
+		ref chunks.HeadSeriesRef
+		m   metadata.Metadata
+	}
+	steps := map[change]int{}
+	if c.mode == "wal" || stageANativeLogsMetadata() {
+		last := 0
+		if c.changes() {
+			last = stageAVersions
+		}
+		for step := 0; step <= last; step++ {
+			for slot := range stageASeries {
+				steps[change{chunks.HeadSeriesRef(refs[slot]), in.metadata[slot][step]}] = step
+			}
+		}
+	}
+	want := maps.Clone(steps)
+	digest := sha256.New()
+	var dec record.Decoder
+	bytes, entries, previous := 0, 0, 0
+	for _, rec := range records {
+		bytes += len(rec)
+		digest.Write(binary.BigEndian.AppendUint64(nil, uint64(len(rec))))
+		digest.Write(rec)
+		meta, err := dec.Metadata(rec, nil)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		step := -1
+		for _, e := range meta {
+			key := change{e.Ref, metadata.Metadata{Type: record.ToMetricType(e.Type), Unit: e.Unit, Help: e.Help}}
+			s, ok := want[key]
+			if !ok {
+				return 0, 0, 0, fmt.Errorf("unexpected or repeated metadata entry %+v", e)
+			}
+			delete(want, key)
+			if step < 0 {
+				step = s
+			}
+			if s != step {
+				return 0, 0, 0, fmt.Errorf("a record mixes steps %d and %d", step, s)
+			}
+			entries++
+		}
+		if step < previous {
+			return 0, 0, 0, fmt.Errorf("a record of step %d follows step %d", step, previous)
+		}
+		previous = step
+		if c.mode == "native" {
+			starts := stageANativeRecordStarts(tb, rec)
+			if len(starts) != len(meta) {
+				return 0, 0, 0, fmt.Errorf("%d native entries, %d legacy ones", len(starts), len(meta))
+			}
+			for i, start := range starts {
+				key := change{start.ref, metadata.Metadata{Type: record.ToMetricType(meta[i].Type), Unit: meta[i].Unit, Help: start.help}}
+				if from := stageATimestamp(steps[key]); start.from != from {
+					return 0, 0, 0, fmt.Errorf("series %d starts at %d, not %d", start.ref, start.from, from)
+				}
+			}
+		}
+	}
+	if len(want) > 0 {
+		return 0, 0, 0, fmt.Errorf("%d metadata entries missing", len(want))
+	}
+	return bytes, entries, binary.BigEndian.Uint64(digest.Sum(nil)) >> 16, nil
 }
 
 func BenchmarkMetadataStageAWriter(b *testing.B) {
 	for _, c := range stageAWriterCases() {
 		b.Run(c.name(), func(b *testing.B) {
-			b.ReportAllocs()
-			timer := &stageATimer{b: b}
+			timer := stageALeaf(b)
+			timer.start()
 			var r stageAWriterResult
 			for range b.N {
-				b.StopTimer()
 				r = stageARunWriter(b, c, timer.time)
 			}
 			timer.report("sample", stageAVersions*stageASeries)
 			b.ReportMetric(float64(r.depth), "depth")
 			b.ReportMetric(float64(r.walMetadataBytes), "wal-metadata-B")
+			b.ReportMetric(float64(r.walMetadataEntries), "wal-metadata-entries")
+			b.ReportMetric(float64(r.walMetadataDigest), "wal-metadata-digest48")
 		})
 	}
 }
@@ -223,15 +321,14 @@ func BenchmarkMetadataStageAWriter(b *testing.B) {
 func BenchmarkMetadataStageAPreLog(b *testing.B) {
 	for _, workload := range []string{"sb", "db"} {
 		b.Run("workload="+workload, func(b *testing.B) {
+			timer := stageALeaf(b)
 			run, done, reason := stageAPreparePreLog(b, stageAWriterCase{mode: "native", workload: workload})
 			if run == nil {
 				b.Skip("unavailable on this base: " + reason)
 			}
 			defer done()
-			b.ReportAllocs()
-			timer := &stageATimer{b: b}
+			timer.start()
 			for range b.N {
-				b.StopTimer()
 				runtime.GC()
 				timer.time(func() { require.Equal(b, stageACommit, run()) })
 			}
@@ -291,6 +388,7 @@ type stageAChange struct {
 func BenchmarkMetadataStageARecord(b *testing.B) {
 	for _, c := range stageARecordCases() {
 		b.Run(c.name(), func(b *testing.B) {
+			timer := stageALeaf(b)
 			rec, ok := stageAChangeRecord(c.record, c.workload, nil)
 			if !ok {
 				b.Skip("unavailable on this base: no native metadata records")
@@ -312,10 +410,8 @@ func BenchmarkMetadataStageARecord(b *testing.B) {
 				decoded := compression.NewSyncDecodeBuffer()
 				work = func() { buf, err = compression.Decode(compression.Snappy, compressed, decoded) }
 			}
-			b.ReportAllocs()
-			timer := &stageATimer{b: b}
+			timer.start()
 			for range b.N {
-				b.StopTimer()
 				timer.time(work)
 				require.NoError(b, err)
 			}
@@ -370,12 +466,11 @@ func BenchmarkMetadataStageAClone(b *testing.B) {
 	shapes := stageACloneShapes()
 	for _, shape := range []string{"distinct", "empty-unit", "empty-help", "empty-both", "unknown-type", "padded"} {
 		b.Run("shape="+shape, func(b *testing.B) {
+			timer := stageALeaf(b)
 			inputs := shapes[shape]
 			clones := make([]*metadata.Metadata, len(inputs))
-			b.ReportAllocs()
-			timer := &stageATimer{b: b}
+			timer.start()
 			for range b.N {
-				b.StopTimer()
 				clear(clones)
 				runtime.GC()
 				timer.time(func() {
@@ -403,11 +498,10 @@ func BenchmarkMetadataStageAHistoryDepth(b *testing.B) {
 	}
 	for depth := 1; depth <= stageAVersions+1; depth++ {
 		b.Run("depth="+strconv.Itoa(depth), func(b *testing.B) {
-			b.ReportAllocs()
-			timer := &stageATimer{b: b}
+			timer := stageALeaf(b)
+			timer.start()
 			var capacity, retained float64
 			for range b.N {
-				b.StopTimer()
 				h := stageANewHistories(histories)
 				before := stageALiveHeap()
 				timer.time(func() {
@@ -481,6 +575,21 @@ type stageATimer struct {
 	gcs uint64
 }
 
+// stageALeaf stops b's timer on entering a leaf benchmark. Go starts the timer
+// before running the body, so setup would otherwise count towards elapsed
+// time and allocations.
+func stageALeaf(b *testing.B) *stageATimer {
+	b.StopTimer()
+	return &stageATimer{b: b}
+}
+
+// start zeroes the elapsed time and allocation counters once setup is done.
+// The timer stays stopped; time runs it around each iteration's work.
+func (t *stageATimer) start() {
+	t.b.ReportAllocs()
+	t.b.ResetTimer()
+}
+
 func (t *stageATimer) time(work func()) {
 	gcs := stageAGCCycles()
 	t.b.StartTimer()
@@ -514,14 +623,17 @@ func TestMetadataStageA(t *testing.T) {
 	for _, c := range stageAWriterCases() {
 		t.Run(c.name(), func(t *testing.T) {
 			first := stageARunWriter(t, c, direct)
-			t.Logf("depth %d, WAL metadata payload %d B", first.depth, first.walMetadataBytes)
+			t.Logf("depth %d, WAL metadata payload %d B in %d entries, digest %x", first.depth, first.walMetadataBytes, first.walMetadataEntries, first.walMetadataDigest)
 			for range 2 {
 				require.Equal(t, first, stageARunWriter(t, c, direct))
 			}
-			if c.mode == "native" && !stageANativeLogsMetadata() {
-				require.Zero(t, first.walMetadataBytes, "this base keeps native metadata out of the WAL")
-			} else {
-				require.Positive(t, first.walMetadataBytes)
+			switch {
+			case c.mode == "native" && !stageANativeLogsMetadata():
+				require.Zero(t, first.walMetadataEntries, "this base keeps native metadata out of the WAL")
+			case c.changes():
+				require.Equal(t, (stageAVersions+1)*stageASeries, first.walMetadataEntries)
+			default:
+				require.Equal(t, stageASeries, first.walMetadataEntries, "unchanged metadata is logged once")
 			}
 		})
 	}
@@ -576,6 +688,87 @@ func TestMetadataStageA(t *testing.T) {
 			}
 			t.Logf("older capacity bytes by depth %v", capacities)
 		}
+	})
+	t.Run("the WAL contents oracle rejects altered records", func(t *testing.T) {
+		c := stageAWriterCase{mode: "wal", workload: "sb"}
+		in := stageAInputFor(c.values())
+		refs := make([]storage.SeriesRef, stageASeries)
+		var enc record.Encoder
+		encode := func(step, offset int, help func(slot int) string) []byte {
+			var entries []record.RefMetadata
+			for slot := offset; slot < offset+stageACommit; slot++ {
+				refs[slot] = storage.SeriesRef(slot + 1)
+				m := in.metadata[slot][step]
+				entries = append(entries, record.RefMetadata{Ref: chunks.HeadSeriesRef(slot + 1), Type: record.GetMetricType(m.Type), Unit: m.Unit, Help: help(slot)})
+			}
+			return enc.Metadata(entries, nil)
+		}
+		var records [][]byte
+		for step := 0; step <= stageAVersions; step++ {
+			for offset := 0; offset < stageASeries; offset += stageACommit {
+				records = append(records, encode(step, offset, func(slot int) string { return in.metadata[slot][step].Help }))
+			}
+		}
+		_, entries, _, err := stageACheckWALMetadata(t, c, in, refs, records)
+		require.NoError(t, err)
+		require.Equal(t, (stageAVersions+1)*stageASeries, entries)
+		altered := slices.Clone(records)
+		altered[3] = encode(0, 3*stageACommit, func(slot int) string { return in.metadata[slot][1].Help })
+		for name, records := range map[string][][]byte{
+			"a missing record":          records[:len(records)-1],
+			"a repeated record":         append(slices.Clone(records), records[0]),
+			"records out of step order": append(slices.Clone(records[10:]), records[:10]...),
+			"an altered entry":          altered,
+		} {
+			_, _, _, err := stageACheckWALMetadata(t, c, in, refs, records)
+			require.Error(t, err, name)
+		}
+	})
+	t.Run("setup is not counted", func(t *testing.T) {
+		benchtime := flag.Lookup("test.benchtime").Value
+		saved := benchtime.String()
+		require.NoError(t, benchtime.Set("10x"))
+		defer func() { require.NoError(t, benchtime.Set(saved)) }()
+		var sink [][]byte
+		allocate := func(n int) {
+			for range n {
+				sink = append(sink, make([]byte, 64))
+			}
+		}
+		// A leaf that allocates in its setup and before each iteration's
+		// timed work, but not in the timed work itself.
+		leaf := func(stopOnEntry bool) testing.BenchmarkResult {
+			return testing.Benchmark(func(b *testing.B) {
+				timer := &stageATimer{b: b}
+				if stopOnEntry {
+					timer = stageALeaf(b)
+				}
+				allocate(1000)
+				timer.start()
+				for range b.N {
+					allocate(10)
+					timer.time(func() {})
+				}
+			})
+		}
+		counted := leaf(true)
+		require.Equal(t, 10, counted.N)
+		require.Zero(t, counted.MemAllocs, "setup allocations are not counted")
+		// Zeroing the counters alone leaves the timer running into the first
+		// iteration's setup.
+		require.GreaterOrEqual(t, leaf(false).MemAllocs, uint64(10))
+		// The pattern this replaced counted the setup before its first
+		// StopTimer.
+		replaced := testing.Benchmark(func(b *testing.B) {
+			allocate(1000)
+			b.ReportAllocs()
+			for range b.N {
+				b.StopTimer()
+				b.StartTimer()
+			}
+		})
+		require.GreaterOrEqual(t, replaced.MemAllocs, uint64(1000))
+		runtime.KeepAlive(sink)
 	})
 	t.Run("the CPU clock", func(t *testing.T) {
 		require.Positive(t, stageAClockOverhead())
