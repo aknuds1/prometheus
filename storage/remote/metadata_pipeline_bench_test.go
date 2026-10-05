@@ -53,6 +53,7 @@ type metadataPipelineResult struct {
 	SweepsLateByInterval                           int64
 	TransactionsLateByInterval                     int64
 	Restart                                        *metadataPipelineRestart `json:",omitempty"`
+	Release                                        *metadataPipelineRelease `json:",omitempty"`
 }
 
 // BenchmarkRemoteWriteMetadataPipeline includes ingestion, WAL reading, metadata
@@ -66,16 +67,17 @@ func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
 	// must follow the metadata history: 30 leaves WAL records a margin of 11
 	// segments at 10,000 series.
 	restartStep := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_RESTART_STEP", 30)
-	// Additional endpoints are for heap passes; held backlogs and restarts
-	// reject them.
+	// Restarts reject additional endpoints. A release lag applies to a held
+	// backlog with two endpoints.
 	endpoints := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_ENDPOINTS", 1)
+	releaseLag := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_RELEASE_LAG", 0)
 	require.Zero(b, series%100, "series count must be a multiple of 100")
 	require.LessOrEqual(b, sweeps, 400, "changing traces must fit the five-version native history")
 	for _, workload := range []string{"cold", "unchanged", "changes", "newseries", "backlog", "cardinality", "distinct", "changes-distinct", "paced-unchanged", "paced-changes", "batched", "restart"} {
 		c := metadataPipelineConfig{Case: workload, Series: series, Values: 100, Sweeps: sweeps, Writers: 4, Shards: 4, CommitSize: 1000, Batch: 2000, Capacity: 10000, ReceiverProcs: receiverProcs, Endpoints: endpoints}
 		switch workload {
 		case "backlog":
-			c.Writers, c.Shards, c.Sweeps = 1, 1, 4
+			c.Writers, c.Shards, c.Sweeps, c.ReleaseLag = 1, 1, 4, releaseLag
 		case "cardinality":
 			c.Series *= 10
 		case "distinct", "changes-distinct":
@@ -102,6 +104,9 @@ func BenchmarkRemoteWriteMetadataPipeline(b *testing.B) {
 // equal-work, and held-backlog traces. Capacity traces are unpaced diagnostics.
 func BenchmarkRemoteWriteMetadataPipelineScale(b *testing.B) {
 	receiverProcs := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_RECEIVER_PROCS", 2)
+	// Additional endpoints and a release lag apply to the held backlogs only.
+	endpoints := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_ENDPOINTS", 1)
+	releaseLag := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_RELEASE_LAG", 0)
 	for _, group := range []string{"history", "equal-work", "backlog", "capacity"} {
 		for _, workload := range []string{"unchanged", "changes"} {
 			if (group == "equal-work" && workload != "unchanged") || (group == "backlog" && workload != "changes") {
@@ -121,6 +126,7 @@ func BenchmarkRemoteWriteMetadataPipelineScale(b *testing.B) {
 						c.Sweeps = 20
 					case "backlog":
 						c.Case, c.Writers, c.Shards, c.Sweeps, c.CommitSize, c.SamplesPerSecond = "backlog", 1, 1, 4, 1000, 0
+						c.Endpoints, c.ReleaseLag = endpoints, releaseLag
 					case "capacity":
 						c.SamplesPerSecond = 0
 					}
@@ -247,7 +253,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 			r.SeededHeap = metadataPipelineRetainedHeap(f)
 		}
 		if c.Case == "backlog" {
-			require.NoError(b, f.holdReceiver(ctx))
+			require.NoError(b, f.holdReceivers(ctx))
 		}
 		r.Initialization = time.Since(lifecycleStart)
 		runtime.ReadMemStats(&beforeMemory)
@@ -287,7 +293,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		releaseStart = time.Now()
 		r.BacklogWait = releaseStart.Sub(writerEnd)
 		d.mark(ctx, "release-command-start")
-		_, err = f.receiver.command(ctx, "release")
+		r.Release, err = f.release(ctx)
 		require.NoError(b, err)
 		d.mark(ctx, "release-command-complete")
 	} else {
