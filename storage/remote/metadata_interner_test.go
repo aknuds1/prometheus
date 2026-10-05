@@ -214,6 +214,46 @@ func TestMetadataInterner(t *testing.T) {
 		oversized := newMetadataInterner(4, 8)
 		check(oversized.internBorrowed(borrow(1)), 1)
 	})
+	t.Run("borrowed misses and bypasses copy each value once", func(t *testing.T) {
+		// Inputs and map capacity are prepared outside the counts, so that only
+		// the interner's own allocations are counted.
+		inputs := make([]metadata.Metadata, 101)
+		for n := range inputs {
+			inputs[n] = value(1000 + n)
+		}
+		i := newMetadataInterner(1<<15, 4<<20)
+		i.current = make(map[metadata.Metadata]*metadata.Metadata, 1024)
+		n := 0
+		// A miss allocates the value and one payload for its unit and help.
+		require.Equal(t, 2.0, testing.AllocsPerRun(100, func() {
+			i.internBorrowed(inputs[n])
+			n++
+		}))
+		bypass := newMetadataInterner(0, -1)
+		m := value(1)
+		require.Equal(t, 2.0, testing.AllocsPerRun(100, func() { bypass.internBorrowed(m) }))
+		require.Equal(t, 1.0, testing.AllocsPerRun(100, func() { bypass.intern(m) }), "a copying bypass allocates only the value")
+	})
+	t.Run("owned values keep no empty substring's backing", func(t *testing.T) {
+		backing := strings.Repeat("padding", 100_000)
+		empty := backing[len(backing)/2 : len(backing)/2]
+		require.NotNil(t, unsafe.StringData(empty), "the empty substring refers to the backing")
+		for _, m := range []metadata.Metadata{
+			{Type: model.MetricType(empty), Unit: empty, Help: empty},
+			{Type: model.MetricTypeCounter, Unit: empty, Help: empty},
+			{Type: "custom", Unit: empty, Help: "help"},
+			{Type: model.MetricTypeCounter, Unit: empty, Help: "help"},
+			{Type: model.MetricType(empty), Unit: "seconds", Help: "help"},
+		} {
+			owned := ownMetadata(m)
+			require.Equal(t, m, *owned)
+			for _, field := range []string{string(owned.Type), owned.Unit, owned.Help} {
+				if field == "" {
+					require.Nil(t, unsafe.StringData(field), "%+v", m)
+				}
+			}
+		}
+	})
 	t.Run("concurrent callers", func(t *testing.T) {
 		i := newMetadataInterner(8, 1<<10)
 		var wg sync.WaitGroup
