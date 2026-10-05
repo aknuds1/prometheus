@@ -127,6 +127,12 @@ func (c metadataPipelineConfig) writers(first, last int) int {
 	return c.Writers
 }
 
+// metadataPipelineBase is the benchmarks' logical time of step zero,
+// 2100-01-01T00:00:00Z. It is later than any run, so the WAL watcher, which
+// skips samples older than its own start, sends every sample. It also starts a
+// chunk range, so where a trace's chunks are cut never depends on when it runs.
+const metadataPipelineBase int64 = 4102444800000
+
 // timestamp returns the logical timestamp of step.
 func (c metadataPipelineConfig) timestamp(step int) int64 {
 	return c.Base + int64(step)*15000
@@ -1425,6 +1431,49 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 				})
 			}
 		}
+	})
+	t.Run("fixed sample clock", func(t *testing.T) {
+		// The head cuts a series' chunks at chunk-range boundaries as well as by
+		// sample count, so a trace that straddles a boundary needs more chunks.
+		// Every benchmark trace starts at the fixed base, which starts a chunk
+		// range, and ends within it.
+		chunkRange := tsdb.DefaultOptions().MinBlockDuration
+		require.Zero(t, metadataPipelineBase%chunkRange)
+		for _, sweeps := range []int{200, 4} {
+			c := metadataPipelineConfig{Base: metadataPipelineBase, Sweeps: sweeps}
+			require.Equal(t, c.timestamp(0)/chunkRange, c.timestamp(c.lastStep())/chunkRange)
+		}
+		chunksFrom := func(base int64) int {
+			db, err := tsdb.Open(t.TempDir(), nil, nil, tsdb.DefaultOptions(), nil)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, db.Close()) }()
+			c := metadataPipelineConfig{Base: base, Sweeps: 200}
+			app := db.AppenderV2(t.Context())
+			var ref storage.SeriesRef
+			for step := 0; step <= c.lastStep(); step++ {
+				ref, err = app.Append(ref, metadataPipelineLabels(0), 0, c.timestamp(step), float64(step+1), nil, nil, storage.AOptions{})
+				require.NoError(t, err)
+			}
+			require.NoError(t, app.Commit())
+			q, err := db.ChunkQuerier(math.MinInt64, math.MaxInt64)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, q.Close()) }()
+			set := q.Select(t.Context(), false, nil, labels.MustNewMatcher(labels.MatchEqual, "id", "0"))
+			n := 0
+			for set.Next() {
+				it := set.At().Iterator(nil)
+				for it.Next() {
+					n++
+				}
+				require.NoError(t, it.Err())
+			}
+			require.NoError(t, set.Err())
+			return n
+		}
+		fixed, straddling := chunksFrom(metadataPipelineBase), chunksFrom(metadataPipelineBase-10*time.Minute.Milliseconds())
+		t.Logf("chunks of a 200-sweep series: %d from the fixed base, %d when straddling a boundary", fixed, straddling)
+		require.Equal(t, fixed, chunksFrom(metadataPipelineBase+chunkRange), "the layout repeats every chunk range")
+		require.Greater(t, straddling, fixed, "a straddling trace needs more chunks")
 	})
 	t.Run("release decision", func(t *testing.T) {
 		for _, tc := range []struct {
