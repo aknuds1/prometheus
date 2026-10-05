@@ -352,6 +352,13 @@ how far apart the WAL readers are. Results record each baseline, the first
 receiver's delta at the second release, its overshoot over the lag, and the
 second receiver's delta, which must be zero.
 
+Every benchmark trace starts at the same logical time, 2100-01-01T00:00:00Z.
+Head chunks are cut at chunk-range boundaries, so a trace that started at the
+wall clock would need more chunks whenever it straddled one, and its logical
+work would depend on when it ran. The fixed base starts a chunk range, and
+every trace ends within it. It is later than any run, so the WAL watcher, which
+skips samples older than its own start, sends every sample.
+
 `BenchmarkHeadMetricMetadataBackfillWAL` reports the decompressed metadata and
 compressed WAL bytes per sample of an out-of-order backfill, after an untimed
 seed, for each metadata mode. It is encoding evidence only, not end-to-end
