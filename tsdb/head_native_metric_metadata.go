@@ -176,7 +176,7 @@ func (n *nativeSeriesMetadata) mergeLocked(observations []nativeMetricMetadataPo
 					evictions++
 				} else {
 					if len(n.older) == cap(n.older) {
-						grown := make([]nativeMetricMetadataPoint, len(n.older), max(1, 2*cap(n.older)))
+						grown := make([]nativeMetricMetadataPoint, len(n.older), nativeMetricMetadataOlderCapacity(len(n.older)+1))
 						copy(grown, n.older)
 						n.older = grown
 					}
@@ -193,11 +193,7 @@ func (n *nativeSeriesMetadata) mergeLocked(observations []nativeMetricMetadataPo
 		versions, evictions = mergeOverlappingNativeMetricMetadata(existing[:count+1], observations, retained[:0])
 		olderCount := len(versions) - 1
 		if cap(n.older) < olderCount {
-			capacity := 1
-			for capacity < olderCount {
-				capacity *= 2
-			}
-			n.older = make([]nativeMetricMetadataPoint, olderCount, capacity)
+			n.older = make([]nativeMetricMetadataPoint, olderCount, nativeMetricMetadataOlderCapacity(olderCount))
 		} else {
 			if len(n.older) > olderCount {
 				clear(n.older[olderCount:])
@@ -215,6 +211,16 @@ func (n *nativeSeriesMetadata) mergeLocked(observations []nativeMetricMetadataPo
 		n.setFlag(nativeMetadataTruncated)
 	}
 	return len(n.older) + 1 - oldCount, evictions
+}
+
+// nativeMetricMetadataOlderCapacity returns the capacity merges give older
+// points that must hold n of them: a single older point keeps its own
+// allocation, and more grow straight to the version cap.
+func nativeMetricMetadataOlderCapacity(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	return maxNativeMetricMetadataVersions - 1
 }
 
 // mergeOverlappingNativeMetricMetadata merges strictly timestamp-ordered inputs,
