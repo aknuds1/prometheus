@@ -159,7 +159,7 @@ func benchmarkMetadataPipeline(b *testing.B, c metadataPipelineConfig) {
 	b.StopTimer()
 	metrics := map[string]float64{}
 	for range b.N {
-		c.Base = time.Now().Add(time.Hour).UnixMilli()
+		c.Base = metadataPipelineBase
 		r := measureMetadataPipeline(b, c)
 		n := float64(r.Samples)
 		metrics["samples/s"] += n / r.Completion.Seconds()
