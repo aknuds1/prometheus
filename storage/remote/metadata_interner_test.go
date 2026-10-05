@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 
 	remoteapi "github.com/prometheus/client_golang/exp/api/remote"
 	"github.com/prometheus/common/model"
@@ -153,6 +154,65 @@ func TestMetadataInterner(t *testing.T) {
 			require.Equal(t, pinned, i.ledgerBytes)
 			require.LessOrEqual(t, i.ledgerBytes, 64)
 		}
+	})
+	t.Run("borrowed values are owned and never kept", func(t *testing.T) {
+		i := newMetadataInterner(4, 1<<10)
+		var buffers [][]byte
+		borrow := func(n int) metadata.Metadata {
+			v := value(n)
+			buf := []byte(v.Unit + v.Help)
+			buffers = append(buffers, buf)
+			return metadata.Metadata{Type: v.Type, Unit: unsafe.String(&buf[0], len(v.Unit)), Help: unsafe.String(&buf[len(v.Unit)], len(v.Help))}
+		}
+		requireOwned := func(m metadata.Metadata) {
+			for _, s := range []string{string(m.Type), m.Unit, m.Help} {
+				p := uintptr(unsafe.Pointer(unsafe.StringData(s)))
+				for _, buf := range buffers {
+					start := uintptr(unsafe.Pointer(&buf[0]))
+					require.False(t, p >= start && p < start+uintptr(len(buf)), "a borrowed string is kept")
+				}
+			}
+		}
+		check := func(got *metadata.Metadata, n int) {
+			t.Helper()
+			for _, buf := range buffers {
+				for k := range buf {
+					buf[k] = 'z'
+				}
+			}
+			require.Equal(t, value(n), *got)
+			requireOwned(*got)
+			for _, generation := range []map[metadata.Metadata]*metadata.Metadata{i.current, i.older} {
+				for key, v := range generation {
+					requireOwned(key)
+					requireOwned(*v)
+				}
+			}
+			for _, slot := range i.ledger {
+				if slot.value != nil {
+					requireOwned(*slot.value)
+				}
+			}
+		}
+		miss := i.internBorrowed(borrow(1))
+		check(miss, 1)
+		require.NotZero(t, i.ledgerBytes, "the ledger holds the first sighting")
+		hit := i.internBorrowed(borrow(1))
+		check(hit, 1)
+		require.Same(t, miss, hit)
+		for n := 2; n <= 5; n++ {
+			check(i.internBorrowed(borrow(n)), n)
+			check(i.internBorrowed(borrow(n)), n)
+		}
+		require.NotContains(t, i.current, value(1))
+		promoted := i.internBorrowed(borrow(1))
+		check(promoted, 1)
+		require.Same(t, miss, promoted)
+		m := borrow(1)
+		require.Zero(t, testing.AllocsPerRun(100, func() { promoted = i.internBorrowed(m) }))
+
+		oversized := newMetadataInterner(4, 8)
+		check(oversized.internBorrowed(borrow(1)), 1)
 	})
 	t.Run("concurrent callers", func(t *testing.T) {
 		i := newMetadataInterner(8, 1<<10)

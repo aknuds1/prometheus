@@ -258,6 +258,10 @@ func TestRemoteWriteMetadataPipelineNativeOracles(t *testing.T) {
 	t.Run("sender heap attribution", func(t *testing.T) {
 		defer func(rate int) { runtime.MemProfileRate = rate }(runtime.MemProfileRate)
 		runtime.MemProfileRate = 1
+		// Values interned by earlier tests would be hits, retaining strings
+		// that those tests allocated.
+		defer func(i *metadataInterner) { walMetadataInterner = i }(walMetadataInterner)
+		walMetadataInterner = newMetadataInterner(metadataInternerEntries, metadataInternerBytes)
 		const series, help = 200, 4096
 		c := metadataPipelineConfig{Case: "unchanged", Source: "native", Series: series, Values: series, HelpBytes: help, Sweeps: 2, Writers: 2, Shards: 2, Batch: 50, Capacity: 100, CommitSize: 50, ReceiverProcs: 2, Base: time.Now().Add(time.Hour).UnixMilli()}
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -271,9 +275,10 @@ func TestRemoteWriteMetadataPipelineNativeOracles(t *testing.T) {
 		require.NoError(t, err)
 		a, err := metadataPipelineSenderHeap()
 		require.NoError(t, err)
-		// Native histories retain the strings the watcher decoded.
-		decoded := a.SenderBytesByFunction["github.com/prometheus/prometheus/tsdb/wlog.(*Watcher).readSegment"]
-		t.Logf("sender %d (decoded by the watcher %d), fixture %d, other %d, profiled %d, heap %d", a.Sender, decoded, a.Fixture, a.Other, a.ProfiledInUse, a.HeapAlloc)
+		// Native histories retain the interner's copies of the strings the
+		// watcher lent it.
+		decoded := a.SenderBytesByFunction["github.com/prometheus/prometheus/storage/remote.ownMetadata"]
+		t.Logf("sender %d (copied from borrowed entries %d), fixture %d, other %d, profiled %d, heap %d", a.Sender, decoded, a.Fixture, a.Other, a.ProfiledInUse, a.HeapAlloc)
 		require.GreaterOrEqual(t, decoded, int64(series*help))
 		require.Less(t, a.Sender, int64(a.ProfiledInUse))
 	})
