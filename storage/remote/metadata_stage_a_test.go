@@ -16,6 +16,7 @@
 package remote
 
 import (
+	"flag"
 	"fmt"
 	"runtime"
 	"runtime/metrics"
@@ -368,6 +369,21 @@ type stageATimer struct {
 	gcs uint64
 }
 
+// stageALeaf stops b's timer on entering a leaf benchmark. Go starts the timer
+// before running the body, so setup would otherwise count towards elapsed
+// time and allocations.
+func stageALeaf(b *testing.B) *stageATimer {
+	b.StopTimer()
+	return &stageATimer{b: b}
+}
+
+// start zeroes the elapsed time and allocation counters once setup is done.
+// The timer stays stopped; time runs it around each iteration's work.
+func (t *stageATimer) start() {
+	t.b.ReportAllocs()
+	t.b.ResetTimer()
+}
+
 func (t *stageATimer) time(work func()) {
 	gcs := stageAGCCycles()
 	t.b.StartTimer()
@@ -393,6 +409,7 @@ func (t *stageATimer) report(unit string, perIteration int) {
 func BenchmarkMetadataStageASender(b *testing.B) {
 	for _, c := range stageASenderCases() {
 		b.Run(c.name(), func(b *testing.B) {
+			timer := stageALeaf(b)
 			if ok, reason := stageASenderAvailable(c); !ok {
 				b.Skip("unavailable on this base: " + reason)
 			}
@@ -401,11 +418,9 @@ func BenchmarkMetadataStageASender(b *testing.B) {
 			if c.state == "seed" {
 				measured = records.seed
 			}
-			b.ReportAllocs()
-			timer := &stageATimer{b: b}
+			timer.start()
 			var r stageASenderResult
 			for range b.N {
-				b.StopTimer()
 				r = stageARunSender(b, c, timer.time)
 			}
 			timer.report("point", c.queues*len(measured)*stageACommit)
@@ -446,6 +461,7 @@ func stageADecodeCases() []stageADecodeCase {
 func BenchmarkMetadataStageADecode(b *testing.B) {
 	for _, c := range stageADecodeCases() {
 		b.Run(c.name(), func(b *testing.B) {
+			timer := stageALeaf(b)
 			if c.record == "native" && !stageANativeSupported() {
 				b.Skip("unavailable on this base: no native metadata records")
 			}
@@ -454,10 +470,8 @@ func BenchmarkMetadataStageADecode(b *testing.B) {
 				b.Skip("unavailable on this base: " + reason)
 			}
 			records := stageARecordsFor(c.record, c.workload).changes
-			b.ReportAllocs()
-			timer := &stageATimer{b: b}
+			timer.start()
 			for range b.N {
-				b.StopTimer()
 				runtime.GC()
 				timer.time(func() {
 					for _, rec := range records {
@@ -543,6 +557,52 @@ func TestMetadataStageA(t *testing.T) {
 			}
 		})
 	}
+	t.Run("setup is not counted", func(t *testing.T) {
+		benchtime := flag.Lookup("test.benchtime").Value
+		saved := benchtime.String()
+		require.NoError(t, benchtime.Set("10x"))
+		defer func() { require.NoError(t, benchtime.Set(saved)) }()
+		var sink [][]byte
+		allocate := func(n int) {
+			for range n {
+				sink = append(sink, make([]byte, 64))
+			}
+		}
+		// A leaf that allocates in its setup and before each iteration's
+		// timed work, but not in the timed work itself.
+		leaf := func(stopOnEntry bool) testing.BenchmarkResult {
+			return testing.Benchmark(func(b *testing.B) {
+				timer := &stageATimer{b: b}
+				if stopOnEntry {
+					timer = stageALeaf(b)
+				}
+				allocate(1000)
+				timer.start()
+				for range b.N {
+					allocate(10)
+					timer.time(func() {})
+				}
+			})
+		}
+		counted := leaf(true)
+		require.Equal(t, 10, counted.N)
+		require.Zero(t, counted.MemAllocs, "setup allocations are not counted")
+		// Zeroing the counters alone leaves the timer running into the first
+		// iteration's setup.
+		require.GreaterOrEqual(t, leaf(false).MemAllocs, uint64(10))
+		// The pattern this replaced counted the setup before its first
+		// StopTimer.
+		replaced := testing.Benchmark(func(b *testing.B) {
+			allocate(1000)
+			b.ReportAllocs()
+			for range b.N {
+				b.StopTimer()
+				b.StartTimer()
+			}
+		})
+		require.GreaterOrEqual(t, replaced.MemAllocs, uint64(1000))
+		runtime.KeepAlive(sink)
+	})
 	t.Run("the CPU clock", func(t *testing.T) {
 		require.Positive(t, stageAClockOverhead())
 		if runtime.GOOS == "linux" {
