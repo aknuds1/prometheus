@@ -42,7 +42,11 @@ func TestMetadataInterner(t *testing.T) {
 	t.Run("generations are bounded by entries", func(t *testing.T) {
 		i := newMetadataInterner(4, 1<<10)
 		kept, evicted := i.intern(value(0)), i.intern(value(1))
+		require.Same(t, kept, i.intern(value(0)))
+		require.Same(t, evicted, i.intern(value(1)))
 		for n := 2; n < 100; n++ {
+			// The second sighting admits each value.
+			i.intern(value(n))
 			i.intern(value(n))
 			// A value that keeps being seen survives every rotation.
 			require.Same(t, kept, i.intern(value(0)))
@@ -56,7 +60,9 @@ func TestMetadataInterner(t *testing.T) {
 		large := metadata.Metadata{Help: strings.Repeat("x", 40)}
 		first := i.intern(large)
 		require.Same(t, first, i.intern(large))
-		i.intern(metadata.Metadata{Help: strings.Repeat("y", 40)})
+		other := metadata.Metadata{Help: strings.Repeat("y", 40)}
+		i.intern(other)
+		i.intern(other)
 		require.Len(t, i.current, 1)
 		require.Same(t, first, i.older[large])
 		require.LessOrEqual(t, i.bytes, 64)
@@ -79,12 +85,74 @@ func TestMetadataInterner(t *testing.T) {
 		// do not allocate. Promotion itself may grow the new generation's map.
 		for n := 2; n <= 5; n++ {
 			i.intern(value(n))
+			i.intern(value(n))
 		}
 		require.NotContains(t, i.current, m)
 		require.Contains(t, i.older, m)
 		require.Same(t, want, intern(m))
 		require.Zero(t, testing.AllocsPerRun(100, func() { got = intern(m) }))
 		require.Same(t, want, got)
+	})
+	t.Run("a second sighting admits the first sighting's value", func(t *testing.T) {
+		i := newMetadataInterner(4, 1<<10)
+		first := i.intern(value(1))
+		require.NotContains(t, i.current, value(1), "a value seen once is not admitted")
+		require.Same(t, first, i.intern(value(1)))
+		require.Same(t, first, i.current[value(1)])
+		require.Zero(t, i.ledgerBytes, "admission releases the ledger's charge")
+	})
+	t.Run("values that alternate in one set are admitted", func(t *testing.T) {
+		i := newLedgerMetadataInterner(8, 1<<10, 1, 1<<10)
+		a, b := i.intern(value(1)), i.intern(value(2))
+		require.Same(t, a, i.intern(value(1)))
+		require.Same(t, b, i.intern(value(2)))
+	})
+	t.Run("a full set delays admission", func(t *testing.T) {
+		i := newLedgerMetadataInterner(8, 1<<10, 1, 1<<10)
+		first := i.intern(value(1))
+		for n := 2; n <= 5; n++ {
+			i.intern(value(n))
+		}
+		// The single set replaced value 1, its oldest slot, so it starts over.
+		second := i.intern(value(1))
+		require.NotSame(t, first, second)
+		require.Equal(t, value(1), *second)
+		require.NotContains(t, i.current, value(1))
+		require.Same(t, second, i.intern(value(1)))
+		require.Contains(t, i.current, value(1))
+	})
+	t.Run("a fingerprint collision never returns a different value", func(t *testing.T) {
+		i := newLedgerMetadataInterner(4, 1<<10, 1, 1<<10)
+		i.fingerprint = func(metadata.Metadata) uint64 { return 42 }
+		i.intern(value(1))
+		got := i.intern(value(2))
+		require.Equal(t, value(2), *got)
+		require.NotContains(t, i.current, value(2), "an unequal value in the slot is a miss")
+		require.Same(t, got, i.intern(value(2)))
+		require.Contains(t, i.current, value(2))
+	})
+	t.Run("values over the ledger's byte cap keep only their fingerprint", func(t *testing.T) {
+		i := newLedgerMetadataInterner(4, 1<<10, 1, 8)
+		first := i.intern(value(1))
+		require.Zero(t, i.ledgerBytes)
+		second := i.intern(value(1))
+		require.NotSame(t, first, second, "the second sighting admits a new value")
+		require.Equal(t, value(1), *second)
+		require.Same(t, second, i.current[value(1)])
+	})
+	t.Run("the ledger charges exactly the bytes it pins", func(t *testing.T) {
+		i := newLedgerMetadataInterner(4, 1<<10, 1, 64)
+		for n := range 1000 {
+			i.intern(value(n * 7919 % 37))
+			pinned := 0
+			for _, slot := range i.ledger {
+				if slot.value != nil {
+					pinned += len(slot.value.Type) + len(slot.value.Unit) + len(slot.value.Help)
+				}
+			}
+			require.Equal(t, pinned, i.ledgerBytes)
+			require.LessOrEqual(t, i.ledgerBytes, 64)
+		}
 	})
 	t.Run("concurrent callers", func(t *testing.T) {
 		i := newMetadataInterner(8, 1<<10)
@@ -109,5 +177,16 @@ func TestMetadataInterner(t *testing.T) {
 		}
 		require.Equal(t, metadata.Metadata{Type: model.MetricTypeGauge, Unit: "bytes", Help: help}, *queues[0].seriesMetadata[1])
 		require.Same(t, queues[0].seriesMetadata[1], queues[1].seriesMetadata[1])
+	})
+	t.Run("callers share a value seen once by each while its slot survives", func(t *testing.T) {
+		i := newLedgerMetadataInterner(8, 1<<10, 1, 1<<10)
+		first := i.intern(value(1))
+		require.Same(t, first, i.intern(value(1)))
+		lost := i.intern(value(2))
+		for n := 3; n <= 6; n++ {
+			i.intern(value(n))
+		}
+		// Value 6 replaced value 2's slot, so a later caller gets an equal copy.
+		require.NotSame(t, lost, i.intern(value(2)))
 	})
 }
