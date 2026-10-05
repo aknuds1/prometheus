@@ -147,14 +147,18 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 		require.Equal(t, []*metadata.Metadata{&a, &b, nil}, queuedMetadata(q.batch))
 	})
 
-	t.Run("queues share values", func(t *testing.T) {
+	t.Run("queues share values from their second sighting", func(t *testing.T) {
 		_, first, _ := newQM(t)
 		_, second, _ := newQM(t)
+		_, third, _ := newQM(t)
 		help := "shared " + t.Name()
-		for _, w := range []nativeMetadataWriter{first, second} {
+		for _, w := range []nativeMetadataWriter{first, second, third} {
 			w.StoreNativeMetadata(nativeMetadataEntry(1, record.NativeMetadataGroup, nativeMetadataPoint(1, m(strings.Clone(help)))))
 		}
-		require.Same(t, first.seriesNativeMetadata[1].Metadata, second.seriesNativeMetadata[1].Metadata)
+		// The ledger keeps no values, so the first sighting stays unshared.
+		require.Equal(t, *first.seriesNativeMetadata[1].Metadata, *second.seriesNativeMetadata[1].Metadata)
+		require.NotSame(t, first.seriesNativeMetadata[1].Metadata, second.seriesNativeMetadata[1].Metadata)
+		require.Same(t, second.seriesNativeMetadata[1].Metadata, third.seriesNativeMetadata[1].Metadata)
 	})
 
 	t.Run("unknown series and old samples are filtered", func(t *testing.T) {

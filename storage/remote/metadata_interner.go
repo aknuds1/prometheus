@@ -14,6 +14,7 @@
 package remote
 
 import (
+	"hash/maphash"
 	"sync"
 
 	"github.com/prometheus/prometheus/model/metadata"
@@ -22,6 +23,11 @@ import (
 const (
 	metadataInternerEntries = 1 << 15
 	metadataInternerBytes   = 4 << 20
+	// The ledger records fingerprints of values seen once.
+	metadataInternerLedgerSets = 1 << 11
+	// Sets of ledger slots keep values that alternate in one set from evicting
+	// each other before either is admitted.
+	metadataLedgerWays = 4
 )
 
 // walMetadataInterner shares metadata decoded from the WAL across series and
@@ -29,17 +35,43 @@ const (
 var walMetadataInterner = newMetadataInterner(metadataInternerEntries, metadataInternerBytes)
 
 // metadataInterner maps metadata values to shared immutable pointers. It keeps
-// two generations, each bounded by entries and string bytes. A value that
-// leaves both generations stays valid but is no longer shared with new callers.
+// two generations, each bounded by entries and string bytes, and admits a value
+// to them on its second sighting, recorded by a set-associative ledger of
+// fingerprints that retains no values. Full sets replace their slots in turn.
+// A value that leaves both generations stays valid but is no longer shared
+// with new callers.
 type metadataInterner struct {
 	mtx            sync.Mutex
 	current, older map[metadata.Metadata]*metadata.Metadata
 	bytes          int
 	entries, limit int
+
+	fingerprint func(metadata.Metadata) uint64
+	// ledger holds sets of metadataLedgerWays fingerprints, zero for an empty
+	// slot; next is each full set's next slot to replace.
+	ledger []uint64
+	next   []uint8
 }
 
 func newMetadataInterner(entries, bytes int) *metadataInterner {
-	return &metadataInterner{current: map[metadata.Metadata]*metadata.Metadata{}, entries: entries, limit: bytes}
+	return newLedgerMetadataInterner(entries, bytes, metadataInternerLedgerSets)
+}
+
+// newLedgerMetadataInterner returns an interner whose ledger has sets sets, a
+// power of two.
+func newLedgerMetadataInterner(entries, bytes, sets int) *metadataInterner {
+	if sets <= 0 || sets&(sets-1) != 0 {
+		panic("metadata interner ledger sets must be a power of two")
+	}
+	seed := maphash.MakeSeed()
+	return &metadataInterner{
+		current:     map[metadata.Metadata]*metadata.Metadata{},
+		entries:     entries,
+		limit:       bytes,
+		fingerprint: func(m metadata.Metadata) uint64 { return maphash.Comparable(seed, m) },
+		ledger:      make([]uint64, sets*metadataLedgerWays),
+		next:        make([]uint8, sets),
+	}
 }
 
 // intern returns an immutable value equal to m. Callers must not modify it,
@@ -62,6 +94,9 @@ func (i *metadataInterner) intern(m metadata.Metadata) *metadata.Metadata {
 	if !ok {
 		owned := m
 		v = &owned
+		if !i.sightLocked(m) {
+			return v
+		}
 	}
 	if len(i.current) >= i.entries || i.bytes+cost > i.limit {
 		i.older, i.current, i.bytes = i.current, map[metadata.Metadata]*metadata.Metadata{}, 0
@@ -70,4 +105,32 @@ func (i *metadataInterner) intern(m metadata.Metadata) *metadata.Metadata {
 	i.current[*v] = v
 	i.bytes += cost
 	return v
+}
+
+// sightLocked records a sighting of m, which is in neither generation, and
+// reports whether it is a second sighting. Fingerprint collisions can only
+// change when a value is admitted.
+func (i *metadataInterner) sightLocked(m metadata.Metadata) bool {
+	fingerprint := i.fingerprint(m)
+	if fingerprint == 0 {
+		fingerprint = 1
+	}
+	set := int(fingerprint & uint64(len(i.next)-1))
+	ways := i.ledger[set*metadataLedgerWays : (set+1)*metadataLedgerWays]
+	free := -1
+	for w, slot := range ways {
+		if slot == fingerprint {
+			ways[w] = 0
+			return true
+		}
+		if slot == 0 && free < 0 {
+			free = w
+		}
+	}
+	if free < 0 {
+		free = int(i.next[set])
+		i.next[set] = uint8((free + 1) % metadataLedgerWays)
+	}
+	ways[free] = fingerprint
+	return false
 }
