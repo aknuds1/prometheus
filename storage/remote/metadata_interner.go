@@ -14,9 +14,14 @@
 package remote
 
 import (
+	"strings"
 	"sync"
+	"unsafe"
+
+	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/model/metadata"
+	"github.com/prometheus/prometheus/tsdb/record"
 )
 
 const (
@@ -46,12 +51,20 @@ func newMetadataInterner(entries, bytes int) *metadataInterner {
 // and the interner may retain m's strings. Values larger than a generation's
 // byte bound are never shared.
 func (i *metadataInterner) intern(m metadata.Metadata) *metadata.Metadata {
-	// Copy m only where a new value is needed: taking m's address would move
-	// it to the heap on entry, allocating on every hit.
+	return i.internValue(m, false)
+}
+
+// internBorrowed is intern for m whose strings may alias memory that the
+// caller reuses: it never retains them, and copies them into any value it
+// creates.
+func (i *metadataInterner) internBorrowed(m metadata.Metadata) *metadata.Metadata {
+	return i.internValue(m, true)
+}
+
+func (i *metadataInterner) internValue(m metadata.Metadata, borrowed bool) *metadata.Metadata {
 	cost := len(m.Type) + len(m.Unit) + len(m.Help)
 	if cost > i.limit {
-		unshared := m
-		return &unshared
+		return newInternedValue(m, borrowed)
 	}
 	i.mtx.Lock()
 	defer i.mtx.Unlock()
@@ -60,14 +73,67 @@ func (i *metadataInterner) intern(m metadata.Metadata) *metadata.Metadata {
 	}
 	v, ok := i.older[m]
 	if !ok {
-		owned := m
-		v = &owned
+		v = newInternedValue(m, borrowed)
 	}
 	if len(i.current) >= i.entries || i.bytes+cost > i.limit {
 		i.older, i.current, i.bytes = i.current, map[metadata.Metadata]*metadata.Metadata{}, 0
 	}
 	// Promotion keeps a value hit in the older generation shared after rotation.
+	// The key is the value itself, so it never refers to borrowed strings.
 	i.current[*v] = v
 	i.bytes += cost
 	return v
+}
+
+// newInternedValue returns a new value equal to m, owning copies of m's
+// strings if they are borrowed. Taking m's address here rather than in the
+// caller keeps hits from moving m to the heap.
+func newInternedValue(m metadata.Metadata, borrowed bool) *metadata.Metadata {
+	if borrowed {
+		return ownMetadata(m)
+	}
+	return &m
+}
+
+// ownMetadata returns a copy of m that does not alias m's memory. Known metric
+// types are shared constants. The other non-empty strings share one exact-size
+// payload, so retaining any of them retains all of them.
+func ownMetadata(m metadata.Metadata) *metadata.Metadata {
+	owned := &metadata.Metadata{Unit: m.Unit, Help: m.Help}
+	typ := string(m.Type)
+	if known := record.ToMetricType(record.GetMetricType(m.Type)); known == m.Type {
+		owned.Type, typ = known, ""
+	}
+	// Concatenation cannot be used: it returns an operand when the others are
+	// empty.
+	fields := [...]*string{&typ, &owned.Unit, &owned.Help}
+	size, count := 0, 0
+	for _, f := range fields {
+		if *f != "" {
+			size += len(*f)
+			count++
+		}
+	}
+	switch count {
+	case 0:
+	case 1:
+		for _, f := range fields {
+			*f = strings.Clone(*f)
+		}
+	default:
+		payload := make([]byte, size)
+		offset := 0
+		for _, f := range fields {
+			if *f == "" {
+				continue
+			}
+			n := copy(payload[offset:], *f)
+			*f = unsafe.String(&payload[offset], n)
+			offset += n
+		}
+	}
+	if typ != "" {
+		owned.Type = model.MetricType(typ)
+	}
+	return owned
 }

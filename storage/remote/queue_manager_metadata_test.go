@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -44,6 +46,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/record"
+	"github.com/prometheus/prometheus/tsdb/wlog"
 	"github.com/prometheus/prometheus/util/compression"
 )
 
@@ -155,6 +158,49 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 			w.StoreNativeMetadata(nativeMetadataEntry(1, record.NativeMetadataGroup, nativeMetadataPoint(1, m(strings.Clone(help)))))
 		}
 		require.Same(t, first.seriesNativeMetadata[1].Metadata, second.seriesNativeMetadata[1].Metadata)
+	})
+
+	t.Run("borrowed entries are stored like copied ones", func(t *testing.T) {
+		_, copying, _ := newQM(t)
+		_, borrowing, _ := newQM(t)
+		require.Implements(t, (*wlog.NativeMetadataBorrowWriteTo)(nil), borrowing, "watchers pass queues borrowed entries")
+		rng := rand.New(rand.NewPCG(1, 2))
+		var enc record.Encoder
+		var dec record.Decoder
+		from := map[chunks.HeadSeriesRef]int64{}
+		for range 500 {
+			var entries []record.RefNativeMetadata
+			for ref := chunks.HeadSeriesRef(1); ref <= 4; ref++ {
+				if rng.IntN(2) == 0 {
+					continue
+				}
+				// Groups start before the newest point at times, so that
+				// merges also take the out-of-order path.
+				from[ref] += int64(rng.IntN(20)) - 5
+				var points []record.RefNativeMetadataPoint
+				for range 1 + rng.IntN(3) {
+					from[ref] += 1 + int64(rng.IntN(5))
+					points = append(points, nativeMetadataPoint(from[ref], m(fmt.Sprintf("help %d", rng.IntN(6)))))
+				}
+				entries = append(entries, record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataGroup, Points: points})
+			}
+			rec := enc.NativeMetadata(entries, nil)
+			copied, _, err := dec.NativeMetadata(rec, nil, nil)
+			require.NoError(t, err)
+			copying.StoreNativeMetadata(copied)
+			buf := slices.Clone(rec)
+			borrowed, _, err := dec.NativeMetadataBorrowed(buf, nil, nil)
+			require.NoError(t, err)
+			borrowing.StoreBorrowedNativeMetadata(borrowed)
+			clear(buf)
+		}
+		require.NotEmpty(t, copying.seriesNativeMetadata)
+		require.Len(t, borrowing.seriesNativeMetadata, len(copying.seriesNativeMetadata))
+		for ref, want := range copying.seriesNativeMetadata {
+			got := borrowing.seriesNativeMetadata[ref]
+			require.Equal(t, want.Truncated, got.Truncated)
+			require.Equal(t, want.AppendPoints(nil), got.AppendPoints(nil))
+		}
 	})
 
 	t.Run("unknown series and old samples are filtered", func(t *testing.T) {

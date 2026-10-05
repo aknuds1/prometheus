@@ -1104,6 +1104,15 @@ type nativeMetadataWriter struct{ *QueueManager }
 
 // StoreNativeMetadata implements wlog.NativeMetadataWriteTo.
 func (w nativeMetadataWriter) StoreNativeMetadata(entries []record.RefNativeMetadata) {
+	w.storeNativeMetadata(entries, walMetadataInterner.intern)
+}
+
+// StoreBorrowedNativeMetadata implements wlog.NativeMetadataBorrowWriteTo.
+func (w nativeMetadataWriter) StoreBorrowedNativeMetadata(entries []record.RefNativeMetadata) {
+	w.storeNativeMetadata(entries, walMetadataInterner.internBorrowed)
+}
+
+func (w nativeMetadataWriter) storeNativeMetadata(entries []record.RefNativeMetadata, intern func(metadata.Metadata) *metadata.Metadata) {
 	t := w.QueueManager
 	t.seriesMtx.Lock()
 	defer t.seriesMtx.Unlock()
@@ -1111,7 +1120,7 @@ func (w nativeMetadataWriter) StoreNativeMetadata(entries []record.RefNativeMeta
 		if e.Ref == 0 {
 			continue
 		}
-		t.nativePoints = nativemetadata.AppendRecordPoints(t.nativePoints[:0], e.Points, walMetadataInterner.intern)
+		t.nativePoints = nativemetadata.AppendRecordPoints(t.nativePoints[:0], e.Points, intern)
 		state := t.seriesNativeMetadata[e.Ref]
 		if state.Apply(e.Kind, e.Truncated, t.nativePoints) {
 			t.metrics.unknownMetadataTotal.Inc()

@@ -530,6 +530,10 @@ func TestRemoteWriteMetadataPipelineOracles(t *testing.T) {
 	t.Run("sender heap attribution", func(t *testing.T) {
 		defer func(rate int) { runtime.MemProfileRate = rate }(runtime.MemProfileRate)
 		runtime.MemProfileRate = 1
+		// Values interned by earlier tests would be hits, retaining strings
+		// that those tests allocated.
+		defer func(i *metadataInterner) { walMetadataInterner = i }(walMetadataInterner)
+		walMetadataInterner = newMetadataInterner(metadataInternerEntries, metadataInternerBytes)
 		const series, help = 200, 4096
 		c := metadataPipelineConfig{Case: "unchanged", Source: "wal", Series: series, Values: series, HelpBytes: help, Sweeps: 2, Writers: 2, Shards: 2, Batch: 50, Capacity: 100, CommitSize: 50, ReceiverProcs: 2, Base: time.Now().Add(time.Hour).UnixMilli()}
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
