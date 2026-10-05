@@ -73,6 +73,21 @@ func stageAPreparedDB(tb testing.TB, c stageAWriterCase) (*DB, *stageAWriterInpu
 	return db, in, refs
 }
 
+// stageANativeRecordStarts returns a native record's series, helps and
+// starts; every entry must be a one-point merge group.
+func stageANativeRecordStarts(tb testing.TB, rec []byte) []stageAStart {
+	var dec record.Decoder
+	entries, _, err := dec.NativeMetadata(rec, nil, nil)
+	require.NoError(tb, err)
+	starts := make([]stageAStart, 0, len(entries))
+	for _, e := range entries {
+		require.Equal(tb, record.NativeMetadataGroup, e.Kind)
+		require.Len(tb, e.Points, 1)
+		starts = append(starts, stageAStart{ref: e.Ref, help: e.Points[0].Help, from: e.Points[0].EffectiveFrom})
+	}
+	return starts
+}
+
 func stageANativeEntries(points []stageAChange) []record.RefNativeMetadata {
 	entries := make([]record.RefNativeMetadata, len(points))
 	for i, p := range points {
