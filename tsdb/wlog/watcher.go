@@ -85,6 +85,19 @@ type NativeMetadataWriteTo interface {
 	ResetNativeMetadata()
 }
 
+// NativeMetadataBorrowWriteTo is a NativeMetadataWriteTo that accepts entries
+// whose strings alias the watcher's reused record buffer. A watcher passes such
+// a writer borrowed entries instead of copied ones.
+type NativeMetadataBorrowWriteTo interface {
+	NativeMetadataWriteTo
+	// StoreBorrowedNativeMetadata applies entries in WAL order, as
+	// StoreNativeMetadata does, but their strings are valid only during the
+	// call. It must not retain the entries, their points or their strings, nor
+	// modify them; it must copy any string contents it retains into memory it
+	// owns.
+	StoreBorrowedNativeMetadata([]record.RefNativeMetadata)
+}
+
 // WriteNotified notifies the watcher that data has been written so that it can read.
 type WriteNotified interface {
 	Notify()
@@ -104,6 +117,7 @@ type Watcher struct {
 	name           string
 	writer         WriteTo
 	native         NativeMetadataWriteTo // Set when writer forwards native metadata.
+	borrowNative   NativeMetadataBorrowWriteTo
 	recordBuf      *record.BuffersPool
 	logger         *slog.Logger
 	walDir         string
@@ -226,14 +240,17 @@ func NewWatcher(
 		recordBuf = record.NewBuffersPool()
 	}
 	var native NativeMetadataWriteTo
+	var borrowNative NativeMetadataBorrowWriteTo
 	if sendMetadata {
 		native, _ = writer.(NativeMetadataWriteTo)
+		borrowNative, _ = writer.(NativeMetadataBorrowWriteTo)
 	}
 	return &Watcher{
 		logger:         logger,
 		recordBuf:      recordBuf,
 		writer:         writer,
 		native:         native,
+		borrowNative:   borrowNative,
 		metrics:        metrics,
 		readerMetrics:  readerMetrics,
 		walDir:         filepath.Join(dir, "wal"),
@@ -701,12 +718,22 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 				break
 			}
 			if w.native != nil {
-				nativeEntries, nativePoints, err = dec.NativeMetadata(rec, nativeEntries[:0], nativePoints[:0])
+				// Borrowed entries alias rec, which the reader reuses after
+				// this record.
+				if w.borrowNative != nil {
+					nativeEntries, nativePoints, err = dec.NativeMetadataBorrowed(rec, nativeEntries[:0], nativePoints[:0])
+				} else {
+					nativeEntries, nativePoints, err = dec.NativeMetadata(rec, nativeEntries[:0], nativePoints[:0])
+				}
 				if err != nil {
 					w.recordDecodeFailsMetric.Inc()
 					return err
 				}
-				w.native.StoreNativeMetadata(nativeEntries)
+				if w.borrowNative != nil {
+					w.borrowNative.StoreBorrowedNativeMetadata(nativeEntries)
+				} else {
+					w.native.StoreNativeMetadata(nativeEntries)
+				}
 				clear(nativeEntries)
 				clear(nativePoints)
 				break

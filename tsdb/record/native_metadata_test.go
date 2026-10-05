@@ -15,8 +15,10 @@ package record
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 
@@ -55,6 +57,35 @@ func TestNativeMetadataRecord(t *testing.T) {
 		reused, _, err := dec.NativeMetadata(rec, decoded[:0], points[:0])
 		require.NoError(t, err)
 		require.Equal(t, entries, normalizeNativeMetadata(reused))
+	})
+
+	t.Run("borrowed strings alias the record", func(t *testing.T) {
+		buf := slices.Clone(rec)
+		decoded, _, err := dec.NativeMetadataBorrowed(buf, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, entries, normalizeNativeMetadata(decoded))
+		start := uintptr(unsafe.Pointer(unsafe.SliceData(buf)))
+		inRecord := func(s string) bool {
+			p := uintptr(unsafe.Pointer(unsafe.StringData(s)))
+			return p >= start && p < start+uintptr(len(buf))
+		}
+		copied, _, err := dec.NativeMetadata(buf, nil, nil)
+		require.NoError(t, err)
+		for i, e := range decoded {
+			for j, p := range e.Points {
+				for _, s := range []string{p.Unit, p.Help} {
+					if s != "" {
+						require.True(t, inRecord(s))
+					}
+				}
+				require.False(t, inRecord(copied[i].Points[j].Unit) || inRecord(copied[i].Points[j].Help))
+			}
+		}
+		// Empty strings refer to no memory, so they never pin the record.
+		require.Nil(t, unsafe.StringData(decoded[2].Points[0].Help))
+		clear(buf)
+		require.Equal(t, entries, normalizeNativeMetadata(copied))
+		require.NotEqual(t, entries, normalizeNativeMetadata(decoded))
 	})
 
 	t.Run("older decoders read the newest point", func(t *testing.T) {
@@ -172,6 +203,9 @@ func TestNativeMetadataRecord(t *testing.T) {
 				require.Less(t, len(decoded), len(entries))
 				require.Equal(t, entries[:len(decoded)], normalizeNativeMetadata(decoded))
 			}
+			borrowed, _, borrowedErr := dec.NativeMetadataBorrowed(rec[:n], nil, nil)
+			require.Equal(t, err, borrowedErr)
+			require.Equal(t, decoded, borrowed)
 		}
 		for _, c := range []struct {
 			name  string
@@ -194,6 +228,8 @@ func TestNativeMetadataRecord(t *testing.T) {
 				buf.PutUvarintBytes(c.value)
 				_, _, err := dec.NativeMetadata(buf.Get(), nil, nil)
 				require.Error(t, err)
+				_, _, borrowedErr := dec.NativeMetadataBorrowed(buf.Get(), nil, nil)
+				require.Equal(t, err, borrowedErr)
 			})
 		}
 		_, _, err := dec.NativeMetadata(enc.Series(nil, nil), nil, nil)
@@ -225,6 +261,9 @@ func FuzzDecoderNativeMetadata(f *testing.F) {
 	f.Fuzz(func(t *testing.T, rec []byte) {
 		var dec Decoder
 		entries, points, err := dec.NativeMetadata(rec, nil, nil)
+		borrowed, _, borrowedErr := dec.NativeMetadataBorrowed(rec, nil, nil)
+		require.Equal(t, err, borrowedErr)
+		require.Equal(t, entries, borrowed)
 		if err != nil {
 			return
 		}

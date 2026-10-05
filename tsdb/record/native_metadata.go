@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"unsafe"
 
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/encoding"
@@ -154,6 +155,16 @@ func uvarintSize(x uint64) int {
 // both slices only after the entries are no longer needed. Framing errors are
 // returned; well-framed entries of unknown kind are decoded as such.
 func (*Decoder) NativeMetadata(rec []byte, entries []RefNativeMetadata, points []RefNativeMetadataPoint) ([]RefNativeMetadata, []RefNativeMetadataPoint, error) {
+	return decodeNativeMetadata(rec, entries, points, false)
+}
+
+// NativeMetadataBorrowed is NativeMetadata without copying strings: non-empty
+// units and helps alias rec, so they are valid only while rec is unchanged.
+func (*Decoder) NativeMetadataBorrowed(rec []byte, entries []RefNativeMetadata, points []RefNativeMetadataPoint) ([]RefNativeMetadata, []RefNativeMetadataPoint, error) {
+	return decodeNativeMetadata(rec, entries, points, true)
+}
+
+func decodeNativeMetadata(rec []byte, entries []RefNativeMetadata, points []RefNativeMetadataPoint, borrow bool) ([]RefNativeMetadata, []RefNativeMetadataPoint, error) {
 	dec := encoding.Decbuf{B: rec}
 	if Type(dec.Byte()) != Metadata {
 		return nil, nil, errors.New("invalid record type")
@@ -172,9 +183,9 @@ func (*Decoder) NativeMetadata(rec []byte, entries []RefNativeMetadata, points [
 			}
 			switch string(name) {
 			case unitMetaName:
-				newest.Unit = dec.UvarintStr()
+				newest.Unit = recordString(dec.UvarintBytes(), borrow)
 			case helpMetaName:
-				newest.Help = dec.UvarintStr()
+				newest.Help = recordString(dec.UvarintBytes(), borrow)
 			case nativeFromMetaName:
 				value := dec.UvarintBytes()
 				if dec.Err() != nil {
@@ -210,7 +221,7 @@ func (*Decoder) NativeMetadata(rec []byte, entries []RefNativeMetadata, points [
 				return nil, nil, fmt.Errorf("native metadata group of %d points in %d bytes", count, len(group))
 			}
 			for range count {
-				points = append(points, RefNativeMetadataPoint{EffectiveFrom: g.Be64int64(), Type: g.Byte(), Unit: g.UvarintStr(), Help: g.UvarintStr()})
+				points = append(points, RefNativeMetadataPoint{EffectiveFrom: g.Be64int64(), Type: g.Byte(), Unit: recordString(g.UvarintBytes(), borrow), Help: recordString(g.UvarintBytes(), borrow)})
 			}
 			if g.Err() != nil {
 				return nil, nil, fmt.Errorf("native metadata group: %w", g.Err())
@@ -244,4 +255,17 @@ func (*Decoder) NativeMetadata(rec []byte, entries []RefNativeMetadata, points [
 		return nil, nil, fmt.Errorf("unexpected %d bytes left in entry", len(dec.B))
 	}
 	return entries, points, nil
+}
+
+// recordString returns b as a string, aliasing b if borrow is set. Empty
+// strings never alias, so they cannot keep a record alive.
+func recordString(b []byte, borrow bool) string {
+	switch {
+	case len(b) == 0:
+		return ""
+	case borrow:
+		return unsafe.String(&b[0], len(b))
+	default:
+		return string(b)
+	}
 }
