@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/prometheus/common/model"
 	"go.uber.org/atomic"
@@ -140,11 +141,74 @@ type nativeMetricMetadataValueShard struct {
 	recentNext  int
 }
 
+// cloneNativeMetricMetadata returns a copy of m that does not alias m's memory.
+// Known metric types are shared constants. The other non-empty strings share
+// one exact-size payload, so retaining any of them retains all of them.
 func cloneNativeMetricMetadata(m metadata.Metadata) *metadata.Metadata {
-	return &metadata.Metadata{
-		Type: model.MetricType(strings.Clone(string(m.Type))),
-		Unit: strings.Clone(m.Unit),
-		Help: strings.Clone(m.Help),
+	owned := &metadata.Metadata{Type: knownMetricType(m.Type), Unit: m.Unit, Help: m.Help}
+	typ := ""
+	if owned.Type == "" {
+		typ = string(m.Type)
+	}
+	ownCompactStrings(&typ, &owned.Unit, &owned.Help)
+	if typ != "" {
+		owned.Type = model.MetricType(typ)
+	}
+	return owned
+}
+
+// knownMetricType returns t's shared constant, or "" if t is not a known type.
+func knownMetricType(t model.MetricType) model.MetricType {
+	switch t {
+	case model.MetricTypeCounter:
+		return model.MetricTypeCounter
+	case model.MetricTypeGauge:
+		return model.MetricTypeGauge
+	case model.MetricTypeHistogram:
+		return model.MetricTypeHistogram
+	case model.MetricTypeGaugeHistogram:
+		return model.MetricTypeGaugeHistogram
+	case model.MetricTypeSummary:
+		return model.MetricTypeSummary
+	case model.MetricTypeInfo:
+		return model.MetricTypeInfo
+	case model.MetricTypeStateset:
+		return model.MetricTypeStateset
+	case model.MetricTypeUnknown:
+		return model.MetricTypeUnknown
+	}
+	return ""
+}
+
+// ownCompactStrings replaces the non-empty strings with copies. A single
+// string gets its own allocation; several share one exact-size payload.
+// Concatenation cannot be used: it returns an operand when the others are empty.
+func ownCompactStrings(fields ...*string) {
+	size, owned := 0, 0
+	for _, f := range fields {
+		if *f != "" {
+			size += len(*f)
+			owned++
+		}
+	}
+	switch owned {
+	case 0:
+		return
+	case 1:
+		for _, f := range fields {
+			*f = strings.Clone(*f)
+		}
+		return
+	}
+	payload := make([]byte, size)
+	offset := 0
+	for _, f := range fields {
+		if *f == "" {
+			continue
+		}
+		n := copy(payload[offset:], *f)
+		*f = unsafe.String(&payload[offset], n)
+		offset += n
 	}
 }
 
