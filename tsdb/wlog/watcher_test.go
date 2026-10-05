@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -923,6 +924,28 @@ func (m *nativeWriteToMock) ResetNativeMetadata() {
 	m.resets++
 }
 
+// nativeBorrowWriteToMock accepts borrowed entries, copying their strings.
+type nativeBorrowWriteToMock struct {
+	*nativeWriteToMock
+	borrowed, copied int
+}
+
+func (m *nativeBorrowWriteToMock) StoreNativeMetadata(entries []record.RefNativeMetadata) {
+	m.copied++
+	m.nativeWriteToMock.StoreNativeMetadata(entries)
+}
+
+func (m *nativeBorrowWriteToMock) StoreBorrowedNativeMetadata(entries []record.RefNativeMetadata) {
+	m.borrowed++
+	for _, e := range entries {
+		e.Points = append([]record.RefNativeMetadataPoint(nil), e.Points...)
+		for i := range e.Points {
+			e.Points[i].Unit, e.Points[i].Help = strings.Clone(e.Points[i].Unit), strings.Clone(e.Points[i].Help)
+		}
+		m.entries = append(m.entries, e)
+	}
+}
+
 func reduceNativeMetadata(entries []record.RefNativeMetadata) map[chunks.HeadSeriesRef]string {
 	states := map[chunks.HeadSeriesRef]*nativemetadata.State{}
 	intern := func(m metadata.Metadata) *metadata.Metadata { return &m }
@@ -1081,6 +1104,18 @@ func TestWatcher_NativeMetadata(t *testing.T) {
 		require.NoError(t, watcher.Run())
 		require.Equal(t, 1, wt.resets)
 		require.NotEmpty(t, wt.entries)
+	})
+
+	t.Run("writers that accept borrowed entries get them", func(t *testing.T) {
+		s := newWAL(t)
+		wt := &nativeBorrowWriteToMock{nativeWriteToMock: &nativeWriteToMock{writeToMock: newWriteToMock(0)}}
+		watcher := NewWatcher(wMetrics, nil, nil, "", wt, s.dir, false, false, true, nil)
+		watcher.SetMetrics()
+		watcher.MaxSegment = len(segments) - 1
+		require.NoError(t, watcher.Run())
+		require.Equal(t, s.entries, wt.entries)
+		require.Positive(t, wt.borrowed)
+		require.Zero(t, wt.copied, "borrowing writers never get copied entries")
 	})
 
 	t.Run("legacy writers keep legacy metadata", func(t *testing.T) {
