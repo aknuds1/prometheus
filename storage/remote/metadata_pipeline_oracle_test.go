@@ -576,7 +576,5 @@ func TestRemoteWriteMetadataPipelineOracles(t *testing.T) {
 		// Both receivers validate and count every item.
 		_, err = f.drain(ctx, f.expectedItems(c.Sweeps+1))
 		require.NoError(t, err)
-		_, err = newMetadataPipeline(ctx, metadataPipelineConfig{Case: "backlog", Series: 100, Writers: 1, CommitSize: 10, Endpoints: 2})
-		require.Error(t, err)
 	})
 }

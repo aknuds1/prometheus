@@ -331,8 +331,14 @@ as the sender's. The process-wide interner is one allocation site, counted once
 however many endpoints share it. Allocation stacks approximate ownership; they
 do not establish which object retains an allocation. Results keep the whole
 process's heap as a cross-check. `PROMETHEUS_METADATA_PIPELINE_ENDPOINTS=2` adds a
-second queue and receiver, for heap passes of cases without held backlogs or
-restarts.
+second queue and receiver, for any case without a restart. In a held backlog,
+`PROMETHEUS_METADATA_PIPELINE_RELEASE_LAG` releases the second receiver only once
+the first has acknowledged that many samples since the hold. Counts start from
+each receiver's acknowledged items at the hold, which include the seed. The lag
+is in delivered samples: queue buffers and in-flight requests separate it from
+how far apart the WAL readers are. Results record each baseline, the first
+receiver's delta at the second release, its overshoot over the lag, and the
+second receiver's delta, which must be zero.
 
 `BenchmarkHeadMetricMetadataBackfillWAL` reports the decompressed metadata and
 compressed WAL bytes per sample of an out-of-order backfill, after an untimed

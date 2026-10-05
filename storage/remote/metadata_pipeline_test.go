@@ -64,7 +64,8 @@ const metadataPipelineReceiverEnv = "PROMETHEUS_METADATA_PIPELINE_RECEIVER"
 // The restart case checkpoints the WAL after RestartStep, then restarts storage
 // and sender before the remaining steps. HelpBytes lengthens help strings beyond
 // the default 64 bytes. Endpoints adds remote-write queues, each with its own
-// receiver.
+// receiver. In a held backlog with two endpoints, ReleaseLag releases the second
+// receiver only once the first has acknowledged that many samples since the hold.
 type metadataPipelineConfig struct {
 	Group                            string
 	Case, Source                     string
@@ -73,7 +74,7 @@ type metadataPipelineConfig struct {
 	CommitSize, ReceiverProcs        int
 	StepsPerCommit, RestartStep      int
 	WALSegmentSize                   int
-	HelpBytes, Endpoints             int
+	HelpBytes, Endpoints, ReleaseLag int
 	Base                             int64
 	Mixed                            bool
 	SweepInterval                    time.Duration
@@ -514,7 +515,8 @@ type metadataPipeline struct {
 	latency                  [][]time.Duration
 	peak                     []int64
 	lateness                 [][]time.Duration
-	enqueueRetriesBeforeHold float64
+	enqueueRetriesBeforeHold []float64
+	heldItems                []int64
 	diagnostics              *metadataPipelineDiagnostics
 }
 
@@ -531,8 +533,11 @@ func newMetadataPipeline(ctx context.Context, c metadataPipelineConfig) (*metada
 	if (c.Case == "restart") != (c.RestartStep > 0) || (c.RestartStep > 0 && (c.Group != "" || c.RestartStep <= metadataPipelineRestartHistory || c.RestartStep >= c.lastStep())) {
 		return nil, errors.New("restarts require an ungrouped restart trace with steps after the history and after the restart")
 	}
-	if c.Endpoints < 0 || (c.Endpoints > 1 && (c.Case == "backlog" || c.RestartStep > 0)) {
-		return nil, errors.New("additional endpoints are supported only without held backlogs and restarts")
+	if c.Endpoints < 0 || (c.Endpoints > 1 && c.RestartStep > 0) {
+		return nil, errors.New("additional endpoints are supported only without restarts")
+	}
+	if c.ReleaseLag < 0 || (c.ReleaseLag > 0 && (c.Case != "backlog" || c.Endpoints != 2 || int64(c.ReleaseLag)+int64(c.Capacity*c.Shards) > int64(c.Series)*int64(c.lastStep()))) {
+		return nil, errors.New("a release lag requires a held backlog with two endpoints, and must leave a queue's capacity of the trace")
 	}
 	f := &metadataPipeline{
 		config: c, registry: prometheus.NewRegistry(), observer: prometheus.NewRegistry(), refs: make([]storage.SeriesRef, c.Series),
@@ -671,32 +676,63 @@ func (f *metadataPipeline) openSender(dir string) error {
 	return nil
 }
 
+func (f *metadataPipeline) receivers() []*metadataPipelineReceiverProcess {
+	return append([]*metadataPipelineReceiverProcess{f.receiver}, f.extraReceivers...)
+}
+
+func (f *metadataPipeline) queues() []*QueueManager {
+	return append([]*QueueManager{f.queue}, f.extraQueues...)
+}
+
 func (f *metadataPipeline) pending() int64 {
 	var pending int64
-	for _, queue := range append([]*QueueManager{f.queue}, f.extraQueues...) {
-		pending += queue.shards.enqueuedSamples.Load() + queue.shards.enqueuedHistograms.Load() + queue.shards.enqueuedExemplars.Load()
+	for _, queue := range f.queues() {
+		pending += metadataPipelineQueuePending(queue)
 	}
 	return pending
 }
 
-func (f *metadataPipeline) holdReceiver(ctx context.Context) error {
-	f.enqueueRetriesBeforeHold = testutil.ToFloat64(f.queue.metrics.enqueueRetriesTotal)
-	_, err := f.receiver.command(ctx, "hold")
-	return err
+func metadataPipelineQueuePending(queue *QueueManager) int64 {
+	return queue.shards.enqueuedSamples.Load() + queue.shards.enqueuedHistograms.Load() + queue.shards.enqueuedExemplars.Load()
 }
 
-// awaitBacklog waits for both a held HTTP request and actual enqueue backpressure.
-// Merely withholding an acknowledgement need not block the WAL reader.
+// holdReceivers withholds every receiver's acknowledgements. A receiver's
+// acknowledged items at its hold are its baseline: the hold follows the seed,
+// whose deliveries the cumulative counts include.
+func (f *metadataPipeline) holdReceivers(ctx context.Context) error {
+	f.enqueueRetriesBeforeHold, f.heldItems = f.enqueueRetriesBeforeHold[:0], f.heldItems[:0]
+	for _, queue := range f.queues() {
+		f.enqueueRetriesBeforeHold = append(f.enqueueRetriesBeforeHold, testutil.ToFloat64(queue.metrics.enqueueRetriesTotal))
+	}
+	for _, receiver := range f.receivers() {
+		stats, err := receiver.command(ctx, "hold")
+		if err != nil {
+			return err
+		}
+		f.heldItems = append(f.heldItems, stats.items())
+	}
+	return nil
+}
+
+// awaitBacklog waits until every receiver holds a request and every queue has
+// retried an enqueue: merely withholding an acknowledgement need not block a WAL
+// reader. Each queue must then leave more of the trace unread than one decoded
+// record and a margin, so that samples are selected from history, not just
+// delayed.
 func (f *metadataPipeline) awaitBacklog(ctx context.Context) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		stats, err := f.receiver.command(ctx, "stats")
-		if err != nil {
-			return err
+		backlogged := true
+		for i, receiver := range f.receivers() {
+			stats, err := receiver.command(ctx, "stats")
+			if err != nil {
+				return err
+			}
+			backlogged = backlogged && stats.HeldRequests > 0 && testutil.ToFloat64(f.queues()[i].metrics.enqueueRetriesTotal) > f.enqueueRetriesBeforeHold[i]
 		}
-		if stats.HeldRequests > 0 && testutil.ToFloat64(f.queue.metrics.enqueueRetriesTotal) > f.enqueueRetriesBeforeHold {
-			return nil
+		if backlogged {
+			break
 		}
 		select {
 		case <-ctx.Done():
@@ -704,6 +740,72 @@ func (f *metadataPipeline) awaitBacklog(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+	samples := int64(f.config.Series) * int64(f.config.lastStep())
+	for i, queue := range f.queues() {
+		if unread := samples - metadataPipelineQueuePending(queue); unread <= int64(f.config.CommitSize+256) {
+			return fmt.Errorf("queue %d leaves only %d of %d samples unread", i, unread, samples)
+		}
+	}
+	return nil
+}
+
+// metadataPipelineRelease records the release of a held backlog with several
+// endpoints. Deltas are acknowledged items since a receiver's hold; they are
+// counted in delivered samples, not in WAL read positions.
+type metadataPipelineRelease struct {
+	Lag int
+	// Baselines are each receiver's acknowledged items at its hold.
+	Baselines []int64
+	// FirstDelta is the first receiver's delta when the others are released,
+	// and Overshoot is how far it exceeds Lag.
+	FirstDelta, Overshoot int64
+	// LaterDeltas are the other receivers' deltas at their release, which
+	// must be zero.
+	LaterDeltas []int64
+}
+
+// metadataPipelineReleaseDue reports whether a receiver that had acknowledged
+// baseline items at its hold has acknowledged at least lag more since.
+func metadataPipelineReleaseDue(baseline, current int64, lag int) bool {
+	return current-baseline >= int64(lag)
+}
+
+// release releases the first receiver, then the others once the first has
+// acknowledged the configured lag since its hold. It returns nil for a single
+// endpoint.
+func (f *metadataPipeline) release(ctx context.Context) (*metadataPipelineRelease, error) {
+	// The reply's counts precede the release, so the lag starts from the hold.
+	stats, err := f.receiver.command(ctx, "release")
+	if err != nil || len(f.extraReceivers) == 0 {
+		return nil, err
+	}
+	r := &metadataPipelineRelease{Lag: f.config.ReleaseLag, Baselines: slices.Clone(f.heldItems)}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for !metadataPipelineReleaseDue(f.heldItems[0], stats.items(), r.Lag) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+		if stats, err = f.receiver.command(ctx, "stats"); err != nil {
+			return nil, err
+		}
+	}
+	r.FirstDelta = stats.items() - f.heldItems[0]
+	r.Overshoot = r.FirstDelta - int64(r.Lag)
+	for i, receiver := range f.extraReceivers {
+		stats, err := receiver.command(ctx, "release")
+		if err != nil {
+			return nil, err
+		}
+		delta := stats.items() - f.heldItems[i+1]
+		if delta != 0 {
+			return nil, fmt.Errorf("held receiver %d acknowledged %d items before its release", i+1, delta)
+		}
+		r.LaterDeltas = append(r.LaterDeltas, delta)
+	}
+	return r, nil
 }
 
 // metadataPipelinePacer waits for absolute deadlines without shifting late work.
@@ -1245,7 +1347,7 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 						first = c.RestartStep + 1
 					}
 					if c.Case == "backlog" {
-						require.NoError(t, f.holdReceiver(ctx))
+						require.NoError(t, f.holdReceivers(ctx))
 					}
 					require.NoError(t, f.append(ctx, first, c.Sweeps))
 					if c.Case == "backlog" {
@@ -1282,6 +1384,94 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 			})
 		}
 	}
+	t.Run("two endpoints with a held backlog", func(t *testing.T) {
+		for _, mode := range []string{"disabled", "wal", "native"} {
+			for _, lag := range []int{0, 10000} {
+				t.Run(fmt.Sprintf("source=%s/lag=%d", mode, lag), func(t *testing.T) {
+					// The distinct backlog of the scale benchmark. Each receiver
+					// acknowledges the 10,000 seed samples before the hold, so a lag
+					// counted from zero would release the second at once.
+					c := metadataPipelineConfig{Group: "backlog", Case: "backlog", Source: mode, Series: 10000, Values: 10000, Sweeps: 4, Writers: 1, Shards: 1, Batch: 2000, Capacity: 10000, CommitSize: 1000, ReceiverProcs: 2, Endpoints: 2, ReleaseLag: lag, Base: time.Now().Add(time.Hour).UnixMilli()}
+					ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+					defer cancel()
+					f, err := newMetadataPipeline(ctx, c)
+					require.NoError(t, err)
+					defer func() { require.NoError(t, f.close()) }()
+					dir := t.TempDir()
+					require.NoError(t, f.open(dir))
+					require.NoError(t, f.append(ctx, 0, 0))
+					_, err = f.drain(ctx, f.expectedItems(1))
+					require.NoError(t, err)
+					require.NoError(t, f.holdReceivers(ctx))
+					require.NoError(t, f.append(ctx, 1, c.Sweeps))
+					require.NoError(t, f.awaitBacklog(ctx))
+					release, err := f.release(ctx)
+					require.NoError(t, err)
+					require.Equal(t, []int64{f.expectedItems(1), f.expectedItems(1)}, release.Baselines)
+					require.GreaterOrEqual(t, release.FirstDelta, int64(lag))
+					require.Equal(t, release.FirstDelta-int64(lag), release.Overshoot)
+					require.Equal(t, []int64{0}, release.LaterDeltas)
+					_, err = f.drain(ctx, f.expectedItems(c.Sweeps+1))
+					require.NoError(t, err)
+					metrics, err := f.metrics()
+					require.NoError(t, err)
+					require.NoError(t, checkMetadataPipelineMetrics(metrics))
+					require.NoError(t, f.closeSender())
+					require.NoError(t, checkMetadataPipelineWAL(c, filepath.Join(dir, "wal"), nil))
+				})
+			}
+		}
+	})
+	t.Run("release decision", func(t *testing.T) {
+		for _, tc := range []struct {
+			name              string
+			baseline, current int64
+			lag               int
+			due               bool
+		}{
+			{name: "seed deliveries alone", baseline: 10000, current: 10000, lag: 10000},
+			{name: "one sample short", baseline: 10000, current: 19999, lag: 10000},
+			{name: "lag reached", baseline: 10000, current: 20000, lag: 10000, due: true},
+			{name: "lag exceeded", baseline: 10000, current: 20500, lag: 10000, due: true},
+			{name: "no lag", baseline: 10000, current: 10000, due: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				require.Equal(t, tc.due, metadataPipelineReleaseDue(tc.baseline, tc.current, tc.lag))
+			})
+		}
+	})
+	t.Run("release lag configuration", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			mutate func(*metadataPipelineConfig)
+			err    string
+		}{
+			{name: "lag leaving a queue's capacity of the trace"},
+			{name: "negative lag", mutate: func(c *metadataPipelineConfig) { c.ReleaseLag = -1 }, err: "release lag"},
+			{name: "lag without a held backlog", mutate: func(c *metadataPipelineConfig) { c.Group, c.Case = "", "unchanged" }, err: "release lag"},
+			{name: "lag with one endpoint", mutate: func(c *metadataPipelineConfig) { c.Endpoints = 1 }, err: "release lag"},
+			{name: "lag with three endpoints", mutate: func(c *metadataPipelineConfig) { c.Endpoints = 3 }, err: "release lag"},
+			{name: "lag exceeding the trace less a queue's capacity", mutate: func(c *metadataPipelineConfig) { c.ReleaseLag++ }, err: "release lag"},
+			{name: "two endpoints with a restart", mutate: func(c *metadataPipelineConfig) {
+				c.Group, c.Case, c.Sweeps, c.RestartStep, c.ReleaseLag = "", "restart", 200, 180, 0
+			}, err: "without restarts"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				// 1,200 samples follow the seed, and a queue holds 100.
+				c := metadataPipelineConfig{Group: "backlog", Case: "backlog", Source: "native", Series: 300, Values: 300, Sweeps: 4, Writers: 1, Shards: 1, Batch: 20, Capacity: 100, CommitSize: 50, ReceiverProcs: 2, Endpoints: 2, ReleaseLag: 1100}
+				if tc.mutate != nil {
+					tc.mutate(&c)
+				}
+				f, err := newMetadataPipeline(t.Context(), c)
+				if tc.err != "" {
+					require.ErrorContains(t, err, tc.err)
+					return
+				}
+				require.NoError(t, err)
+				require.NoError(t, f.close())
+			})
+		}
+	})
 	t.Run("failure cleanup", func(t *testing.T) {
 		for _, scenario := range []string{"invalid delivery", "cancellation while blocked"} {
 			t.Run(scenario, func(t *testing.T) {
@@ -1304,7 +1494,7 @@ func TestRemoteWriteMetadataPipeline(t *testing.T) {
 					_, err = f.drain(ctx, f.expectedItems(1))
 					require.Error(t, err)
 				} else {
-					require.NoError(t, f.holdReceiver(ctx))
+					require.NoError(t, f.holdReceivers(ctx))
 					require.NoError(t, f.append(ctx, 1, c.Sweeps))
 					require.NoError(t, f.awaitBacklog(ctx))
 					cancel()
