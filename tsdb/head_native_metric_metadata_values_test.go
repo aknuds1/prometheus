@@ -55,6 +55,54 @@ func TestNativeMetricMetadataValueCache(t *testing.T) {
 		}
 	})
 
+	t.Run("clones share known types and own one compact payload", func(t *testing.T) {
+		backing := "countercustomsecondsdescription" + strings.Repeat("padding", 100_000)
+		start := uintptr(unsafe.Pointer(unsafe.StringData(backing)))
+		inBacking := func(s string) bool {
+			p := uintptr(unsafe.Pointer(unsafe.StringData(s)))
+			return s != "" && p >= start && p < start+uintptr(len(backing))
+		}
+		counter, custom, unit, help := backing[:7], backing[7:13], backing[13:20], backing[20:31]
+		for _, tc := range []struct {
+			name   string
+			input  metadata.Metadata
+			allocs float64
+		}{
+			{"known type, unit and help", metadata.Metadata{Type: model.MetricType(counter), Unit: unit, Help: help}, 2},
+			{"empty unit", metadata.Metadata{Type: model.MetricType(counter), Help: help}, 2},
+			{"empty help", metadata.Metadata{Type: model.MetricType(counter), Unit: unit}, 2},
+			{"empty unit and help", metadata.Metadata{Type: model.MetricType(counter)}, 1},
+			{"empty type", metadata.Metadata{Unit: unit, Help: help}, 2},
+			{"unknown type", metadata.Metadata{Type: model.MetricType(custom), Unit: unit, Help: help}, 2},
+			{"unknown type alone", metadata.Metadata{Type: model.MetricType(custom)}, 2},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				owned := cloneNativeMetricMetadata(tc.input)
+				require.Equal(t, tc.input, *owned)
+				fields := []string{string(owned.Type), owned.Unit, owned.Help}
+				for _, field := range fields {
+					require.False(t, inBacking(field), "a clone must not alias caller memory")
+				}
+				if owned.Type == model.MetricTypeCounter {
+					require.Same(t, unsafe.StringData(string(model.MetricTypeCounter)), unsafe.StringData(string(owned.Type)))
+				}
+				// Owned fields are adjacent in one exact-size payload.
+				var next uintptr
+				for _, field := range fields {
+					if field == "" || field == string(model.MetricTypeCounter) {
+						continue
+					}
+					p := uintptr(unsafe.Pointer(unsafe.StringData(field)))
+					if next != 0 {
+						require.Equal(t, next, p)
+					}
+					next = p + uintptr(len(field))
+				}
+				require.Equal(t, tc.allocs, testing.AllocsPerRun(100, func() { owned = cloneNativeMetricMetadata(tc.input) }))
+			})
+		}
+	})
+
 	t.Run("FIFO limits entries and never mutates evicted values", func(t *testing.T) {
 		cache := newNativeMetricMetadataValueCache()
 		var values []metadata.Metadata
