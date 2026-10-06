@@ -302,8 +302,8 @@ func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[ch
 					decoded <- native
 					continue
 				}
-				// Legacy mode reads each entry's newest point, as it reads the
-				// newest point of native entries in Metadata records.
+				// Legacy mode reads compact entries as legacy metadata, as it
+				// reads native entries in Metadata records.
 				if err := dec.CompactNativeMetadata(r.Record(), &legacyCompact); err != nil {
 					decodeErr = &wlog.CorruptionErr{
 						Err:     fmt.Errorf("decode compact native metadata: %w", err),
@@ -312,7 +312,7 @@ func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[ch
 					}
 					return
 				}
-				decoded <- legacyCompact.AppendNewest(h.wlReplayMetadataPool.Get()[:0])
+				decoded <- legacyCompact.AppendLegacy(h.wlReplayMetadataPool.Get()[:0])
 				legacyCompact.Reset()
 			default:
 				// Noop.

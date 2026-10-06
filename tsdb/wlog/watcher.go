@@ -798,8 +798,8 @@ type compactNativeMetadataBuffers struct {
 
 // storeCompactNativeMetadata passes a compact record to the writer along the
 // path its interfaces accept. Borrowed contents alias rec, which the reader
-// reuses after this record. Legacy writers get each entry's newest point, as
-// legacy decoding gives them for the native entries of Metadata records.
+// reuses after this record. Legacy writers get legacy metadata, as legacy
+// decoding gives them for the native entries of Metadata records.
 func (w *Watcher) storeCompactNativeMetadata(dec *record.Decoder, rec []byte, b *compactNativeMetadataBuffers) error {
 	defer b.compact.Reset()
 	var err error
@@ -815,7 +815,7 @@ func (w *Watcher) storeCompactNativeMetadata(dec *record.Decoder, rec []byte, b 
 	case w.recordNative != nil:
 		w.recordNative.StoreBorrowedNativeMetadataRecord(&b.compact)
 	case w.native == nil:
-		b.metadata = b.compact.AppendNewest(b.metadata[:0])
+		b.metadata = b.compact.AppendLegacy(b.metadata[:0])
 		w.writer.StoreMetadata(b.metadata)
 		clear(b.metadata)
 	default:

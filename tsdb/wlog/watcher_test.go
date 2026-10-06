@@ -1040,6 +1040,31 @@ func TestWatcher_NativeMetadata(t *testing.T) {
 		require.Equal(t, clones, kept)
 	})
 
+	t.Run("legacy writers read empty overrides as empty metadata", func(t *testing.T) {
+		// As they read Metadata records' native entries. Entries of unknown
+		// kind without points reach them not at all.
+		dir := t.TempDir()
+		w, err := NewSize(nil, nil, filepath.Join(dir, "wal"), 32*1024, compression.None)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, w.Close()) })
+		var enc record.Encoder
+		require.NoError(t, w.Log(enc.Series([]record.RefSeries{{Ref: 1, Labels: labels.FromStrings("__name__", "a")}, {Ref: 2, Labels: labels.FromStrings("__name__", "b")}}, nil)))
+		require.NoError(t, w.Log(enc.CompactNativeMetadata(nil, []record.RefCompactNativeMetadata{{Ref: 1, Kind: record.NativeMetadataOverride}}, nil)))
+		require.NoError(t, w.Log(unknownCompactNativeMetadataForTest(2, "", 0)))
+		_, err = w.NextSegment()
+		require.NoError(t, err)
+		wt := newWriteToMock(0)
+		watcher := NewWatcher(wMetrics, nil, nil, "", wt, dir, false, false, true, nil)
+		watcher.SetMetrics()
+		watcher.MaxSegment = 0
+		require.NoError(t, watcher.Run())
+		require.Equal(t, []record.RefMetadata{{Ref: 1}}, wt.metadataStored)
+		// The Metadata record equivalent.
+		legacy, err := (&record.Decoder{}).Metadata(enc.NativeMetadata([]record.RefNativeMetadata{{Ref: 1, Kind: record.NativeMetadataOverride}}, nil), nil)
+		require.NoError(t, err)
+		require.Equal(t, wt.metadataStored, legacy)
+	})
+
 	t.Run("ignored entries reach native writers", func(t *testing.T) {
 		dir := t.TempDir()
 		w, err := NewSize(nil, nil, filepath.Join(dir, "wal"), 32*1024, compression.None)

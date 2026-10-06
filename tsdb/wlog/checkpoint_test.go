@@ -532,8 +532,11 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 			),
 			enc.NativeMetadata([]record.RefNativeMetadata{group(2, point(50, "E"))}, nil),
 			unknownCompactNativeMetadataForTest(8, "future", 9),
-			// An unknown entry without points leaves ref 1's legacy state.
+			// An unknown entry without points leaves ref 1's legacy state,
+			// while an empty override replaces ref 9's.
 			unknownCompactNativeMetadataForTest(1, "", 0),
+			enc.Metadata([]record.RefMetadata{legacy(9, "legacy")}, nil),
+			enc.CompactNativeMetadata(nil, []record.RefCompactNativeMetadata{{Ref: 9, Kind: record.NativeMetadataOverride}}, nil),
 		},
 	}
 	wantUnknown := []int{1, 0, 2}
@@ -578,6 +581,9 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 			}
 			for _, e := range decodeNativeMetadataForTest(t, r.Record()) {
 				require.NotContains(t, got, e.Ref)
+				if len(e.Points) == 0 {
+					e.Points = nil
+				}
 				got[e.Ref], gotTypes[e.Ref] = e, typ
 			}
 		}
@@ -613,6 +619,36 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 	require.True(t, reduced[7].Truncated)
 	require.Equal(t, "future", reduced[8].Metadata.Help)
 	require.Equal(t, "E", reduced[2].Metadata.Help)
+	require.True(t, isNative[9])
+	require.Nil(t, reduced[9].Metadata)
+
+	// Legacy readers of the last checkpoint see ref 1's legacy value and
+	// ref 9's empty override as empty metadata, as for Metadata records.
+	cpDir, _, err := LastCheckpoint(w.Dir())
+	require.NoError(t, err)
+	sr, err := NewSegmentsReader(cpDir)
+	require.NoError(t, err)
+	defer sr.Close()
+	legacyView := map[chunks.HeadSeriesRef]record.RefMetadata{}
+	r := NewReader(sr)
+	for r.Next() {
+		var meta []record.RefMetadata
+		switch dec.Type(r.Record()) {
+		case record.Metadata:
+			meta, err = dec.Metadata(r.Record(), nil)
+			require.NoError(t, err)
+		case record.NativeMetadataCompact:
+			var compact record.CompactNativeMetadata
+			require.NoError(t, dec.CompactNativeMetadata(r.Record(), &compact))
+			meta = compact.AppendLegacy(nil)
+		}
+		for _, m := range meta {
+			legacyView[m.Ref] = m
+		}
+	}
+	require.NoError(t, r.Err())
+	require.Equal(t, legacy(1, "b"), legacyView[1])
+	require.Equal(t, record.RefMetadata{Ref: 9}, legacyView[9])
 	require.NoError(t, w.Close())
 }
 

@@ -134,13 +134,20 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 		require.Same(t, unsafe.StringData(materialized[0].Points[0].Help), unsafe.StringData(materialized[1].Points[1].Help))
 		require.Same(t, unsafe.StringData(decoded.Values[1].Help), unsafe.StringData(materialized[1].Points[0].Help))
 
+		// Legacy readers get each entry's newest value, and empty metadata
+		// for an override without points, as for Metadata records.
 		require.Equal(t, []RefMetadata{
 			{Ref: 7, Type: uint8(Counter), Unit: "seconds", Help: "a"},
 			{Ref: 2, Type: uint8(Counter), Unit: "seconds", Help: "a"},
 			{Ref: math.MaxUint64},
 			{Ref: 0, Type: uint8(Gauge), Unit: "seconds", Help: values[1].Help},
+			{Ref: 5},
+			{Ref: 6},
 			{Ref: 6, Type: uint8(Counter), Unit: "seconds", Help: "a"},
-		}, decoded.AppendNewest(nil))
+		}, decoded.AppendLegacy(nil))
+		legacy, err := dec.Metadata(enc.NativeMetadata([]RefNativeMetadata{{Ref: 5, Kind: NativeMetadataOverride, Truncated: true}}, nil), nil)
+		require.NoError(t, err)
+		require.Equal(t, []RefMetadata{{Ref: 5}}, legacy, "the Metadata record equivalent")
 	})
 
 	t.Run("records without points", func(t *testing.T) {
@@ -181,6 +188,8 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 					got := normalizeCompactNativeMetadata(decoded.Entries)
 					require.Equal(t, []RefCompactNativeMetadata{want}, got)
 					require.Equal(t, len(points) == 0, got[0].Ignored())
+					// Legacy readers skip ignored entries.
+					require.Len(t, decoded.AppendLegacy(nil), len(want.Points))
 					materialized, _ := decoded.AppendNativeMetadata(nil, nil)
 					require.Equal(t, len(points) == 0, materialized[0].Ignored())
 				}

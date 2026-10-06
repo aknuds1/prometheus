@@ -641,28 +641,35 @@ func TestNativeMetricMetadataReplay(t *testing.T) {
 	})
 
 	t.Run("compact records in legacy mode", func(t *testing.T) {
-		// Legacy mode reads each entry's newest point, if any, as legacy
-		// metadata; entries without points change nothing.
+		// Legacy mode reads each entry's newest point as legacy metadata, and
+		// an empty override as empty metadata, as it reads Metadata records'
+		// native entries. Entries of unknown kind without points change
+		// nothing.
 		for _, walRecords := range []bool{false, true} {
 			dir := t.TempDir()
 			w, err := wlog.New(nil, nil, filepath.Join(dir, "wal"), compression.None)
 			require.NoError(t, err)
-			two := labels.FromStrings(labels.MetricName, "two")
+			two, three := labels.FromStrings(labels.MetricName, "two"), labels.FromStrings(labels.MetricName, "three")
+			legacy := func(ref chunks.HeadSeriesRef, help string) record.RefMetadata {
+				return record.RefMetadata{Ref: ref, Type: uint8(record.Counter), Unit: "seconds", Help: help}
+			}
 			populateTestWL(t, w, []any{
-				[]record.RefSeries{{Ref: 1, Labels: l}, {Ref: 2, Labels: two}},
-				[]record.RefSample{{Ref: 1, T: 2, V: 1}, {Ref: 2, T: 2, V: 1}},
-				[]record.RefMetadata{{Ref: 2, Type: uint8(record.Counter), Unit: "seconds", Help: "a"}},
+				[]record.RefSeries{{Ref: 1, Labels: l}, {Ref: 2, Labels: two}, {Ref: 3, Labels: three}},
+				[]record.RefSample{{Ref: 1, T: 2, V: 1}, {Ref: 2, T: 2, V: 1}, {Ref: 3, T: 2, V: 1}},
+				[]record.RefMetadata{legacy(2, "a"), legacy(3, "c")},
 				compactNativeMetadataForTest(
 					record.RefNativeMetadata{Ref: 1, Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{{EffectiveFrom: 1, Help: "x"}, {EffectiveFrom: 2, Type: uint8(record.Gauge), Unit: "seconds", Help: "b"}}},
 					record.RefNativeMetadata{Ref: 2, Kind: record.NativeMetadataOverride},
 				),
+				unknownCompactNativeMetadataForTest(3, nil, 0),
 			}, nil, false)
 			require.NoError(t, w.Close())
 			opts := DefaultOptions()
 			opts.EnableMetadataWALRecords = walRecords
 			db := newTestDB(t, withDir(dir), withOpts(opts))
 			require.Equal(t, &metadata.Metadata{Type: model.MetricTypeGauge, Unit: "seconds", Help: "b"}, legacyMetadataForTest(db.head.series.getByID(1)))
-			require.Equal(t, &metadata.Metadata{Type: model.MetricTypeCounter, Unit: "seconds", Help: "a"}, legacyMetadataForTest(db.head.series.getByID(2)))
+			require.Equal(t, &metadata.Metadata{Type: model.MetricTypeUnknown}, legacyMetadataForTest(db.head.series.getByID(2)), "an empty override")
+			require.Equal(t, &metadata.Metadata{Type: model.MetricTypeCounter, Unit: "seconds", Help: "c"}, legacyMetadataForTest(db.head.series.getByID(3)), "an ignored entry")
 		}
 	})
 

@@ -114,13 +114,18 @@ func (r *CompactNativeMetadata) AppendNativeMetadata(entries []RefNativeMetadata
 	return entries, points
 }
 
-// AppendNewest appends the newest point of each of r's entries with points to
-// dst, as legacy metadata.
-func (r *CompactNativeMetadata) AppendNewest(dst []RefMetadata) []RefMetadata {
+// AppendLegacy appends r's entries to dst as legacy metadata, as legacy
+// decoders read native entries in Metadata records: each entry's newest point,
+// and empty metadata for an override without points. Entries that leave state
+// unchanged are skipped.
+func (r *CompactNativeMetadata) AppendLegacy(dst []RefMetadata) []RefMetadata {
 	for _, e := range r.Entries {
-		if n := len(e.Points); n > 0 {
+		switch n := len(e.Points); {
+		case n > 0:
 			v := r.Values[e.Points[n-1].Value]
 			dst = append(dst, RefMetadata{Ref: e.Ref, Type: v.Type, Unit: v.Unit, Help: v.Help})
+		case !e.Ignored():
+			dst = append(dst, RefMetadata{Ref: e.Ref, Type: uint8(UnknownMT)})
 		}
 	}
 	return dst
