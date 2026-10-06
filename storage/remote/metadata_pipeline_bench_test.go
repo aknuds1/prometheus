@@ -54,6 +54,7 @@ type metadataPipelineResult struct {
 	TransactionsLateByInterval                     int64
 	Restart                                        *metadataPipelineRestart `json:",omitempty"`
 	Release                                        *metadataPipelineRelease `json:",omitempty"`
+	Attribution                                    []metadataPipelineMark   `json:",omitempty"`
 }
 
 // BenchmarkRemoteWriteMetadataPipeline includes ingestion, WAL reading, metadata
@@ -157,6 +158,10 @@ func benchmarkMetadataPipeline(b *testing.B, c metadataPipelineConfig) {
 	b.Helper()
 	b.ReportAllocs()
 	b.StopTimer()
+	if repeat := metadataPipelineSetting(b, metadataPipelineRepeatEnv, 0); repeat > 0 {
+		benchmarkMetadataPipelineAttribution(b, c, repeat)
+		return
+	}
 	metrics := map[string]float64{}
 	for range b.N {
 		c.Base = metadataPipelineBase
@@ -199,6 +204,7 @@ func benchmarkMetadataPipeline(b *testing.B, c metadataPipelineConfig) {
 }
 
 func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPipelineResult {
+	metadataPipelineMarks.mark("creation")
 	timeout := metadataPipelineSetting(b, "PROMETHEUS_METADATA_PIPELINE_TIMEOUT_MINUTES", 5)
 	ctx, cancel := context.WithTimeout(b.Context(), time.Duration(timeout)*time.Minute)
 	defer cancel()
@@ -219,6 +225,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	lifecycleCPU, err := metadataPipelineCPU()
 	require.NoError(b, err)
 	lifecycleStart := time.Now()
+	metadataPipelineMarks.markAt("setup", lifecycleCPU)
 	phaseStart, phaseCPU := lifecycleStart, lifecycleCPU
 	beforeMemory = lifecycleMemory
 	require.NoError(b, d.begin(ctx, f, "initialization"))
@@ -226,6 +233,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		b.StartTimer()
 	}
 	require.NoError(b, f.open(dir))
+	metadataPipelineMarks.mark("seeding")
 	r.Initialization = time.Since(lifecycleStart)
 	var beforeWAL float64
 	if c.Case != "cold" {
@@ -259,6 +267,7 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 		runtime.ReadMemStats(&beforeMemory)
 		phaseCPU, err = metadataPipelineCPU()
 		require.NoError(b, err)
+		metadataPipelineMarks.markAt("measured", phaseCPU)
 		phaseStart = time.Now()
 		b.StartTimer()
 	}
@@ -323,12 +332,14 @@ func measureMetadataPipeline(b *testing.B, c metadataPipelineConfig) metadataPip
 	r.UnknownEntryCounters = metadataPipelineUnknownCounters(live)
 	require.NoError(b, d.begin(ctx, f, "shutdown"))
 	stopStart := time.Now()
+	metadataPipelineMarks.mark("shutdown")
 	require.NoError(b, f.closeSender())
 	r.Shutdown = time.Since(stopStart)
 	require.NoError(b, d.end(ctx, f, "shutdown"))
 	r.Completion = time.Since(phaseStart)
 	phaseEndCPU, err := metadataPipelineCPU()
 	require.NoError(b, err)
+	metadataPipelineMarks.markAt("post", phaseEndCPU)
 	b.StopTimer()
 	runtime.ReadMemStats(&afterMemory)
 	r.CPU = phaseEndCPU.sub(phaseCPU)
