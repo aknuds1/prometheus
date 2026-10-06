@@ -79,7 +79,8 @@ type WriteTo interface {
 type NativeMetadataWriteTo interface {
 	WriteTo
 	// StoreNativeMetadata applies entries in WAL order. It must not retain the
-	// entries or their points, but may retain their strings.
+	// entries or their points, but may retain their strings. An entry of
+	// unknown kind without points leaves its ref's state unchanged.
 	StoreNativeMetadata([]record.RefNativeMetadata)
 	// ResetNativeMetadata discards all native metadata before a replay.
 	ResetNativeMetadata()
@@ -96,6 +97,20 @@ type NativeMetadataBorrowWriteTo interface {
 	// modify them; it must copy any string contents it retains into memory it
 	// owns.
 	StoreBorrowedNativeMetadata([]record.RefNativeMetadata)
+}
+
+// NativeMetadataRecordWriteTo is a NativeMetadataWriteTo that accepts compact
+// native metadata records whole, with their dictionaries. A watcher passes such
+// a writer compact records this way, instead of as entries.
+type NativeMetadataRecordWriteTo interface {
+	NativeMetadataWriteTo
+	// StoreBorrowedNativeMetadataRecord applies rec's entries in WAL order, as
+	// StoreNativeMetadata does; their points index rec.Values. The values'
+	// strings alias the watcher's reused record buffer, and the watcher reuses
+	// rec after the call, so rec and all it refers to are valid only during
+	// the call. It must not retain or modify any of them, and must copy any
+	// string contents it retains into memory it owns.
+	StoreBorrowedNativeMetadataRecord(rec *record.CompactNativeMetadata)
 }
 
 // WriteNotified notifies the watcher that data has been written so that it can read.
@@ -118,6 +133,7 @@ type Watcher struct {
 	writer         WriteTo
 	native         NativeMetadataWriteTo // Set when writer forwards native metadata.
 	borrowNative   NativeMetadataBorrowWriteTo
+	recordNative   NativeMetadataRecordWriteTo
 	recordBuf      *record.BuffersPool
 	logger         *slog.Logger
 	walDir         string
@@ -241,9 +257,11 @@ func NewWatcher(
 	}
 	var native NativeMetadataWriteTo
 	var borrowNative NativeMetadataBorrowWriteTo
+	var recordNative NativeMetadataRecordWriteTo
 	if sendMetadata {
 		native, _ = writer.(NativeMetadataWriteTo)
 		borrowNative, _ = writer.(NativeMetadataBorrowWriteTo)
+		recordNative, _ = writer.(NativeMetadataRecordWriteTo)
 	}
 	return &Watcher{
 		logger:         logger,
@@ -251,6 +269,7 @@ func NewWatcher(
 		writer:         writer,
 		native:         native,
 		borrowNative:   borrowNative,
+		recordNative:   recordNative,
 		metrics:        metrics,
 		readerMetrics:  readerMetrics,
 		walDir:         filepath.Join(dir, "wal"),
@@ -593,6 +612,7 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 
 	var nativeEntries []record.RefNativeMetadata
 	var nativePoints []record.RefNativeMetadataPoint
+	var compact compactNativeMetadataBuffers
 	dec := record.NewDecoder(labels.NewSymbolTable(), w.logger) // One table per WAL segment means it won't grow indefinitely.
 	for r.Next() && !isClosed(w.quit) {
 		var err error
@@ -745,6 +765,15 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 			}
 			w.writer.StoreMetadata(metadata)
 
+		case record.NativeMetadataCompact:
+			if !w.sendMetadata {
+				break
+			}
+			if err := w.storeCompactNativeMetadata(&dec, rec, &compact); err != nil {
+				w.recordDecodeFailsMetric.Inc()
+				return err
+			}
+
 		case record.Unknown:
 			// Could be corruption, or reading from a WAL from a newer Prometheus.
 			w.recordDecodeFailsMetric.Inc()
@@ -756,6 +785,50 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 	// NOTE: r.Err == io.EOF is a common case when tailing.
 	// Don't wrap error, callers are expected to handle EOF and wrap accordingly.
 	return r.Err()
+}
+
+// compactNativeMetadataBuffers are a watcher's reused buffers for compact
+// native metadata records.
+type compactNativeMetadataBuffers struct {
+	compact  record.CompactNativeMetadata
+	entries  []record.RefNativeMetadata
+	points   []record.RefNativeMetadataPoint
+	metadata []record.RefMetadata
+}
+
+// storeCompactNativeMetadata passes a compact record to the writer along the
+// path its interfaces accept. Borrowed contents alias rec, which the reader
+// reuses after this record. Legacy writers get each entry's newest point, as
+// legacy decoding gives them for the native entries of Metadata records.
+func (w *Watcher) storeCompactNativeMetadata(dec *record.Decoder, rec []byte, b *compactNativeMetadataBuffers) error {
+	defer b.compact.Reset()
+	var err error
+	if w.recordNative != nil || w.borrowNative != nil {
+		err = dec.CompactNativeMetadataBorrowed(rec, &b.compact)
+	} else {
+		err = dec.CompactNativeMetadata(rec, &b.compact)
+	}
+	if err != nil {
+		return err
+	}
+	switch {
+	case w.recordNative != nil:
+		w.recordNative.StoreBorrowedNativeMetadataRecord(&b.compact)
+	case w.native == nil:
+		b.metadata = b.compact.AppendNewest(b.metadata[:0])
+		w.writer.StoreMetadata(b.metadata)
+		clear(b.metadata)
+	default:
+		b.entries, b.points = b.compact.AppendNativeMetadata(b.entries[:0], b.points[:0])
+		if w.borrowNative != nil {
+			w.borrowNative.StoreBorrowedNativeMetadata(b.entries)
+		} else {
+			w.native.StoreNativeMetadata(b.entries)
+		}
+		clear(b.entries)
+		clear(b.points)
+	}
+	return nil
 }
 
 // Go through all series in a segment updating the segmentNum, so we can delete older series.

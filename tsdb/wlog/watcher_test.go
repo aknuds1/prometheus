@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/promslog"
@@ -910,9 +911,15 @@ type nativeWriteToMock struct {
 	*writeToMock
 	entries []record.RefNativeMetadata
 	resets  int
+	onStore func([]record.RefNativeMetadata)
 }
 
+func (m *nativeWriteToMock) stored() []record.RefNativeMetadata { return m.entries }
+
 func (m *nativeWriteToMock) StoreNativeMetadata(entries []record.RefNativeMetadata) {
+	if m.onStore != nil {
+		m.onStore(entries)
+	}
 	for _, e := range entries {
 		e.Points = append([]record.RefNativeMetadataPoint(nil), e.Points...)
 		m.entries = append(m.entries, e)
@@ -946,10 +953,29 @@ func (m *nativeBorrowWriteToMock) StoreBorrowedNativeMetadata(entries []record.R
 	}
 }
 
+// nativeRecordWriteToMock accepts compact records whole, copying their strings.
+type nativeRecordWriteToMock struct {
+	*nativeBorrowWriteToMock
+	records int
+}
+
+func (m *nativeRecordWriteToMock) StoreBorrowedNativeMetadataRecord(rec *record.CompactNativeMetadata) {
+	m.records++
+	owned := record.CompactNativeMetadata{Entries: rec.Entries}
+	for _, v := range rec.Values {
+		owned.Values = append(owned.Values, record.NativeMetadataValue{Type: v.Type, Unit: strings.Clone(v.Unit), Help: strings.Clone(v.Help)})
+	}
+	entries, _ := owned.AppendNativeMetadata(nil, nil)
+	m.entries = append(m.entries, entries...)
+}
+
 func reduceNativeMetadata(entries []record.RefNativeMetadata) map[chunks.HeadSeriesRef]string {
 	states := map[chunks.HeadSeriesRef]*nativemetadata.State{}
 	intern := func(m metadata.Metadata) *metadata.Metadata { return &m }
 	for _, e := range entries {
+		if e.Ignored() {
+			continue
+		}
 		if states[e.Ref] == nil {
 			states[e.Ref] = &nativemetadata.State{}
 		}
@@ -966,19 +992,107 @@ func reduceNativeMetadata(entries []record.RefNativeMetadata) map[chunks.HeadSer
 }
 
 func TestWatcher_NativeMetadata(t *testing.T) {
+	for _, compact := range []bool{false, true} {
+		t.Run(fmt.Sprintf("compact=%t", compact), func(t *testing.T) {
+			testWatcherNativeMetadata(t, compact)
+		})
+	}
+
+	t.Run("owned strings outlive the call", func(t *testing.T) {
+		// One segment of many records, whose reader reuses its record buffer.
+		dir := t.TempDir()
+		w, err := NewSize(nil, nil, filepath.Join(dir, "wal"), 1<<20, compression.None)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, w.Close()) })
+		var enc record.Encoder
+		require.NoError(t, w.Log(enc.Series([]record.RefSeries{{Ref: 1, Labels: labels.FromStrings("__name__", "a")}}, nil)))
+		var want []record.RefNativeMetadata
+		for i := range 200 {
+			help := strings.Repeat(strconv.Itoa(i), 1+i%7)
+			values := []record.NativeMetadataValue{{Type: uint8(record.Gauge), Unit: "u" + help, Help: help}}
+			points := []record.CompactNativeMetadataPoint{{EffectiveFrom: int64(2 * i)}, {EffectiveFrom: int64(2*i + 1)}}
+			rec := enc.CompactNativeMetadata(values, []record.RefCompactNativeMetadata{{Ref: 1, Kind: record.NativeMetadataGroup, Points: points}}, nil)
+			require.NoError(t, w.Log(rec))
+			want = append(want, decodeNativeMetadataForTest(t, rec)...)
+		}
+		_, err = w.NextSegment()
+		require.NoError(t, err)
+
+		wt := &nativeWriteToMock{writeToMock: newWriteToMock(0)}
+		var kept, clones []string
+		wt.onStore = func(entries []record.RefNativeMetadata) {
+			for _, e := range entries {
+				// Points of one value share its one copy.
+				require.Same(t, unsafe.StringData(e.Points[0].Help), unsafe.StringData(e.Points[1].Help))
+				for _, p := range e.Points {
+					kept = append(kept, p.Unit, p.Help)
+					clones = append(clones, strings.Clone(p.Unit), strings.Clone(p.Help))
+				}
+			}
+			// Strings this writer kept from earlier records are unchanged.
+			require.Equal(t, clones, kept)
+		}
+		watcher := NewWatcher(wMetrics, nil, nil, "", wt, dir, false, false, true, nil)
+		watcher.SetMetrics()
+		watcher.MaxSegment = 0
+		require.NoError(t, watcher.Run())
+		require.Equal(t, want, wt.entries)
+		require.Equal(t, clones, kept)
+	})
+
+	t.Run("ignored entries reach native writers", func(t *testing.T) {
+		dir := t.TempDir()
+		w, err := NewSize(nil, nil, filepath.Join(dir, "wal"), 32*1024, compression.None)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, w.Close()) })
+		var enc record.Encoder
+		require.NoError(t, w.Log(enc.Series([]record.RefSeries{{Ref: 1, Labels: labels.FromStrings("__name__", "a")}}, nil)))
+		// A compact record of one entry of unknown kind 7, without points.
+		require.NoError(t, w.Log([]byte{byte(record.NativeMetadataCompact), 1, 0, 0, 1, 7, 2, 0}))
+		_, err = w.NextSegment()
+		require.NoError(t, err)
+		for _, wt := range []interface {
+			WriteTo
+			stored() []record.RefNativeMetadata
+		}{
+			&nativeWriteToMock{writeToMock: newWriteToMock(0)},
+			&nativeBorrowWriteToMock{nativeWriteToMock: &nativeWriteToMock{writeToMock: newWriteToMock(0)}},
+			&nativeRecordWriteToMock{nativeBorrowWriteToMock: &nativeBorrowWriteToMock{nativeWriteToMock: &nativeWriteToMock{writeToMock: newWriteToMock(0)}}},
+		} {
+			watcher := NewWatcher(wMetrics, nil, nil, "", wt, dir, false, false, true, nil)
+			watcher.SetMetrics()
+			watcher.MaxSegment = 0
+			require.NoError(t, watcher.Run())
+			stored := wt.stored()
+			require.Len(t, stored, 1)
+			require.True(t, stored[0].Ignored())
+			require.Equal(t, chunks.HeadSeriesRef(1), stored[0].Ref)
+		}
+	})
+}
+
+func testWatcherNativeMetadata(t *testing.T, compact bool) {
 	var enc record.Encoder
 	group := func(ref chunks.HeadSeriesRef, points ...string) []byte {
 		e := record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataGroup}
+		c := record.RefCompactNativeMetadata{Ref: ref, Kind: record.NativeMetadataGroup}
+		var values []record.NativeMetadataValue
 		for _, p := range points {
 			var help string
 			var from int64
 			_, err := fmt.Sscanf(p, "%1s@%d", &help, &from)
 			require.NoError(t, err)
 			e.Points = append(e.Points, record.RefNativeMetadataPoint{EffectiveFrom: from, Type: uint8(record.Gauge), Help: help})
+			c.Points = append(c.Points, record.CompactNativeMetadataPoint{EffectiveFrom: from, Value: uint32(len(values))})
+			values = append(values, record.NativeMetadataValue{Type: uint8(record.Gauge), Help: help})
+		}
+		if compact {
+			return enc.CompactNativeMetadata(values, []record.RefCompactNativeMetadata{c}, nil)
 		}
 		return enc.NativeMetadata([]record.RefNativeMetadata{e}, nil)
 	}
-	// Each segment holds one series record and the listed records.
+	// Each segment holds one series record and the listed records. Compact
+	// WALs keep one legacy Metadata record, so they mix both types.
 	segments := [][][]byte{
 		{group(1, "A@100"), group(2, "A@10", "B@20", "C@30", "D@40", "E@50")},
 		{group(1, "B@150", "C@180"), group(2, "F@60")},
@@ -997,14 +1111,11 @@ func TestWatcher_NativeMetadata(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, w.Close()) })
 		var all []record.RefNativeMetadata
-		var dec record.Decoder
 		for i, recs := range segments {
 			require.NoError(t, w.Log(enc.Series([]record.RefSeries{{Ref: chunks.HeadSeriesRef(i + 1), Labels: labels.FromStrings("__name__", strconv.Itoa(i))}}, nil)))
 			for _, rec := range recs {
 				require.NoError(t, w.Log(rec))
-				entries, _, err := dec.NativeMetadata(rec, nil, nil)
-				require.NoError(t, err)
-				all = append(all, entries...)
+				all = append(all, decodeNativeMetadataForTest(t, rec)...)
 			}
 			// Leave an empty tail segment, so that replay reads every segment
 			// to its end and returns.
@@ -1057,11 +1168,8 @@ func TestWatcher_NativeMetadata(t *testing.T) {
 		watcher, wt := newWatcher(s)
 		require.NoError(t, watcher.Run())
 		var segment1 []record.RefNativeMetadata
-		var dec record.Decoder
 		for _, rec := range segments[1] {
-			entries, _, err := dec.NativeMetadata(rec, nil, nil)
-			require.NoError(t, err)
-			segment1 = append(segment1, entries...)
+			segment1 = append(segment1, decodeNativeMetadataForTest(t, rec)...)
 		}
 		for _, e := range wt.entries {
 			for _, skipped := range segment1 {
@@ -1116,6 +1224,25 @@ func TestWatcher_NativeMetadata(t *testing.T) {
 		require.Equal(t, s.entries, wt.entries)
 		require.Positive(t, wt.borrowed)
 		require.Zero(t, wt.copied, "borrowing writers never get copied entries")
+	})
+
+	t.Run("writers that accept records get them", func(t *testing.T) {
+		s := newWAL(t)
+		wt := &nativeRecordWriteToMock{nativeBorrowWriteToMock: &nativeBorrowWriteToMock{nativeWriteToMock: &nativeWriteToMock{writeToMock: newWriteToMock(0)}}}
+		watcher := NewWatcher(wMetrics, nil, nil, "", wt, s.dir, false, false, true, nil)
+		watcher.SetMetrics()
+		watcher.MaxSegment = len(segments) - 1
+		require.NoError(t, watcher.Run())
+		require.Equal(t, s.entries, wt.entries)
+		require.Zero(t, wt.copied, "borrowing writers never get copied entries")
+		if compact {
+			// Only the legacy record arrives as entries.
+			require.Equal(t, 9, wt.records)
+			require.Equal(t, 1, wt.borrowed)
+		} else {
+			require.Zero(t, wt.records)
+			require.Equal(t, 10, wt.borrowed)
+		}
 	})
 
 	t.Run("legacy writers keep legacy metadata", func(t *testing.T) {
