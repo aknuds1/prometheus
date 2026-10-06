@@ -460,7 +460,7 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 			}
 			return out
 		}
-		ignored := []byte{byte(record.NativeMetadataCompact), 1, 0, 0, 1, 7, 2, 0}
+		ignored := []byte{byte(record.NativeMetadataCompact), 3, 0, 1, 7, 2, 0}
 		var dec record.Decoder
 		for _, path := range []string{"record", "borrowed entries", "copied entries"} {
 			t.Run(path, func(t *testing.T) {

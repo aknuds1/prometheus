@@ -1073,7 +1073,7 @@ func TestWatcher_NativeMetadata(t *testing.T) {
 		var enc record.Encoder
 		require.NoError(t, w.Log(enc.Series([]record.RefSeries{{Ref: 1, Labels: labels.FromStrings("__name__", "a")}}, nil)))
 		// A compact record of one entry of unknown kind 7, without points.
-		require.NoError(t, w.Log([]byte{byte(record.NativeMetadataCompact), 1, 0, 0, 1, 7, 2, 0}))
+		require.NoError(t, w.Log([]byte{byte(record.NativeMetadataCompact), 3, 0, 1, 7, 2, 0}))
 		_, err = w.NextSegment()
 		require.NoError(t, err)
 		for _, wt := range []interface {

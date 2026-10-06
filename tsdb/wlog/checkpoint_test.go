@@ -15,6 +15,7 @@
 package wlog
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
@@ -664,9 +665,12 @@ func unknownCompactNativeMetadataForTest(ref chunks.HeadSeriesRef, help string, 
 		points = []record.CompactNativeMetadataPoint{{EffectiveFrom: from}}
 	}
 	rec := enc.CompactNativeMetadata(values, []record.RefCompactNativeMetadata{{Ref: ref, Kind: record.NativeMetadataOverride, Points: points}}, nil)
-	// The entry ends the record: kind, ref delta and count bytes, then two
-	// bytes per point.
-	rec[len(rec)-3-2*len(points)] = 7
+	// The kind byte follows the type, format, base and a one-byte count.
+	base := make([]byte, binary.MaxVarintLen64)
+	if help == "" {
+		from = 0
+	}
+	rec[2+binary.PutVarint(base, from)+1] = 7
 	return rec
 }
 

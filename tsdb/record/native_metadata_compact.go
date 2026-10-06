@@ -17,35 +17,39 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/encoding"
 )
 
 // A NativeMetadataCompact record holds native metadata entries whose points
-// index the record's dictionary of values:
+// carry their values inline, each value defined at its first use and referred
+// to by index after it:
 //
-//	record     = type byte, format byte, base (varint), dictionary, entries
-//	dictionary = count (uvarint), count × (type byte, unit, help)
-//	entries    = count (uvarint), count × entry
-//	entry      = kind byte, ref delta (varint), count (uvarint), count × point
-//	point      = start delta (uvarint), value index (uvarint)
+//	record = type byte, format byte, base (varint), count (uvarint), count × entry
+//	entry  = kind byte, ref delta (varint), count (uvarint), count × point
+//	point  = start delta (uvarint), value
+//	value  = 0 (uvarint), type byte, unit, help   the definition of the next value
+//	       | n (uvarint), n ≥ 1                     a reference to value n−1
 //
+// Values are numbered in order of definition across the record's entries, of
+// every kind; a reference to a value not defined before it is corruption.
 // Strings are uvarint-length prefixed, and varints are zigzag-encoded. The base
 // is the record's smallest start, or 0 without points. A point's start delta is
 // its start minus the base, and an entry's ref delta is its ref minus the
 // previous entry's, both modulo 2^64. The kind byte's low three bits select the
 // kind and bit 3 is the truncation flag; other kinds and bits are unknown.
 const (
-	compactNativeMetadataValueFormat byte = 1
+	compactNativeMetadataInlineFormat byte = 3
 
 	compactNativeMetadataKindMask      byte = 0x07
 	compactNativeMetadataGroup         byte = 0
 	compactNativeMetadataOverride      byte = 1
 	compactNativeMetadataTruncatedFlag byte = 1 << 3
 
-	// Smallest encodings of a dictionary value, an entry and a point.
-	compactNativeMetadataValueMinBytes = 1 + 1 + 1
+	// Smallest encodings of an entry and a point; a point that refers to a
+	// defined value is the smallest.
 	compactNativeMetadataEntryMinBytes = 1 + 1 + 1
 	compactNativeMetadataPointMinBytes = 1 + 1
 )
@@ -133,8 +137,13 @@ func (r *CompactNativeMetadata) AppendLegacy(dst []RefMetadata) []RefMetadata {
 
 // CompactNativeMetadata appends a compact native metadata record to b. Entries
 // must be groups or overrides, groups must have points, and points must be
-// chronological per entry and index values.
+// chronological per entry and index values. Each value a point uses is defined
+// at its first use; values no point uses are not encoded. Callers that order
+// values by first use, as Commit and checkpoints do, avoid a renumbered copy.
 func (*Encoder) CompactNativeMetadata(values []NativeMetadataValue, entries []RefCompactNativeMetadata, b []byte) []byte {
+	if !compactNativeMetadataInFirstUseOrder(entries) {
+		values, entries = compactNativeMetadataFirstUseOrder(values, entries)
+	}
 	var base int64
 	havePoints := false
 	for _, e := range entries {
@@ -146,16 +155,11 @@ func (*Encoder) CompactNativeMetadata(values []NativeMetadataValue, entries []Re
 	}
 	buf := encoding.Encbuf{B: b}
 	buf.PutByte(byte(NativeMetadataCompact))
-	buf.PutByte(compactNativeMetadataValueFormat)
+	buf.PutByte(compactNativeMetadataInlineFormat)
 	buf.PutVarint64(base)
-	buf.PutUvarint(len(values))
-	for _, v := range values {
-		buf.PutByte(v.Type)
-		buf.PutUvarintStr(v.Unit)
-		buf.PutUvarintStr(v.Help)
-	}
 	buf.PutUvarint(len(entries))
 	var previous chunks.HeadSeriesRef
+	var defined uint32
 	for _, e := range entries {
 		kind := compactNativeMetadataGroup
 		if e.Kind == NativeMetadataOverride {
@@ -170,18 +174,66 @@ func (*Encoder) CompactNativeMetadata(values []NativeMetadataValue, entries []Re
 		buf.PutUvarint(len(e.Points))
 		for _, p := range e.Points {
 			buf.PutUvarint64(uint64(p.EffectiveFrom) - uint64(base))
-			buf.PutUvarint32(p.Value)
+			if p.Value < defined {
+				buf.PutUvarint32(p.Value + 1)
+				continue
+			}
+			v := values[p.Value]
+			buf.PutByte(0)
+			buf.PutByte(v.Type)
+			buf.PutUvarintStr(v.Unit)
+			buf.PutUvarintStr(v.Help)
+			defined++
 		}
 	}
 	return buf.Get()
 }
 
+// compactNativeMetadataInFirstUseOrder reports whether entries' points use
+// value indices in order of first use: each new index is the next one.
+func compactNativeMetadataInFirstUseOrder(entries []RefCompactNativeMetadata) bool {
+	var defined uint32
+	for _, e := range entries {
+		for _, p := range e.Points {
+			switch {
+			case p.Value == defined:
+				defined++
+			case p.Value > defined:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// compactNativeMetadataFirstUseOrder returns copies of values and entries with
+// the used values renumbered in order of first use.
+func compactNativeMetadataFirstUseOrder(values []NativeMetadataValue, entries []RefCompactNativeMetadata) ([]NativeMetadataValue, []RefCompactNativeMetadata) {
+	// One-based new indices by old index; zero before first use.
+	renumber := make([]uint32, len(values))
+	var used []NativeMetadataValue
+	out := make([]RefCompactNativeMetadata, len(entries))
+	for i, e := range entries {
+		e.Points = slices.Clone(e.Points)
+		for j, p := range e.Points {
+			if renumber[p.Value] == 0 {
+				used = append(used, values[p.Value])
+				renumber[p.Value] = uint32(len(used))
+			}
+			e.Points[j].Value = renumber[p.Value] - 1
+		}
+		out[i] = e
+	}
+	return used, out
+}
+
 // CompactNativeMetadata decodes a compact native metadata record into r,
-// replacing its contents. Each value's strings are copied once. Framing errors
-// are returned, including unknown formats, empty groups, value indices outside
-// the dictionary and trailing bytes. Well-framed entries of unknown kind or
-// with unknown flags are decoded as unknown entries with their newest point, if
-// they have any.
+// replacing its contents: r.Values holds the record's values in order of
+// definition, which points index. Each value's strings are copied once. Framing
+// errors are returned, including unknown formats, empty groups, references to
+// values not yet defined and trailing bytes. Well-framed entries of unknown
+// kind or with unknown flags are decoded as unknown entries with their newest
+// point, if they have any; the values they define stay defined.
 func (*Decoder) CompactNativeMetadata(rec []byte, r *CompactNativeMetadata) error {
 	return decodeCompactNativeMetadata(rec, r, false)
 }
@@ -207,21 +259,11 @@ func decodeCompactNativeMetadataInto(rec []byte, r *CompactNativeMetadata, borro
 	if Type(dec.Byte()) != NativeMetadataCompact {
 		return errors.New("invalid record type")
 	}
-	if format := dec.Byte(); dec.Err() == nil && format != compactNativeMetadataValueFormat {
+	if format := dec.Byte(); dec.Err() == nil && format != compactNativeMetadataInlineFormat {
 		return fmt.Errorf("unknown compact native metadata format %d", format)
 	}
 	base := uint64(dec.Varint64())
-	count, err := compactNativeMetadataCount(&dec, compactNativeMetadataValueMinBytes, "values")
-	if err != nil {
-		return err
-	}
-	for range count {
-		r.Values = append(r.Values, NativeMetadataValue{Type: dec.Byte(), Unit: recordString(dec.UvarintBytes(), borrow), Help: recordString(dec.UvarintBytes(), borrow)})
-	}
-	if dec.Err() != nil {
-		return dec.Err()
-	}
-	count, err = compactNativeMetadataCount(&dec, compactNativeMetadataEntryMinBytes, "entries")
+	count, err := compactNativeMetadataCount(&dec, compactNativeMetadataEntryMinBytes, "entries")
 	if err != nil {
 		return err
 	}
@@ -248,14 +290,25 @@ func decodeCompactNativeMetadataInto(rec []byte, r *CompactNativeMetadata, borro
 		start := len(r.points)
 		for range points {
 			p := CompactNativeMetadataPoint{EffectiveFrom: int64(base + dec.Uvarint64())}
-			index := dec.Uvarint64()
+			tag := dec.Uvarint64()
 			if dec.Err() != nil {
 				return dec.Err()
 			}
-			if index >= uint64(len(r.Values)) {
-				return fmt.Errorf("compact native metadata value index %d outside %d values", index, len(r.Values))
+			switch {
+			case tag == 0:
+				if uint64(len(r.Values)) == math.MaxUint32 {
+					return errors.New("compact native metadata record defines too many values")
+				}
+				r.Values = append(r.Values, NativeMetadataValue{Type: dec.Byte(), Unit: recordString(dec.UvarintBytes(), borrow), Help: recordString(dec.UvarintBytes(), borrow)})
+				if dec.Err() != nil {
+					return dec.Err()
+				}
+				p.Value = uint32(len(r.Values) - 1)
+			case tag > uint64(len(r.Values)):
+				return fmt.Errorf("compact native metadata reference to value %d with %d values defined", tag-1, len(r.Values))
+			default:
+				p.Value = uint32(tag - 1)
 			}
-			p.Value = uint32(index)
 			r.points = append(r.points, p)
 		}
 		if e.Kind == NativeMetadataUnknown && len(r.points) > start {

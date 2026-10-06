@@ -125,30 +125,29 @@ func compactNativeMetadataForTest(entries ...record.RefNativeMetadata) record.Co
 // unknownCompactNativeMetadataForTest encodes a compact record of one entry of
 // an unknown kind, with value v at from if it has a point.
 func unknownCompactNativeMetadataForTest(ref chunks.HeadSeriesRef, v *record.NativeMetadataValue, from int64) []byte {
-	const unknownKind = 7
+	const unknownKind, inlineFormat = 7, 3
 	buf := encoding.Encbuf{}
 	buf.PutByte(byte(record.NativeMetadataCompact))
-	buf.PutByte(1)
+	buf.PutByte(inlineFormat)
 	if v == nil {
 		buf.PutVarint64(0)
-		buf.PutUvarint(0)
 	} else {
 		buf.PutVarint64(from)
-		buf.PutUvarint(1)
-		buf.PutByte(v.Type)
-		buf.PutUvarintStr(v.Unit)
-		buf.PutUvarintStr(v.Help)
 	}
 	buf.PutUvarint(1)
 	buf.PutByte(unknownKind)
 	buf.PutVarint64(int64(ref))
 	if v == nil {
 		buf.PutUvarint(0)
-	} else {
-		buf.PutUvarint(1)
-		buf.PutUvarint(0)
-		buf.PutUvarint(0)
+		return buf.Get()
 	}
+	// One point, at the base, defining v.
+	buf.PutUvarint(1)
+	buf.PutUvarint(0)
+	buf.PutUvarint(0)
+	buf.PutByte(v.Type)
+	buf.PutUvarintStr(v.Unit)
+	buf.PutUvarintStr(v.Help)
 	return buf.Get()
 }
 

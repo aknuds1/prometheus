@@ -30,19 +30,20 @@ import (
 )
 
 func TestCompactNativeMetadataRecord(t *testing.T) {
+	// Values in order of first use; equal values may repeat.
 	values := []NativeMetadataValue{
 		{Type: uint8(Counter), Unit: "seconds", Help: "a"},
 		{Type: uint8(Gauge), Unit: "seconds", Help: strings.Repeat("b", 300)},
 		{},
 		{Type: uint8(Summary), Help: "c"},
-		{Type: uint8(Counter), Unit: "seconds", Help: "a"}, // Equal values may repeat.
+		{Type: uint8(Counter), Unit: "seconds", Help: "a"},
 	}
 	point := func(from int64, value uint32) CompactNativeMetadataPoint {
 		return CompactNativeMetadataPoint{EffectiveFrom: from, Value: value}
 	}
 	entries := []RefCompactNativeMetadata{
 		{Ref: 7, Kind: NativeMetadataGroup, Points: []CompactNativeMetadataPoint{point(100, 0)}},
-		{Ref: 2, Kind: NativeMetadataGroup, Points: []CompactNativeMetadataPoint{point(-5, 1), point(150, 0), point(180, 4)}},
+		{Ref: 2, Kind: NativeMetadataGroup, Points: []CompactNativeMetadataPoint{point(-5, 1), point(150, 0), point(180, 2)}},
 		{Ref: math.MaxUint64, Kind: NativeMetadataOverride, Points: []CompactNativeMetadataPoint{point(math.MinInt64, 3), point(math.MaxInt64, 2)}},
 		{Ref: 0, Kind: NativeMetadataOverride, Truncated: true, Points: []CompactNativeMetadataPoint{point(10, 1)}},
 		{Ref: 5, Kind: NativeMetadataOverride, Truncated: true},
@@ -64,6 +65,23 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 		require.NoError(t, dec.CompactNativeMetadata(enc.CompactNativeMetadata(values[:1], entries[:1], nil), &decoded))
 		require.Equal(t, values[:1], decoded.Values)
 		require.Equal(t, entries[:1], normalizeCompactNativeMetadata(decoded.Entries))
+	})
+
+	t.Run("values in any order are renumbered by first use", func(t *testing.T) {
+		// The first entry uses value 4 first, and value 2 is unused, so it is
+		// not encoded.
+		shuffled := []RefCompactNativeMetadata{
+			{Ref: 1, Kind: NativeMetadataGroup, Points: []CompactNativeMetadataPoint{point(1, 4), point(2, 0)}},
+			{Ref: 2, Kind: NativeMetadataGroup, Points: []CompactNativeMetadataPoint{point(3, 0), point(4, 3)}},
+		}
+		before := slices.Clone(shuffled[0].Points)
+		var decoded CompactNativeMetadata
+		require.NoError(t, dec.CompactNativeMetadata(enc.CompactNativeMetadata(values, shuffled, nil), &decoded))
+		require.Equal(t, []NativeMetadataValue{values[4], values[0], values[3]}, decoded.Values)
+		got, _ := decoded.AppendNativeMetadata(nil, nil)
+		want, _ := (&CompactNativeMetadata{Values: values, Entries: shuffled}).AppendNativeMetadata(nil, nil)
+		require.Equal(t, normalizeNativeMetadata(want), normalizeNativeMetadata(got))
+		require.Equal(t, before, shuffled[0].Points, "the caller's points are unchanged")
 	})
 
 	t.Run("borrowed strings alias the record", func(t *testing.T) {
@@ -98,17 +116,21 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 		// checks rely on this formula.
 		zigzag := func(x int64) uint64 { return uint64(x<<1) ^ uint64(x>>63) }
 		base := int64(math.MinInt64)
-		size := 1 + 1 + uvarintSize(zigzag(base)) + uvarintSize(uint64(len(values)))
-		for _, v := range values {
-			size += 1 + uvarintSize(uint64(len(v.Unit))) + len(v.Unit) + uvarintSize(uint64(len(v.Help))) + len(v.Help)
-		}
-		size += uvarintSize(uint64(len(entries)))
+		size := 1 + 1 + uvarintSize(zigzag(base)) + uvarintSize(uint64(len(entries)))
 		var previous chunks.HeadSeriesRef
+		defined := uint32(0)
 		for _, e := range entries {
 			size += 1 + uvarintSize(zigzag(int64(e.Ref-previous))) + uvarintSize(uint64(len(e.Points)))
 			previous = e.Ref
 			for _, p := range e.Points {
-				size += uvarintSize(uint64(p.EffectiveFrom)-uint64(base)) + uvarintSize(uint64(p.Value))
+				size += uvarintSize(uint64(p.EffectiveFrom) - uint64(base))
+				if p.Value < defined {
+					size += uvarintSize(uint64(p.Value) + 1)
+					continue
+				}
+				v := values[p.Value]
+				size += 1 + 1 + uvarintSize(uint64(len(v.Unit))) + len(v.Unit) + uvarintSize(uint64(len(v.Help))) + len(v.Help)
+				defined++
 			}
 		}
 		require.Len(t, rec, size)
@@ -138,7 +160,7 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 		// for an override without points, as for Metadata records.
 		require.Equal(t, []RefMetadata{
 			{Ref: 7, Type: uint8(Counter), Unit: "seconds", Help: "a"},
-			{Ref: 2, Type: uint8(Counter), Unit: "seconds", Help: "a"},
+			{Ref: 2},
 			{Ref: math.MaxUint64},
 			{Ref: 0, Type: uint8(Gauge), Unit: "seconds", Help: values[1].Help},
 			{Ref: 5},
@@ -153,7 +175,7 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 	t.Run("records without points", func(t *testing.T) {
 		empty := []RefCompactNativeMetadata{{Ref: 3, Kind: NativeMetadataOverride}, {Ref: 4, Kind: NativeMetadataOverride, Truncated: true}}
 		rec := enc.CompactNativeMetadata(nil, empty, nil)
-		require.Equal(t, []byte{byte(NativeMetadataCompact), compactNativeMetadataValueFormat, 0, 0, 2, 1, 6, 0, 9, 2, 0}, rec)
+		require.Equal(t, []byte{byte(NativeMetadataCompact), compactNativeMetadataInlineFormat, 0, 2, 1, 6, 0, 9, 2, 0}, rec)
 		var decoded CompactNativeMetadata
 		require.NoError(t, dec.CompactNativeMetadata(rec, &decoded))
 		require.Equal(t, empty, normalizeCompactNativeMetadata(decoded.Entries))
@@ -176,7 +198,7 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 			{name: "override with future flags", kind: compactNativeMetadataOverride | compactNativeMetadataTruncatedFlag | 0xf0, truncated: true},
 		} {
 			t.Run(c.name, func(t *testing.T) {
-				for _, points := range [][]CompactNativeMetadataPoint{nil, {point(50, 1)}, {point(200, 0), point(100, 1), point(300, 0)}} {
+				for _, points := range [][]CompactNativeMetadataPoint{nil, {point(50, 0)}, {point(200, 0), point(100, 1), point(300, 0)}} {
 					rec := compactNativeMetadataTestRecord(values[:2], 9, c.kind, points)
 					var decoded CompactNativeMetadata
 					require.NoError(t, dec.CompactNativeMetadata(rec, &decoded))
@@ -200,6 +222,38 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 		require.False(t, RefNativeMetadata{Kind: NativeMetadataOverride}.Ignored())
 	})
 
+	t.Run("values defined in unknown entries stay defined", func(t *testing.T) {
+		// An unknown entry keeps only its newest point, but later entries may
+		// refer to every value it defines.
+		buf := encoding.Encbuf{}
+		buf.PutByte(byte(NativeMetadataCompact))
+		buf.PutByte(compactNativeMetadataInlineFormat)
+		buf.PutVarint64(10)
+		buf.PutUvarint(2)
+		buf.PutByte(7)
+		buf.PutVarint64(1)
+		buf.PutUvarint(2)
+		for _, help := range []string{"x", "y"} {
+			buf.PutUvarint(0)
+			buf.PutUvarint(0)
+			buf.PutByte(uint8(Gauge))
+			buf.PutUvarintStr("")
+			buf.PutUvarintStr(help)
+		}
+		buf.PutByte(compactNativeMetadataGroup)
+		buf.PutVarint64(1)
+		buf.PutUvarint(1)
+		buf.PutUvarint(5)
+		buf.PutUvarint(1)
+		var decoded CompactNativeMetadata
+		require.NoError(t, dec.CompactNativeMetadata(buf.Get(), &decoded))
+		require.Equal(t, []NativeMetadataValue{{Type: uint8(Gauge), Help: "x"}, {Type: uint8(Gauge), Help: "y"}}, decoded.Values)
+		require.Equal(t, []RefCompactNativeMetadata{
+			{Ref: 1, Kind: NativeMetadataUnknown, Points: []CompactNativeMetadataPoint{point(10, 1)}},
+			{Ref: 2, Kind: NativeMetadataGroup, Points: []CompactNativeMetadataPoint{point(15, 0)}},
+		}, normalizeCompactNativeMetadata(decoded.Entries))
+	})
+
 	t.Run("framing errors", func(t *testing.T) {
 		// Counts are explicit, so every cut is detected.
 		for n := range len(rec) {
@@ -209,12 +263,12 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 			require.Empty(t, decoded.Entries)
 			require.Error(t, dec.CompactNativeMetadataBorrowed(rec[:n], &decoded), "cut at %d", n)
 		}
-		header := func(format byte, count uint64) encoding.Encbuf {
+		header := func(format byte, entries uint64) encoding.Encbuf {
 			buf := encoding.Encbuf{}
 			buf.PutByte(byte(NativeMetadataCompact))
 			buf.PutByte(format)
 			buf.PutVarint64(0)
-			buf.PutUvarint64(count)
+			buf.PutUvarint64(entries)
 			return buf
 		}
 		entry := func(buf *encoding.Encbuf, kind byte, points uint64) {
@@ -222,26 +276,62 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 			buf.PutVarint64(1)
 			buf.PutUvarint64(points)
 		}
+		definition := func(buf *encoding.Encbuf, help string) {
+			buf.PutUvarint(0)
+			buf.PutUvarint(0)
+			buf.PutByte(uint8(Counter))
+			buf.PutUvarintStr("")
+			buf.PutUvarintStr(help)
+		}
+		reference := func(buf *encoding.Encbuf, tag uint64) {
+			buf.PutUvarint(0)
+			buf.PutUvarint64(tag)
+		}
 		cases := map[string][]byte{
 			"wrong record type": enc.Metadata(nil, nil),
 			// An appended complete entry is caught as trailing bytes.
 			"appended entry": append(slices.Clone(rec), compactNativeMetadataOverride, 0, 0),
 			"empty group": func() []byte {
-				buf := header(compactNativeMetadataValueFormat, 0)
-				buf.PutUvarint(1)
+				buf := header(compactNativeMetadataInlineFormat, 1)
 				entry(&buf, compactNativeMetadataGroup, 0)
 				return buf.Get()
 			}(),
 			"empty truncated group": func() []byte {
-				buf := header(compactNativeMetadataValueFormat, 0)
-				buf.PutUvarint(1)
+				buf := header(compactNativeMetadataInlineFormat, 1)
 				entry(&buf, compactNativeMetadataGroup|compactNativeMetadataTruncatedFlag, 0)
 				return buf.Get()
 			}(),
-			"value index outside the dictionary":                     compactNativeMetadataTestRecord(values[:2], 1, compactNativeMetadataGroup, []CompactNativeMetadataPoint{point(1, 2)}),
-			"value index of an unknown entry outside the dictionary": compactNativeMetadataTestRecord(values[:2], 1, 7, []CompactNativeMetadataPoint{point(1, math.MaxUint32)}),
-			"string beyond the record": func() []byte {
-				buf := header(compactNativeMetadataValueFormat, 1)
+			"reference without definitions": func() []byte {
+				buf := header(compactNativeMetadataInlineFormat, 1)
+				entry(&buf, compactNativeMetadataGroup, 1)
+				reference(&buf, 1)
+				return buf.Get()
+			}(),
+			"reference to the value being defined": func() []byte {
+				buf := header(compactNativeMetadataInlineFormat, 1)
+				entry(&buf, compactNativeMetadataGroup, 2)
+				definition(&buf, "a")
+				reference(&buf, 2)
+				return buf.Get()
+			}(),
+			"reference past every definition": func() []byte {
+				buf := header(compactNativeMetadataInlineFormat, 1)
+				entry(&buf, compactNativeMetadataGroup, 2)
+				definition(&buf, "a")
+				reference(&buf, math.MaxUint64)
+				return buf.Get()
+			}(),
+			"reference from an unknown entry without definitions": func() []byte {
+				buf := header(compactNativeMetadataInlineFormat, 1)
+				entry(&buf, 7, 1)
+				reference(&buf, 1)
+				return buf.Get()
+			}(),
+			"definition beyond the record": func() []byte {
+				buf := header(compactNativeMetadataInlineFormat, 1)
+				entry(&buf, compactNativeMetadataGroup, 1)
+				buf.PutUvarint(0)
+				buf.PutUvarint(0)
 				buf.PutByte(0)
 				buf.PutUvarint(5)
 				buf.PutString("ab")
@@ -249,16 +339,14 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 			}(),
 		}
 		// Each count must fit the remaining bytes at its minimum element size.
-		for name, minBytes := range map[string]int{"values": compactNativeMetadataValueMinBytes, "entries": compactNativeMetadataEntryMinBytes, "points": compactNativeMetadataPointMinBytes} {
+		for name, minBytes := range map[string]int{"entries": compactNativeMetadataEntryMinBytes, "points": compactNativeMetadataPointMinBytes} {
 			for _, count := range []uint64{2, math.MaxInt32 + 1, math.MaxUint32 + 1, math.MaxInt64 + 1, math.MaxUint64} {
-				buf := header(compactNativeMetadataValueFormat, 0)
+				var buf encoding.Encbuf
 				switch name {
-				case "values":
-					buf = header(compactNativeMetadataValueFormat, count)
 				case "entries":
-					buf.PutUvarint64(count)
+					buf = header(compactNativeMetadataInlineFormat, count)
 				case "points":
-					buf.PutUvarint(1)
+					buf = header(compactNativeMetadataInlineFormat, 1)
 					entry(&buf, compactNativeMetadataOverride, count)
 				}
 				// Room for one fewer element than the smallest count.
@@ -267,9 +355,8 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 			}
 		}
 		for format := range 256 {
-			if byte(format) != compactNativeMetadataValueFormat {
+			if byte(format) != compactNativeMetadataInlineFormat {
 				buf := header(byte(format), 0)
-				buf.PutUvarint(0)
 				cases[fmt.Sprintf("format %d", format)] = buf.Get()
 			}
 		}
@@ -278,10 +365,11 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 			err := dec.CompactNativeMetadata(rec, &decoded)
 			require.Error(t, err, name)
 			require.Equal(t, err, dec.CompactNativeMetadataBorrowed(rec, &decoded), name)
+			require.Empty(t, decoded.Values, name)
 		}
-		// The smallest valid record has an empty dictionary and no entries.
+		// The smallest valid record has no entries.
 		var decoded CompactNativeMetadata
-		require.NoError(t, dec.CompactNativeMetadata([]byte{byte(NativeMetadataCompact), compactNativeMetadataValueFormat, 0, 0, 0}, &decoded))
+		require.NoError(t, dec.CompactNativeMetadata([]byte{byte(NativeMetadataCompact), compactNativeMetadataInlineFormat, 0, 0}, &decoded))
 	})
 
 	t.Run("random contents", func(t *testing.T) {
@@ -321,8 +409,19 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 			}
 			rec := enc.CompactNativeMetadata(values, entries, nil)
 			require.NoError(t, dec.CompactNativeMetadata(rec, &decoded))
-			require.Equal(t, normalizeValues(values), normalizeValues(decoded.Values))
-			require.Equal(t, normalizeCompactNativeMetadata(entries), normalizeCompactNativeMetadata(decoded.Entries))
+			// The points carry the same values; only the values used are
+			// defined, in order of first use.
+			got, _ := decoded.AppendNativeMetadata(nil, nil)
+			want, _ := (&CompactNativeMetadata{Values: values, Entries: entries}).AppendNativeMetadata(nil, nil)
+			require.Equal(t, normalizeNativeMetadata(want), normalizeNativeMetadata(got))
+			require.True(t, compactNativeMetadataInFirstUseOrder(decoded.Entries))
+			used := map[uint32]bool{}
+			for _, e := range entries {
+				for _, p := range e.Points {
+					used[p.Value] = true
+				}
+			}
+			require.Len(t, decoded.Values, len(used))
 		}
 	})
 }
@@ -332,26 +431,15 @@ func TestCompactNativeMetadataRecord(t *testing.T) {
 func compactNativeMetadataTestRecord(values []NativeMetadataValue, ref chunks.HeadSeriesRef, kind byte, points []CompactNativeMetadataPoint) []byte {
 	var enc Encoder
 	rec := enc.CompactNativeMetadata(values, []RefCompactNativeMetadata{{Ref: ref, Kind: NativeMetadataOverride, Points: points}}, nil)
-	// The entry is the record's tail: kind byte, ref delta, count and points.
-	tail := 1 + uvarintSize(uint64(ref)<<1) + uvarintSize(uint64(len(points)))
+	// The kind byte follows the type, format, base and a one-byte count.
 	var base int64
 	for i, p := range points {
 		if i == 0 || p.EffectiveFrom < base {
 			base = p.EffectiveFrom
 		}
 	}
-	for _, p := range points {
-		tail += uvarintSize(uint64(p.EffectiveFrom)-uint64(base)) + uvarintSize(uint64(p.Value))
-	}
-	rec[len(rec)-tail] = kind
+	rec[2+uvarintSize(uint64(base<<1)^uint64(base>>63))+1] = kind
 	return rec
-}
-
-func normalizeValues(values []NativeMetadataValue) []NativeMetadataValue {
-	if len(values) == 0 {
-		return nil
-	}
-	return values
 }
 
 // normalizeCompactNativeMetadata clears capacity differences for comparisons.
@@ -375,9 +463,10 @@ func FuzzDecoderCompactNativeMetadata(f *testing.F) {
 	f.Add(enc.CompactNativeMetadata(values, []RefCompactNativeMetadata{
 		{Ref: 1, Kind: NativeMetadataGroup, Points: []CompactNativeMetadataPoint{{EffectiveFrom: 1}, {EffectiveFrom: 2, Value: 1}}},
 		{Ref: 2, Kind: NativeMetadataOverride, Truncated: true},
+		{Ref: 3, Kind: NativeMetadataGroup, Points: []CompactNativeMetadataPoint{{EffectiveFrom: 3, Value: 1}, {EffectiveFrom: 4}}},
 	}, nil))
 	f.Add(compactNativeMetadataTestRecord(values, 3, 0xff, []CompactNativeMetadataPoint{{EffectiveFrom: math.MinInt64, Value: 1}}))
-	f.Add([]byte{byte(NativeMetadataCompact), compactNativeMetadataValueFormat, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01})
+	f.Add([]byte{byte(NativeMetadataCompact), compactNativeMetadataInlineFormat, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01})
 	f.Fuzz(func(t *testing.T, rec []byte) {
 		var dec Decoder
 		var copied, borrowed CompactNativeMetadata
@@ -407,10 +496,12 @@ func FuzzDecoderCompactNativeMetadata(f *testing.F) {
 		if !known {
 			return
 		}
-		// Records of known kinds survive re-encoding.
+		// Records of known kinds define their values in order of first use,
+		// and survive re-encoding.
+		require.True(t, compactNativeMetadataInFirstUseOrder(copied.Entries))
 		var again CompactNativeMetadata
 		require.NoError(t, dec.CompactNativeMetadata(enc.CompactNativeMetadata(copied.Values, copied.Entries, nil), &again))
-		require.Equal(t, normalizeValues(copied.Values), normalizeValues(again.Values))
+		require.Equal(t, copied.Values, again.Values)
 		require.Equal(t, normalizeCompactNativeMetadata(copied.Entries), normalizeCompactNativeMetadata(again.Entries))
 	})
 }

@@ -80,7 +80,8 @@ func init() {
 }
 
 // compactNativeMetadataSize returns the encoded size of a compact record with
-// r's contents, in r's order.
+// r's contents, in r's order, which must define values in order of first use:
+// each value's first point defines it, and later points refer to it.
 func compactNativeMetadataSize(r *record.CompactNativeMetadata) int {
 	uvarint := func(x uint64) int { return len(binary.AppendUvarint(nil, x)) }
 	varint := func(x int64) int { return len(binary.AppendVarint(nil, x)) }
@@ -93,17 +94,21 @@ func compactNativeMetadataSize(r *record.CompactNativeMetadata) int {
 			}
 		}
 	}
-	size := 1 + 1 + varint(base) + uvarint(uint64(len(r.Values)))
-	for _, v := range r.Values {
-		size += 1 + uvarint(uint64(len(v.Unit))) + len(v.Unit) + uvarint(uint64(len(v.Help))) + len(v.Help)
-	}
-	size += uvarint(uint64(len(r.Entries)))
+	size := 1 + 1 + varint(base) + uvarint(uint64(len(r.Entries)))
 	var previous chunks.HeadSeriesRef
+	defined := uint32(0)
 	for _, e := range r.Entries {
 		size += 1 + varint(int64(e.Ref-previous)) + uvarint(uint64(len(e.Points)))
 		previous = e.Ref
 		for _, p := range e.Points {
-			size += uvarint(uint64(p.EffectiveFrom)-uint64(base)) + uvarint(uint64(p.Value))
+			size += uvarint(uint64(p.EffectiveFrom) - uint64(base))
+			if p.Value < defined {
+				size += uvarint(uint64(p.Value) + 1)
+				continue
+			}
+			v := r.Values[p.Value]
+			size += 1 + 1 + uvarint(uint64(len(v.Unit))) + len(v.Unit) + uvarint(uint64(len(v.Help))) + len(v.Help)
+			defined++
 		}
 	}
 	return size
