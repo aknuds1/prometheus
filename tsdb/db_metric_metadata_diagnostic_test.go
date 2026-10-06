@@ -366,6 +366,7 @@ func (f *metadataDiagnosticFixture) validateWAL(tb testing.TB) metadataDiagnosti
 	var samples []record.RefSample
 	var metas []record.RefNativeMetadata
 	var points []record.RefNativeMetadataPoint
+	var compact record.CompactNativeMetadata
 	out := metadataDiagnosticWAL{}
 	for r.Next() {
 		data := r.Record()
@@ -397,10 +398,17 @@ func (f *metadataDiagnosticFixture) validateWAL(tb testing.TB) metadataDiagnosti
 				steps[id]++
 				out.Samples++
 			}
-		case record.Metadata:
-			// WAL mode logs legacy entries; native mode logs merge groups.
-			metas, points, err = d.NativeMetadata(data, metas[:0], points[:0])
-			if err != nil {
+		case record.Metadata, record.NativeMetadataCompact:
+			// WAL mode logs legacy entries in Metadata records; native mode
+			// logs merge groups in compact records.
+			if compactRecord := d.Type(data) == record.NativeMetadataCompact; compactRecord != (c.Mode == "native") {
+				tb.Fatalf("unexpected WAL record %d in %s mode", d.Type(data), c.Mode)
+			} else if compactRecord {
+				if err := d.CompactNativeMetadata(data, &compact); err != nil {
+					tb.Fatal(err)
+				}
+				metas, points = compact.AppendNativeMetadata(metas[:0], points[:0])
+			} else if metas, points, err = d.NativeMetadata(data, metas[:0], points[:0]); err != nil {
 				tb.Fatal(err)
 			}
 			kind := map[string]record.NativeMetadataKind{"wal": record.NativeMetadataLegacy, "native": record.NativeMetadataGroup}

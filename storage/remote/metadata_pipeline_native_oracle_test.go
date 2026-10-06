@@ -14,17 +14,20 @@
 package remote
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/tsdb/wlog"
@@ -41,9 +44,9 @@ func init() {
 		if err != nil {
 			return err
 		}
-		got, err := w.decodeNative(w.ids)
+		got, err := w.decodeCompact(w.ids)
 		if err != nil {
-			return err
+			return fmt.Errorf("WAL: %w", err)
 		}
 		if c.Mixed {
 			want.records = len(w.metadata)
@@ -172,15 +175,25 @@ func metadataPipelineNativeKey(id int, e record.RefNativeMetadata) string {
 // Observations of another series in the same stripe can make a sample with
 // unchanged metadata observed. Such a group is stable and logs nothing, and in
 // these traces a series' observed samples are contiguous, so the model
-// ignores stripes.
+// ignores such observations.
+//
+// A transaction's groups form one compact record, ordered by stripe in order
+// of first observation, then by ref. Its dictionary holds each value once, in
+// order of first use, which needs at most 128 distinct values per transaction.
 func metadataPipelineNativeEntries(c metadataPipelineConfig, refs map[int]chunks.HeadSeriesRef, fromAppend int) (metadataPipelineExpected, error) {
 	var e metadataPipelineExpected
-	var enc record.Encoder
 	committed := map[int]int{}
 	var err error
 	for i, a := range c.appends() {
 		c.transactions(a, func(samples []metadataPipelineSample) {
-			entries := 0
+			var entries []record.RefNativeMetadata
+			distinct := map[metadata.Metadata]bool{}
+			for _, s := range samples {
+				distinct[c.metadata(s.slot, c.version(s.slot, s.step))] = true
+			}
+			if len(distinct) > 128 && i >= fromAppend {
+				err = errors.Join(err, fmt.Errorf("a transaction has %d values, more than the model's 128", len(distinct)))
+			}
 			for start := 0; start < len(samples); {
 				end := start + 1
 				for end < len(samples) && samples[end].id == samples[start].id {
@@ -212,35 +225,52 @@ func metadataPipelineNativeEntries(c metadataPipelineConfig, refs map[int]chunks
 				for _, s := range run[first:] {
 					entry.Points = append(entry.Points, metadataPipelineNativePoint(c, s.slot, s.step))
 				}
-				e.add(metadataPipelineNativeKey(id, entry), len(enc.NativeMetadata([]record.RefNativeMetadata{entry}, nil))-1)
-				entries++
+				e.add(metadataPipelineNativeKey(id, entry), 0)
+				entries = append(entries, entry)
 			}
-			if entries > 0 {
+			if len(entries) > 0 {
 				e.records++
+				e.bytes += compactNativeMetadataSize(metadataPipelineCompactRecord(entries)) - 1
 			}
 		})
 	}
 	return e, err
 }
 
-// decodeNative decodes metadata records' entries with the native decoder.
-func (w metadataPipelineWALRecords) decodeNative(ids map[chunks.HeadSeriesRef]int) (map[string]int, error) {
-	got := map[string]int{}
-	var dec record.Decoder
-	for _, rec := range w.metadata {
-		entries, _, err := dec.NativeMetadata(rec, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		for _, e := range entries {
-			id, ok := ids[e.Ref]
-			if !ok {
-				return nil, fmt.Errorf("metadata for unknown ref %d", e.Ref)
-			}
-			got[metadataPipelineNativeKey(id, e)]++
+// metadataPipelineCompactRecord returns a transaction's groups, in observation
+// order, as Commit logs them in a compact record.
+func metadataPipelineCompactRecord(entries []record.RefNativeMetadata) *record.CompactNativeMetadata {
+	const stripes = 256
+	order := map[uint64]int{}
+	for _, e := range entries {
+		if _, ok := order[uint64(e.Ref)%stripes]; !ok {
+			order[uint64(e.Ref)%stripes] = len(order)
 		}
 	}
-	return got, nil
+	entries = slices.Clone(entries)
+	slices.SortStableFunc(entries, func(a, b record.RefNativeMetadata) int {
+		if c := cmp.Compare(order[uint64(a.Ref)%stripes], order[uint64(b.Ref)%stripes]); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Ref, b.Ref)
+	})
+	rec := &record.CompactNativeMetadata{}
+	indices := map[record.NativeMetadataValue]uint32{}
+	for _, e := range entries {
+		compact := record.RefCompactNativeMetadata{Ref: e.Ref, Kind: e.Kind}
+		for _, p := range e.Points {
+			v := record.NativeMetadataValue{Type: p.Type, Unit: p.Unit, Help: p.Help}
+			index, ok := indices[v]
+			if !ok {
+				index = uint32(len(rec.Values))
+				indices[v] = index
+				rec.Values = append(rec.Values, v)
+			}
+			compact.Points = append(compact.Points, record.CompactNativeMetadataPoint{EffectiveFrom: p.EffectiveFrom, Value: index})
+		}
+		rec.Entries = append(rec.Entries, compact)
+	}
+	return rec
 }
 
 func TestRemoteWriteMetadataPipelineNativeOracles(t *testing.T) {

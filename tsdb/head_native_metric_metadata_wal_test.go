@@ -20,7 +20,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
+	"unsafe"
 
 	prom_testutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
@@ -42,6 +44,8 @@ import (
 type nativeMetadataWAL struct {
 	types   []record.Type
 	entries []record.RefNativeMetadata
+	// values holds the dictionary size of each compact record.
+	values []int
 }
 
 func readNativeMetadataWAL(t testing.TB, dir string) nativeMetadataWAL {
@@ -74,6 +78,7 @@ func readNativeMetadataWAL(t testing.TB, dir string) nativeMetadataWAL {
 		case record.NativeMetadataCompact:
 			require.NoError(t, dec.CompactNativeMetadata(r.Record(), &compact))
 			out.entries, _ = compact.AppendNativeMetadata(out.entries, nil)
+			out.values = append(out.values, len(compact.Values))
 		}
 	}
 	require.NoError(t, r.Err())
@@ -208,10 +213,12 @@ func TestNativeMetricMetadataWAL(t *testing.T) {
 
 		wal := readNativeMetadataWAL(t, db.Head().wal.Dir())
 		require.Equal(t, []record.Type{
-			record.Series, record.Metadata, record.Samples,
-			record.Series, record.Metadata, record.Samples,
-			record.Metadata, record.Samples,
+			record.Series, record.NativeMetadataCompact, record.Samples,
+			record.Series, record.NativeMetadataCompact, record.Samples,
+			record.NativeMetadataCompact, record.Samples,
 		}, wal.types)
+		// Points of one value share its dictionary entry.
+		require.Equal(t, []int{1, 1, 1}, wal.values)
 		require.Equal(t, []record.RefNativeMetadata{
 			{Ref: chunks.HeadSeriesRef(refA), Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{point(100, "a")}},
 			{Ref: chunks.HeadSeriesRef(refB), Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{point(200, "b")}},
@@ -237,19 +244,25 @@ func TestNativeMetricMetadataWAL(t *testing.T) {
 			db := w.open(t, "native", nil)
 			w.run(t, db, 0, w.rounds)
 			require.NoError(t, db.Close())
+			// Each transaction's record holds its series' groups in ref order.
+			// Its dictionary holds each value once, in order of first use:
+			// past the transaction's 128 deduplicated values, a value repeats
+			// only in consecutive observations, which share a reference.
 			var enc record.Encoder
 			want := int64(0)
 			for round := 0; round <= w.rounds; round++ {
 				for offset := 0; offset < w.series; offset += 100 {
-					want++
+					var entries []record.RefNativeMetadata
 					for id := offset; id < min(offset+100, w.series); id++ {
 						entry := record.RefNativeMetadata{Ref: chunks.HeadSeriesRef(id + 1), Kind: record.NativeMetadataGroup}
 						w.samples(round, func(ts int64, version int) {
 							m := w.metadata(id, version)
 							entry.Points = append(entry.Points, record.RefNativeMetadataPoint{EffectiveFrom: ts, Type: record.GetMetricType(m.Type), Unit: m.Unit, Help: m.Help})
 						})
-						want += int64(len(enc.NativeMetadata([]record.RefNativeMetadata{entry}, nil)) - 1)
+						entries = append(entries, entry)
 					}
+					rec := compactNativeMetadataForTest(entries...)
+					want += int64(len(enc.CompactNativeMetadata(rec.Values, rec.Entries, nil)))
 				}
 			}
 			require.Equal(t, want, metadataPayload(t, filepath.Join(db.Dir(), "wal")), "batched=%t", batched)
@@ -302,6 +315,128 @@ func TestNativeMetricMetadataWAL(t *testing.T) {
 			require.NoError(t, db.Close())
 		}
 	})
+
+	t.Run("compact records hold the reference merge groups", func(t *testing.T) {
+		// The record's entries are the string-valued groups the appender's
+		// observations reduce to, and its dictionary holds each value
+		// reference the points use once, with the caller's strings. The
+		// transaction table deduplicates 128 values by content; others are
+		// shared only by consecutive observations.
+		rng := rand.New(rand.NewPCG(5, 6))
+		store := newNativeMetricMetadataStore()
+		values := make([]metadata.Metadata, 300)
+		for i := range values {
+			typ := model.MetricTypeCounter
+			if i%7 == 0 {
+				typ = model.MetricTypeGauge
+			}
+			values[i] = metadata.Metadata{Type: typ, Unit: strconv.Itoa(i % 3), Help: strings.Repeat("h", i%5) + strconv.Itoa(i)}
+		}
+		overflow := 0
+		for iteration := range 400 {
+			a := store.getAppender()
+			distinct := 1 + rng.IntN(3)*rng.IntN(150)
+			var last metadata.Metadata
+			callerStrings := map[unsafe.Pointer]bool{}
+			for range rng.IntN(600) {
+				ref := chunks.HeadSeriesRef(1 + rng.IntN(40))
+				m := values[rng.IntN(distinct)]
+				if rng.IntN(4) == 0 {
+					m = last // Consecutive repetition.
+				}
+				if state := nativeMetadataForTest(store.seriesForTest(ref)); state != nil && rng.IntN(3) == 0 {
+					m = *state.Metadata // Possibly stable.
+				}
+				// Fresh copies, so that dictionary strings can be traced to
+				// their observations.
+				m = metadata.Metadata{Type: m.Type, Unit: strings.Clone(m.Unit), Help: strings.Clone(m.Help)}
+				callerStrings[unsafe.Pointer(unsafe.StringData(m.Help))] = true
+				a.observe(store.seriesForTest(ref), int64(rng.IntN(60)), m)
+				last = m
+			}
+			want := nativeMetadataWALEntriesForTest(a)
+			recValues, entries := a.appendWALRecord()
+			got, _ := (&record.CompactNativeMetadata{Values: recValues, Entries: entries}).AppendNativeMetadata(nil, nil)
+			require.Equal(t, normalizeNativeMetadataForTest(want), normalizeNativeMetadataForTest(got), "iteration %d", iteration)
+			used := make([]bool, len(recValues))
+			for _, e := range entries {
+				for _, p := range e.Points {
+					used[p.Value] = true
+				}
+			}
+			require.NotContains(t, used, false, "iteration %d: every value is used", iteration)
+			// Values beyond the transaction table appear once per run of
+			// consecutive observations, as owned copies; within it, once, with
+			// the caller's strings.
+			if len(a.directValues) == 0 {
+				seen := map[record.NativeMetadataValue]bool{}
+				for _, v := range recValues {
+					require.False(t, seen[v], "iteration %d: duplicate value", iteration)
+					seen[v] = true
+					if v.Help != "" {
+						require.True(t, callerStrings[unsafe.Pointer(unsafe.StringData(v.Help))], "iteration %d: values keep the caller's strings", iteration)
+					}
+				}
+			} else {
+				overflow++
+			}
+			// A second pass returns the same record.
+			again, _ := a.appendWALRecord()
+			require.Equal(t, recValues, again)
+			store.commitAppender(a)
+			store.putAppender(a)
+		}
+		require.Positive(t, overflow, "transactions exceed the transaction table")
+	})
+}
+
+// nativeMetadataWALEntriesForTest is the string-valued construction of the
+// appender's merge groups that compact records replace, for comparisons.
+func nativeMetadataWALEntriesForTest(a *nativeMetricMetadataAppender) []record.RefNativeMetadata {
+	var entries []record.RefNativeMetadata
+	for _, stripe := range a.touched {
+		first := a.stripeFirst[stripe]
+		if nativeMetricMetadataStripeStable(a, first) {
+			continue
+		}
+		a.sortStripe(first)
+		for position := 0; position < len(a.sorted); {
+			end := position + 1
+			series := a.observations[a.sorted[position]-1].series
+			for end < len(a.sorted) && a.observations[a.sorted[end]-1].series.ref == series.ref {
+				end++
+			}
+			series.Lock()
+			stable := nativeMetricMetadataGroupStable(series.nativeMetadataLocked(), a, a.sorted[position:end])
+			series.Unlock()
+			if !stable {
+				entry := record.RefNativeMetadata{Ref: series.ref, Kind: record.NativeMetadataGroup}
+				for _, observationRef := range a.sorted[position:end] {
+					observation := a.observations[observationRef-1]
+					m := a.metadataValue(observation.metadataRef)
+					point := record.RefNativeMetadataPoint{EffectiveFrom: observation.effectiveFrom, Type: record.GetMetricType(m.Type), Unit: m.Unit, Help: m.Help}
+					if last := len(entry.Points) - 1; last >= 0 && entry.Points[last].EffectiveFrom == point.EffectiveFrom {
+						entry.Points[last] = point
+					} else {
+						entry.Points = append(entry.Points, point)
+					}
+				}
+				entries = append(entries, entry)
+			}
+			position = end
+		}
+	}
+	return entries
+}
+
+// normalizeNativeMetadataForTest clears capacity differences for comparisons.
+func normalizeNativeMetadataForTest(entries []record.RefNativeMetadata) []record.RefNativeMetadata {
+	out := make([]record.RefNativeMetadata, 0, len(entries))
+	for _, e := range entries {
+		e.Points = slices.Clip(e.Points)
+		out = append(out, e)
+	}
+	return out
 }
 
 func TestNativeMetricMetadataReplay(t *testing.T) {

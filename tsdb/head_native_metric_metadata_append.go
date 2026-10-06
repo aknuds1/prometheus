@@ -84,9 +84,15 @@ type nativeMetricMetadataAppender struct {
 	lastMetadata       metadata.Metadata
 	lastObservation    nativeMetricMetadataObservationRef
 	haveLast           bool
-	// Reusable WAL entries for the pre-log pass; they retain caller strings.
-	walEntries []record.RefNativeMetadata
-	walPoints  []record.RefNativeMetadataPoint
+	// Reusable WAL record contents for the pre-log pass. Values retain the
+	// strings of the transaction's values.
+	walValues  []record.NativeMetadataValue
+	walEntries []record.RefCompactNativeMetadata
+	walPoints  []record.CompactNativeMetadataPoint
+	// One-based indices into walValues by raw value reference and by direct
+	// value index; zero before a value's first use in the record.
+	walRawIndices    [maxNativeMetricMetadataValues + 1]uint32
+	walDirectIndices []uint32
 }
 
 func newNativeMetricMetadataAppender(cache *nativeMetricMetadataValueCache) *nativeMetricMetadataAppender {
@@ -259,13 +265,19 @@ func (a *nativeMetricMetadataAppender) sortStripe(first nativeMetricMetadataObse
 	}
 }
 
-// appendWALEntries returns one merge group entry per series whose observations
-// the commit stability checks find unstable before logging, with the points
-// commit merges: deduplicated per timestamp, the last observation winning, with
-// the caller's raw values. The entries are valid until the appender is reset.
+// appendWALRecord returns the contents of a compact record of one merge group
+// entry per series whose observations the commit stability checks find
+// unstable before logging, with the points commit merges: deduplicated per
+// timestamp, the last observation winning. Points index the returned values,
+// which hold each value reference used once, in order of first use: the
+// caller's raw values, or owned values beyond the transaction's bounded set.
+// The results are valid until the appender is reset.
 // Without concurrent writers to a series, commit merges exactly these groups.
-func (a *nativeMetricMetadataAppender) appendWALEntries() []record.RefNativeMetadata {
-	a.walEntries, a.walPoints = a.walEntries[:0], a.walPoints[:0]
+func (a *nativeMetricMetadataAppender) appendWALRecord() ([]record.NativeMetadataValue, []record.RefCompactNativeMetadata) {
+	a.walValues, a.walEntries, a.walPoints = a.walValues[:0], a.walEntries[:0], a.walPoints[:0]
+	clear(a.walRawIndices[:len(a.values)+1])
+	a.walDirectIndices = slices.Grow(a.walDirectIndices[:0], len(a.directValues))[:len(a.directValues)]
+	clear(a.walDirectIndices)
 	for _, stripe := range a.touched {
 		first := a.stripeFirst[stripe]
 		if nativeMetricMetadataStripeStable(a, first) {
@@ -282,18 +294,22 @@ func (a *nativeMetricMetadataAppender) appendWALEntries() []record.RefNativeMeta
 			stable := nativeMetricMetadataGroupStable(series.nativeMetadataLocked(), a, a.sorted[position:end])
 			series.Unlock()
 			if !stable {
+				// Points hold value references until the group is reduced, so
+				// that replaced points add no values.
 				start := len(a.walPoints)
 				for _, observationRef := range a.sorted[position:end] {
 					observation := a.observations[observationRef-1]
-					m := a.metadataValue(observation.metadataRef)
-					point := record.RefNativeMetadataPoint{EffectiveFrom: observation.effectiveFrom, Type: record.GetMetricType(m.Type), Unit: m.Unit, Help: m.Help}
+					point := record.CompactNativeMetadataPoint{EffectiveFrom: observation.effectiveFrom, Value: uint32(observation.metadataRef)}
 					if last := len(a.walPoints) - 1; last >= start && a.walPoints[last].EffectiveFrom == point.EffectiveFrom {
 						a.walPoints[last] = point
 					} else {
 						a.walPoints = append(a.walPoints, point)
 					}
 				}
-				a.walEntries = append(a.walEntries, record.RefNativeMetadata{
+				for i := start; i < len(a.walPoints); i++ {
+					a.walPoints[i].Value = a.walValueIndex(nativeMetricMetadataValueRef(a.walPoints[i].Value))
+				}
+				a.walEntries = append(a.walEntries, record.RefCompactNativeMetadata{
 					Ref: series.ref, Kind: record.NativeMetadataGroup,
 					Points: a.walPoints[start:len(a.walPoints):len(a.walPoints)],
 				})
@@ -301,7 +317,24 @@ func (a *nativeMetricMetadataAppender) appendWALEntries() []record.RefNativeMeta
 			position = end
 		}
 	}
-	return a.walEntries
+	return a.walValues, a.walEntries
+}
+
+// walValueIndex returns the index of ref's value in the WAL record's values,
+// adding the value on the reference's first use.
+func (a *nativeMetricMetadataAppender) walValueIndex(ref nativeMetricMetadataValueRef) uint32 {
+	var index *uint32
+	if ref&nativeMetricMetadataDirectRefMask != 0 {
+		index = &a.walDirectIndices[ref&^nativeMetricMetadataDirectRefMask]
+	} else {
+		index = &a.walRawIndices[ref]
+	}
+	if *index == 0 {
+		m := a.metadataValue(ref)
+		a.walValues = append(a.walValues, record.NativeMetadataValue{Type: record.GetMetricType(m.Type), Unit: m.Unit, Help: m.Help})
+		*index = uint32(len(a.walValues))
+	}
+	return *index - 1
 }
 
 // selectBatch selects changing series groups and returns the next position.
@@ -356,9 +389,10 @@ func (s *nativeMetricMetadataStore) putAppender(appender *nativeMetricMetadataAp
 	appender.lastMetadata = metadata.Metadata{}
 	appender.lastObservation = 0
 	appender.haveLast = false
+	clear(appender.walValues)
+	appender.walValues = appender.walValues[:0]
 	clear(appender.walEntries)
 	appender.walEntries = appender.walEntries[:0]
-	clear(appender.walPoints)
 	appender.walPoints = appender.walPoints[:0]
 	s.appenderPool.Put(appender)
 }

@@ -1239,8 +1239,8 @@ func (a *headAppenderBase) log(emitNativeMetadata bool) error {
 		}
 	}
 	if emitNativeMetadata && a.nativeMetricMetadata != nil {
-		if entries := a.nativeMetricMetadata.appendWALEntries(); len(entries) > 0 {
-			rec = enc.NativeMetadata(entries, buf)
+		if values, entries := a.nativeMetricMetadata.appendWALRecord(); len(entries) > 0 {
+			rec = enc.CompactNativeMetadata(values, entries, buf)
 			buf = rec[:0]
 
 			if err := a.head.wal.Log(rec); err != nil {

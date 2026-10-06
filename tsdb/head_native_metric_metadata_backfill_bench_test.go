@@ -110,8 +110,8 @@ func (w metadataBackfill) run(tb testing.TB, db *DB, first, last int) {
 	}
 }
 
-// metadataPayload returns the decompressed bytes of Metadata records in a
-// WAL directory, excluding checkpoints.
+// metadataPayload returns the decompressed bytes of Metadata and compact
+// native metadata records in a WAL directory, excluding checkpoints.
 func metadataPayload(tb testing.TB, dir string) int64 {
 	sr, err := wlog.NewSegmentsRangeReader(wlog.SegmentRange{Dir: dir, Last: math.MaxInt32})
 	require.NoError(tb, err)
@@ -120,7 +120,7 @@ func metadataPayload(tb testing.TB, dir string) int64 {
 	var n int64
 	r := wlog.NewReader(sr)
 	for r.Next() {
-		if dec.Type(r.Record()) == record.Metadata {
+		if typ := dec.Type(r.Record()); typ == record.Metadata || typ == record.NativeMetadataCompact {
 			n += int64(len(r.Record()))
 		}
 	}
