@@ -61,7 +61,9 @@ const (
 	// Without points, it replaces the history with no versions.
 	NativeMetadataOverride
 	// NativeMetadataUnknown is a well-framed entry of a kind this decoder does
-	// not know. Its one point is the newest, with an unknown start if absent.
+	// not know. In a Metadata record, its one point is the newest, with an
+	// unknown start if absent. In a compact record, it has the newest point if
+	// it was written with any; without one, it leaves its ref's state unchanged.
 	NativeMetadataUnknown
 )
 
@@ -72,6 +74,12 @@ type RefNativeMetadata struct {
 	Truncated bool
 	// Points are chronological for valid entries; the last is the newest.
 	Points []RefNativeMetadataPoint
+}
+
+// Ignored reports whether e leaves its ref's state unchanged: it is of unknown
+// kind and has no points. Consumers count such entries as unknown.
+func (e RefNativeMetadata) Ignored() bool {
+	return e.Kind == NativeMetadataUnknown && len(e.Points) == 0
 }
 
 // RefNativeMetadataPoint is a metadata change point in milliseconds.

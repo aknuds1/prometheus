@@ -64,6 +64,9 @@ const (
 	HistogramSamplesV2 Type = 12
 	// FloatHistogramSamplesV2 is an enhanced float histogram record that supports start time per sample.
 	FloatHistogramSamplesV2 Type = 13
+	// NativeMetadataCompact is used to match WAL records of type NativeMetadataCompact,
+	// which carry native metadata entries with a dictionary of their values.
+	NativeMetadataCompact Type = 14
 )
 
 func (rt Type) String() string {
@@ -94,6 +97,8 @@ func (rt Type) String() string {
 		return "mmapmarkers"
 	case Metadata:
 		return "metadata"
+	case NativeMetadataCompact:
+		return "native_metadata_compact"
 	default:
 		return "unknown"
 	}
@@ -234,7 +239,7 @@ func (*Decoder) Type(rec []byte) Type {
 	switch t := Type(rec[0]); t {
 	case Series, Samples, SamplesV2, Tombstones, Exemplars, MmapMarkers, Metadata,
 		HistogramSamples, FloatHistogramSamples, CustomBucketsHistogramSamples, CustomBucketsFloatHistogramSamples,
-		HistogramSamplesV2, FloatHistogramSamplesV2:
+		HistogramSamplesV2, FloatHistogramSamplesV2, NativeMetadataCompact:
 		return t
 	}
 	return Unknown
