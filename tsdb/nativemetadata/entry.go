@@ -14,6 +14,8 @@
 package nativemetadata
 
 import (
+	"slices"
+
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/record"
 )
@@ -75,6 +77,38 @@ func AppendRecordPoints(dst []Point, points []record.RefNativeMetadataPoint, int
 			Unit: p.Unit,
 			Help: p.Help,
 		})})
+	}
+	return dst
+}
+
+// Dictionary resolves the values of one compact record for a consumer, each at
+// most once, when a point first uses it. Its zero value is ready for Reset.
+type Dictionary struct {
+	values   []record.NativeMetadataValue
+	resolved []*metadata.Metadata
+	intern   func(metadata.Metadata) *metadata.Metadata
+}
+
+// Reset prepares d for a record's values, which intern resolves to immutable
+// values equal to them. d retains values and the resolved values until the
+// next Reset; Reset(nil, nil) releases them.
+func (d *Dictionary) Reset(values []record.NativeMetadataValue, intern func(metadata.Metadata) *metadata.Metadata) {
+	// Elements beyond the length are always nil.
+	clear(d.resolved)
+	d.values, d.intern = values, intern
+	d.resolved = slices.Grow(d.resolved[:0], len(values))[:len(values)]
+}
+
+// AppendPoints appends points to dst with their resolved values.
+func (d *Dictionary) AppendPoints(dst []Point, points []record.CompactNativeMetadataPoint) []Point {
+	for _, p := range points {
+		v := d.resolved[p.Value]
+		if v == nil {
+			m := d.values[p.Value]
+			v = d.intern(metadata.Metadata{Type: record.ToMetricType(m.Type), Unit: m.Unit, Help: m.Help})
+			d.resolved[p.Value] = v
+		}
+		dst = append(dst, Point{EffectiveFrom: p.EffectiveFrom, Metadata: v})
 	}
 	return dst
 }
