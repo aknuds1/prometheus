@@ -555,7 +555,7 @@ func TestNativeMetricMetadataReplay(t *testing.T) {
 		_, _, err := wlog.LastCheckpoint(db.Head().wal.Dir())
 		require.NoError(t, err)
 		after := readNativeMetadataWAL(t, db.Head().wal.Dir())
-		require.Contains(t, after.types, record.Metadata)
+		require.Contains(t, after.types, record.NativeMetadataCompact)
 		reduced := after.reduce()
 		for i := range lsets {
 			ref := chunks.HeadSeriesRef(refs[i])

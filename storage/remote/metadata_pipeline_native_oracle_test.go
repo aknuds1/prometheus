@@ -15,6 +15,7 @@ package remote
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
@@ -53,24 +54,98 @@ func init() {
 		if c.Source != "native" {
 			return metadataPipelineLegacyCheckpointOracle(c, w)
 		}
-		// Every series keeps its whole history, as one untruncated override.
+		// Every series keeps its whole history, as one untruncated override,
+		// in compact records. Their entry order follows the checkpoint's map
+		// iteration, so the payload is checked against each record's own
+		// structure.
 		var want metadataPipelineExpected
-		var enc record.Encoder
 		refs := w.refs()
 		for slot := range c.Series {
 			entry := record.RefNativeMetadata{Ref: refs[slot], Kind: record.NativeMetadataOverride}
 			for step := 0; step <= metadataPipelineRestartHistory; step++ {
 				entry.Points = append(entry.Points, metadataPipelineNativePoint(c, slot, step))
 			}
-			want.add(metadataPipelineNativeKey(slot, entry), len(enc.NativeMetadata([]record.RefNativeMetadata{entry}, nil))-1)
+			want.add(metadataPipelineNativeKey(slot, entry), 0)
 		}
-		got, err := w.decodeNative(w.ids)
+		got, err := w.decodeCompact(w.ids)
 		if err != nil {
-			return err
+			return fmt.Errorf("checkpoint: %w", err)
 		}
 		want.records = len(w.metadata)
-		return want.check("checkpoint", got, len(w.metadata), w.payload())
+		return want.checkEntries("checkpoint", got, len(w.metadata))
 	}
+}
+
+// compactNativeMetadataSize returns the encoded size of a compact record with
+// r's contents, in r's order.
+func compactNativeMetadataSize(r *record.CompactNativeMetadata) int {
+	uvarint := func(x uint64) int { return len(binary.AppendUvarint(nil, x)) }
+	varint := func(x int64) int { return len(binary.AppendVarint(nil, x)) }
+	var base int64
+	havePoints := false
+	for _, e := range r.Entries {
+		for _, p := range e.Points {
+			if !havePoints || p.EffectiveFrom < base {
+				base, havePoints = p.EffectiveFrom, true
+			}
+		}
+	}
+	size := 1 + 1 + varint(base) + uvarint(uint64(len(r.Values)))
+	for _, v := range r.Values {
+		size += 1 + uvarint(uint64(len(v.Unit))) + len(v.Unit) + uvarint(uint64(len(v.Help))) + len(v.Help)
+	}
+	size += uvarint(uint64(len(r.Entries)))
+	var previous chunks.HeadSeriesRef
+	for _, e := range r.Entries {
+		size += 1 + varint(int64(e.Ref-previous)) + uvarint(uint64(len(e.Points)))
+		previous = e.Ref
+		for _, p := range e.Points {
+			size += uvarint(uint64(p.EffectiveFrom)-uint64(base)) + uvarint(uint64(p.Value))
+		}
+	}
+	return size
+}
+
+// decodeCompact decodes compact records' entries. Each record must be exactly
+// the size of its contents, and its dictionary must hold distinct values that
+// its entries all use.
+func (w metadataPipelineWALRecords) decodeCompact(ids map[chunks.HeadSeriesRef]int) (map[string]int, error) {
+	got := map[string]int{}
+	var dec record.Decoder
+	var compact record.CompactNativeMetadata
+	for i, rec := range w.metadata {
+		if typ := dec.Type(rec); typ != record.NativeMetadataCompact {
+			return nil, fmt.Errorf("record %d has type %s, want compact native metadata", i, typ)
+		}
+		if err := dec.CompactNativeMetadata(rec, &compact); err != nil {
+			return nil, err
+		}
+		if size := compactNativeMetadataSize(&compact); len(rec) != size {
+			return nil, fmt.Errorf("record %d has %d bytes, want %d", i, len(rec), size)
+		}
+		distinct := map[record.NativeMetadataValue]bool{}
+		for _, v := range compact.Values {
+			distinct[v] = true
+		}
+		used := map[uint32]bool{}
+		for _, e := range compact.Entries {
+			for _, p := range e.Points {
+				used[p.Value] = true
+			}
+		}
+		if len(distinct) != len(compact.Values) || len(used) != len(compact.Values) {
+			return nil, fmt.Errorf("record %d has %d values, %d distinct and %d used", i, len(compact.Values), len(distinct), len(used))
+		}
+		entries, _ := compact.AppendNativeMetadata(nil, nil)
+		for _, e := range entries {
+			id, ok := ids[e.Ref]
+			if !ok {
+				return nil, fmt.Errorf("metadata for unknown ref %d", e.Ref)
+			}
+			got[metadataPipelineNativeKey(id, e)]++
+		}
+	}
+	return got, nil
 }
 
 func metadataPipelineNativePoint(c metadataPipelineConfig, slot, step int) record.RefNativeMetadataPoint {
@@ -180,7 +255,7 @@ func TestRemoteWriteMetadataPipelineNativeOracles(t *testing.T) {
 			series = append(series, record.RefSeries{Ref: chunks.HeadSeriesRef(id + 1), Labels: metadataPipelineLabels(id)})
 		}
 		require.NoError(t, w.Log(enc.Series(series, nil)))
-		require.NoError(t, w.Log(enc.NativeMetadata(entries, nil)))
+		require.NoError(t, w.Log(compactNativeMetadataRecordForTest(entries)))
 		require.NoError(t, w.Close())
 		return dir
 	}

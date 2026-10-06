@@ -570,13 +570,15 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 		require.NoError(t, err)
 		r := NewReader(sr)
 		got := map[chunks.HeadSeriesRef]record.RefNativeMetadata{}
+		gotTypes := map[chunks.HeadSeriesRef]record.Type{}
 		for r.Next() {
-			if typ := dec.Type(r.Record()); typ != record.Metadata && typ != record.NativeMetadataCompact {
+			typ := dec.Type(r.Record())
+			if typ != record.Metadata && typ != record.NativeMetadataCompact {
 				continue
 			}
 			for _, e := range decodeNativeMetadataForTest(t, r.Record()) {
 				require.NotContains(t, got, e.Ref)
-				got[e.Ref] = e
+				got[e.Ref], gotTypes[e.Ref] = e, typ
 			}
 		}
 		require.NoError(t, r.Err())
@@ -594,6 +596,12 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 				want.Points = []record.RefNativeMetadataPoint{{EffectiveFrom: math.MinInt64, Type: uint8(record.Gauge), Unit: "bytes", Help: state.Metadata.Help}}
 			}
 			require.Equal(t, want, got[ref], "round %d, ref %d", i, ref)
+			// Native histories are written as compact records.
+			wantType := record.Metadata
+			if isNative[ref] {
+				wantType = record.NativeMetadataCompact
+			}
+			require.Equal(t, wantType, gotTypes[ref], "round %d, ref %d", i, ref)
 		}
 	}
 	require.Equal(t, "b", reduced[1].Metadata.Help)

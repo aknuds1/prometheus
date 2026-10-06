@@ -466,17 +466,53 @@ func Checkpoint(logger *slog.Logger, w *WL, from, to int, keep func(id chunks.He
 		return nil, fmt.Errorf("flush records: %w", err)
 	}
 
-	// Flush the reduced metadata of each series, in bounded records.
+	// Flush the reduced metadata of each series, in bounded records: native
+	// histories as overrides in compact records, whose dictionaries hold each
+	// distinct value once, and legacy values as legacy entries.
 	metadata, metadataPoints = metadata[:0], metadataPoints[:0]
+	var (
+		overrides      []record.RefCompactNativeMetadata
+		overridePoints []record.CompactNativeMetadataPoint
+		values         []record.NativeMetadataValue
+		valueIndices   = map[record.NativeMetadataValue]uint32{}
+	)
+	flushOverrides := func() error {
+		buf = enc.CompactNativeMetadata(values, overrides, buf[:0])
+		if err := cp.Log(buf); err != nil {
+			return fmt.Errorf("flush metadata records: %w", err)
+		}
+		clear(overrides)
+		clear(values)
+		clear(valueIndices)
+		overrides, overridePoints, values = overrides[:0], overridePoints[:0], values[:0]
+		return nil
+	}
 	for ref, reduced := range reducedMetadata {
+		if reduced.native {
+			entry := record.RefCompactNativeMetadata{Ref: ref, Kind: record.NativeMetadataOverride, Truncated: reduced.Truncated}
+			start := len(overridePoints)
+			for _, p := range reduced.AppendPoints(metadataValues[:0]) {
+				v := record.NativeMetadataValue{Type: record.GetMetricType(p.Metadata.Type), Unit: p.Metadata.Unit, Help: p.Metadata.Help}
+				index, ok := valueIndices[v]
+				if !ok {
+					index = uint32(len(values))
+					valueIndices[v] = index
+					values = append(values, v)
+				}
+				overridePoints = append(overridePoints, record.CompactNativeMetadataPoint{EffectiveFrom: p.EffectiveFrom, Value: index})
+			}
+			entry.Points = overridePoints[start:len(overridePoints):len(overridePoints)]
+			overrides = append(overrides, entry)
+			if len(overrides) == checkpointMetadataBatch {
+				if err := flushOverrides(); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
 		entry := record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataLegacy}
 		start := len(metadataPoints)
-		if reduced.native {
-			entry.Kind, entry.Truncated = record.NativeMetadataOverride, reduced.Truncated
-			for _, p := range reduced.AppendPoints(metadataValues[:0]) {
-				metadataPoints = nativemetadata.AppendRecordPoint(metadataPoints, p)
-			}
-		} else if reduced.Metadata != nil {
+		if reduced.Metadata != nil {
 			metadataPoints = nativemetadata.AppendRecordPoint(metadataPoints, nativemetadata.Point{Metadata: reduced.Metadata})
 		}
 		entry.Points = metadataPoints[start:len(metadataPoints):len(metadataPoints)]
@@ -493,6 +529,11 @@ func Checkpoint(logger *slog.Logger, w *WL, from, to int, keep func(id chunks.He
 	if len(metadata) > 0 {
 		if err := cp.Log(enc.NativeMetadata(metadata, buf[:0])); err != nil {
 			return nil, fmt.Errorf("flush metadata records: %w", err)
+		}
+	}
+	if len(overrides) > 0 {
+		if err := flushOverrides(); err != nil {
+			return nil, err
 		}
 	}
 

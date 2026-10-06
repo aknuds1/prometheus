@@ -109,7 +109,7 @@ func readMetadataPipelineWAL(dir string, first int) (metadataPipelineWALRecords,
 				}
 				w.ids[s.Ref] = id
 			}
-		case record.Metadata:
+		case record.Metadata, record.NativeMetadataCompact:
 			w.metadata = append(w.metadata, slices.Clone(r.Record()))
 		}
 	}
@@ -153,6 +153,18 @@ func (e *metadataPipelineExpected) add(key string, size int) {
 
 // check compares decoded entries, keyed as expected, and the records' payload.
 func (e metadataPipelineExpected) check(what string, got map[string]int, records, payload int) error {
+	if err := e.checkEntries(what, got, records); err != nil {
+		return err
+	}
+	if want := e.records + e.bytes; payload != want {
+		return fmt.Errorf("%s: %d metadata payload bytes, want %d", what, payload, want)
+	}
+	return nil
+}
+
+// checkEntries compares the number of records, and decoded entries keyed as
+// expected.
+func (e metadataPipelineExpected) checkEntries(what string, got map[string]int, records int) error {
 	if records != e.records {
 		return fmt.Errorf("%s: %d metadata records, want %d", what, records, e.records)
 	}
@@ -165,9 +177,6 @@ func (e metadataPipelineExpected) check(what string, got map[string]int, records
 		if e.entries[key] != n {
 			return fmt.Errorf("%s: unexpected entry %s (%d times)", what, key, n)
 		}
-	}
-	if want := e.records + e.bytes; payload != want {
-		return fmt.Errorf("%s: %d metadata payload bytes, want %d", what, payload, want)
 	}
 	return nil
 }
