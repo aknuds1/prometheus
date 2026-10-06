@@ -453,13 +453,14 @@ type QueueManager struct {
 	protoMsg    remoteapi.WriteMessageType
 	compr       compression.Type
 
-	seriesMtx      sync.Mutex // Covers seriesLabels, seriesMetadata, seriesNativeMetadata, nativePoints, droppedSeries and builder.
+	seriesMtx      sync.Mutex // Covers seriesLabels, seriesMetadata, seriesNativeMetadata, nativePoints, nativeDictionary, droppedSeries and builder.
 	seriesLabels   map[chunks.HeadSeriesRef]labels.Labels
 	seriesMetadata map[chunks.HeadSeriesRef]*metadata.Metadata
 	// seriesNativeMetadata holds native metadata histories reduced from the
 	// WAL in order, by WAL ref, including refs whose series record is unread.
 	seriesNativeMetadata map[chunks.HeadSeriesRef]nativemetadata.State
 	nativePoints         []nativemetadata.Point
+	nativeDictionary     nativemetadata.Dictionary
 	droppedSeries        map[chunks.HeadSeriesRef]struct{}
 	builder              *labels.Builder
 
@@ -1112,12 +1113,47 @@ func (w nativeMetadataWriter) StoreBorrowedNativeMetadata(entries []record.RefNa
 	w.storeNativeMetadata(entries, walMetadataInterner.internBorrowed)
 }
 
+// StoreBorrowedNativeMetadataRecord implements wlog.NativeMetadataRecordWriteTo.
+func (w nativeMetadataWriter) StoreBorrowedNativeMetadataRecord(rec *record.CompactNativeMetadata) {
+	w.storeNativeMetadataRecord(rec, walMetadataInterner.internBorrowed)
+}
+
+// storeNativeMetadataRecord applies rec's entries as storeNativeMetadata does,
+// resolving each used dictionary value with intern once.
+func (w nativeMetadataWriter) storeNativeMetadataRecord(rec *record.CompactNativeMetadata, intern func(metadata.Metadata) *metadata.Metadata) {
+	t := w.QueueManager
+	t.seriesMtx.Lock()
+	defer t.seriesMtx.Unlock()
+	t.nativeDictionary.Reset(rec.Values, intern)
+	for _, e := range rec.Entries {
+		if e.Ref == 0 {
+			continue
+		}
+		if e.Ignored() {
+			t.metrics.unknownMetadataTotal.Inc()
+			continue
+		}
+		t.nativePoints = t.nativeDictionary.AppendPoints(t.nativePoints[:0], e.Points)
+		state := t.seriesNativeMetadata[e.Ref]
+		if state.Apply(e.Kind, e.Truncated, t.nativePoints) {
+			t.metrics.unknownMetadataTotal.Inc()
+		}
+		t.seriesNativeMetadata[e.Ref] = state
+	}
+	clear(t.nativePoints)
+	t.nativeDictionary.Reset(nil, nil)
+}
+
 func (w nativeMetadataWriter) storeNativeMetadata(entries []record.RefNativeMetadata, intern func(metadata.Metadata) *metadata.Metadata) {
 	t := w.QueueManager
 	t.seriesMtx.Lock()
 	defer t.seriesMtx.Unlock()
 	for _, e := range entries {
 		if e.Ref == 0 {
+			continue
+		}
+		if e.Ignored() {
+			t.metrics.unknownMetadataTotal.Inc()
 			continue
 		}
 		t.nativePoints = nativemetadata.AppendRecordPoints(t.nativePoints[:0], e.Points, intern)

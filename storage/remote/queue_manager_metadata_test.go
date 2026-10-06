@@ -45,6 +45,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/encoding"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/tsdb/wlog"
 	"github.com/prometheus/prometheus/util/compression"
@@ -56,6 +57,31 @@ func nativeMetadataPoint(from int64, m metadata.Metadata) record.RefNativeMetada
 
 func nativeMetadataEntry(ref chunks.HeadSeriesRef, kind record.NativeMetadataKind, points ...record.RefNativeMetadataPoint) []record.RefNativeMetadata {
 	return []record.RefNativeMetadata{{Ref: ref, Kind: kind, Points: points}}
+}
+
+// compactNativeMetadataRecordForTest encodes entries, which must be groups or
+// overrides, as a compact record whose dictionary holds each distinct value
+// once, in order of first use.
+func compactNativeMetadataRecordForTest(entries []record.RefNativeMetadata) []byte {
+	var values []record.NativeMetadataValue
+	var compact []record.RefCompactNativeMetadata
+	indices := map[record.NativeMetadataValue]uint32{}
+	for _, e := range entries {
+		c := record.RefCompactNativeMetadata{Ref: e.Ref, Kind: e.Kind, Truncated: e.Truncated}
+		for _, p := range e.Points {
+			v := record.NativeMetadataValue{Type: p.Type, Unit: p.Unit, Help: p.Help}
+			index, ok := indices[v]
+			if !ok {
+				index = uint32(len(values))
+				indices[v] = index
+				values = append(values, v)
+			}
+			c.Points = append(c.Points, record.CompactNativeMetadataPoint{EffectiveFrom: p.EffectiveFrom, Value: index})
+		}
+		compact = append(compact, c)
+	}
+	var enc record.Encoder
+	return enc.CompactNativeMetadata(values, compact, nil)
 }
 
 // queuedMetadata returns the values of the queued items' metadata, nil for none.
@@ -200,6 +226,330 @@ func TestQueueManagerNativeMetadata(t *testing.T) {
 			got := borrowing.seriesNativeMetadata[ref]
 			require.Equal(t, want.Truncated, got.Truncated)
 			require.Equal(t, want.AppendPoints(nil), got.AppendPoints(nil))
+		}
+	})
+
+	t.Run("compact records are applied as their entries are", func(t *testing.T) {
+		// Writers on every path receive the same records: Metadata records'
+		// entries, copied and borrowed, and compact records whole, as borrowed
+		// entries and as copied entries. After each record, and once the
+		// record buffer and reused contents are overwritten, every writer must
+		// hold the same histories and label the same timestamps alike. Small
+		// interners rotate generations and replace ledger slots, which may
+		// change pointer sharing but never values.
+		type writer struct {
+			name     string
+			w        nativeMetadataWriter
+			interner *metadataInterner
+			store    func(w nativeMetadataWriter, in *metadataInterner, metadataRec, compactRec []byte)
+		}
+		var dec record.Decoder
+		var compact record.CompactNativeMetadata
+		overwrite := func(buf []byte) {
+			for i := range buf {
+				buf[i] = 'x'
+			}
+		}
+		overwriteRecord := func() {
+			for i := range compact.Values {
+				compact.Values[i] = record.NativeMetadataValue{Help: "overwritten"}
+			}
+			for _, e := range compact.Entries {
+				clear(e.Points)
+			}
+			compact.Reset()
+		}
+		writers := []writer{
+			{name: "metadata records", store: func(w nativeMetadataWriter, in *metadataInterner, rec, _ []byte) {
+				entries, _, err := dec.NativeMetadata(rec, nil, nil)
+				require.NoError(t, err)
+				w.storeNativeMetadata(entries, in.intern)
+			}},
+			{name: "borrowed metadata entries", store: func(w nativeMetadataWriter, in *metadataInterner, rec, _ []byte) {
+				buf := slices.Clone(rec)
+				entries, _, err := dec.NativeMetadataBorrowed(buf, nil, nil)
+				require.NoError(t, err)
+				w.storeNativeMetadata(entries, in.internBorrowed)
+				overwrite(buf)
+			}},
+			{name: "compact records", store: func(w nativeMetadataWriter, in *metadataInterner, _, rec []byte) {
+				buf := slices.Clone(rec)
+				require.NoError(t, dec.CompactNativeMetadataBorrowed(buf, &compact))
+				w.storeNativeMetadataRecord(&compact, in.internBorrowed)
+				overwrite(buf)
+				overwriteRecord()
+			}},
+			{name: "compact records through the watcher interface", store: func(w nativeMetadataWriter, _ *metadataInterner, _, rec []byte) {
+				buf := slices.Clone(rec)
+				require.NoError(t, dec.CompactNativeMetadataBorrowed(buf, &compact))
+				w.StoreBorrowedNativeMetadataRecord(&compact)
+				overwrite(buf)
+				overwriteRecord()
+			}},
+			{name: "borrowed compact entries", store: func(w nativeMetadataWriter, in *metadataInterner, _, rec []byte) {
+				buf := slices.Clone(rec)
+				require.NoError(t, dec.CompactNativeMetadataBorrowed(buf, &compact))
+				entries, points := compact.AppendNativeMetadata(nil, nil)
+				w.storeNativeMetadata(entries, in.internBorrowed)
+				overwrite(buf)
+				overwriteRecord()
+				clear(points)
+			}},
+			{name: "copied compact entries", store: func(w nativeMetadataWriter, in *metadataInterner, _, rec []byte) {
+				require.NoError(t, dec.CompactNativeMetadata(rec, &compact))
+				entries, points := compact.AppendNativeMetadata(nil, nil)
+				w.storeNativeMetadata(entries, in.intern)
+				// Copied strings may be retained, but not the slices.
+				overwriteRecord()
+				clear(points)
+			}},
+		}
+		for i := range writers {
+			_, writers[i].w, _ = newQM(t)
+			writers[i].interner = newLedgerMetadataInterner(4, 96, 2, 48)
+		}
+		require.Implements(t, (*wlog.NativeMetadataRecordWriteTo)(nil), writers[0].w, "watchers pass queues compact records whole")
+		helps := make([]string, 10)
+		for i := range helps {
+			helps[i] = strings.Repeat(strconv.Itoa(i), 1+3*i)
+		}
+		probes := []int64{math.MinInt64, -1, 0}
+		for ts := int64(1); ts < 400; ts += 7 {
+			probes = append(probes, ts)
+		}
+		// state renders a writer's history, and the labels it gives probes.
+		state := func(w nativeMetadataWriter, ref chunks.HeadSeriesRef) string {
+			w.seriesMtx.Lock()
+			defer w.seriesMtx.Unlock()
+			s := w.seriesNativeMetadata[ref]
+			out := fmt.Sprintf("truncated=%t", s.Truncated)
+			for _, p := range s.AppendPoints(nil) {
+				out += fmt.Sprintf(" %v@%d", *p.Metadata, p.EffectiveFrom)
+			}
+			for _, ts := range probes {
+				if m := w.metadataAtLocked(ref, ts); m != nil {
+					out += fmt.Sprintf(" %d=%s", ts, m.Help)
+				}
+			}
+			return out
+		}
+		rng := rand.New(rand.NewPCG(3, 4))
+		var enc record.Encoder
+		from := map[chunks.HeadSeriesRef]int64{}
+		for i := range 600 {
+			var entries []record.RefNativeMetadata
+			for ref := chunks.HeadSeriesRef(1); ref <= 6; ref++ {
+				if rng.IntN(3) == 0 {
+					continue
+				}
+				e := record.RefNativeMetadata{Ref: ref, Kind: record.NativeMetadataGroup}
+				count := 1 + rng.IntN(3)
+				if rng.IntN(8) == 0 {
+					e.Kind, e.Truncated, count = record.NativeMetadataOverride, rng.IntN(2) == 0, rng.IntN(6)
+				}
+				// Groups start before the newest point at times, so that merges
+				// also take the out-of-order path.
+				ts := max(0, from[ref]+int64(rng.IntN(20))-8)
+				for range count {
+					ts += 1 + int64(rng.IntN(5))
+					typ := model.MetricTypeCounter
+					if rng.IntN(4) == 0 {
+						typ = model.MetricTypeGauge
+					}
+					e.Points = append(e.Points, nativeMetadataPoint(ts, metadata.Metadata{Type: typ, Unit: "seconds", Help: helps[rng.IntN(len(helps))]}))
+				}
+				from[ref] = max(from[ref], ts)
+				entries = append(entries, e)
+			}
+			metadataRec := enc.NativeMetadata(entries, nil)
+			compactRec := compactNativeMetadataRecordForTest(entries)
+			for _, w := range writers {
+				w.store(w.w, w.interner, metadataRec, compactRec)
+			}
+			for ref := chunks.HeadSeriesRef(1); ref <= 6; ref++ {
+				want := state(writers[0].w, ref)
+				for _, w := range writers[1:] {
+					require.Equal(t, want, state(w.w, ref), "record %d, ref %d, %s", i, ref, w.name)
+				}
+			}
+		}
+		for _, w := range writers {
+			if w.name != "compact records through the watcher interface" {
+				require.NotEmpty(t, w.interner.older, "%s: generations rotated", w.name)
+			}
+		}
+	})
+
+	t.Run("dictionary values are resolved once per record", func(t *testing.T) {
+		value := func(i int) record.NativeMetadataValue {
+			return record.NativeMetadataValue{Type: uint8(record.Counter), Unit: "seconds", Help: "help " + strconv.Itoa(i)}
+		}
+		groups := func(entries, values int) record.CompactNativeMetadata {
+			var rec record.CompactNativeMetadata
+			for i := range values {
+				rec.Values = append(rec.Values, value(i))
+			}
+			for i := range entries {
+				rec.Entries = append(rec.Entries, record.RefCompactNativeMetadata{Ref: chunks.HeadSeriesRef(i + 1), Kind: record.NativeMetadataGroup, Points: []record.CompactNativeMetadataPoint{{EffectiveFrom: 10, Value: uint32(i % values)}}})
+			}
+			return rec
+		}
+		multiPoint := groups(100, 100)
+		for i := range multiPoint.Entries {
+			for p := range 9 {
+				multiPoint.Entries[i].Points = append(multiPoint.Entries[i].Points, record.CompactNativeMetadataPoint{EffectiveFrom: int64(11 + p), Value: uint32((i + p + 1) % 100)})
+			}
+		}
+		unused := record.CompactNativeMetadata{
+			Values: []record.NativeMetadataValue{value(0), value(1), value(2)},
+			Entries: []record.RefCompactNativeMetadata{
+				{Ref: 1, Kind: record.NativeMetadataGroup, Points: []record.CompactNativeMetadataPoint{{EffectiveFrom: 1, Value: 1}}},
+				{Ref: 0, Kind: record.NativeMetadataGroup, Points: []record.CompactNativeMetadataPoint{{EffectiveFrom: 1, Value: 2}}},
+				{Ref: 2, Kind: record.NativeMetadataUnknown},
+			},
+		}
+		for _, c := range []struct {
+			name                        string
+			rec                         record.CompactNativeMetadata
+			values, used, calls, points int
+		}{
+			{name: "shared values", rec: groups(1000, 100), values: 100, used: 100, calls: 100, points: 1000},
+			{name: "distinct values", rec: groups(1000, 1000), values: 1000, used: 1000, calls: 1000, points: 1000},
+			{name: "multi-point groups", rec: multiPoint, values: 100, used: 100, calls: 100, points: 1000},
+			{name: "unused values, ref 0 and ignored entries", rec: unused, values: 3, used: 1, calls: 1, points: 1},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				decoded := c.rec
+				require.Len(t, decoded.Values, c.values)
+				used := map[uint32]bool{}
+				for _, e := range decoded.Entries {
+					for _, p := range e.Points {
+						if e.Ref != 0 {
+							used[p.Value] = true
+						}
+					}
+				}
+				require.Len(t, used, c.used)
+
+				in := newMetadataInterner(metadataInternerEntries, metadataInternerBytes)
+				calls := 0
+				counting := func(m metadata.Metadata) *metadata.Metadata {
+					calls++
+					return in.internBorrowed(m)
+				}
+				_, w, _ := newQM(t)
+				w.storeNativeMetadataRecord(&decoded, counting)
+				require.Equal(t, c.calls, calls)
+
+				// Entries resolve each of their points instead.
+				calls = 0
+				entries, _ := decoded.AppendNativeMetadata(nil, nil)
+				_, w, _ = newQM(t)
+				w.storeNativeMetadata(entries, counting)
+				require.Equal(t, c.points, calls)
+			})
+		}
+	})
+
+	t.Run("entries of unknown kind without points", func(t *testing.T) {
+		history := func(w nativeMetadataWriter) []string {
+			var out []string
+			state := w.seriesNativeMetadata[1]
+			for _, p := range state.AppendPoints(nil) {
+				out = append(out, fmt.Sprintf("%s@%d", p.Metadata.Help, p.EffectiveFrom))
+			}
+			return out
+		}
+		ignored := []byte{byte(record.NativeMetadataCompact), 1, 0, 0, 1, 7, 2, 0}
+		var dec record.Decoder
+		for _, path := range []string{"record", "borrowed entries", "copied entries"} {
+			t.Run(path, func(t *testing.T) {
+				qm, w, _ := newQM(t)
+				w.StoreNativeMetadata(nativeMetadataEntry(1, record.NativeMetadataGroup, nativeMetadataPoint(100, a), nativeMetadataPoint(200, b)))
+				var compact record.CompactNativeMetadata
+				require.NoError(t, dec.CompactNativeMetadataBorrowed(ignored, &compact))
+				entries, _ := compact.AppendNativeMetadata(nil, nil)
+				switch path {
+				case "record":
+					w.StoreBorrowedNativeMetadataRecord(&compact)
+				case "borrowed entries":
+					w.StoreBorrowedNativeMetadata(entries)
+				case "copied entries":
+					w.StoreNativeMetadata(entries)
+				}
+				// The ref's history and truncation flag are unchanged.
+				require.Equal(t, []string{"a@100", "b@200"}, history(w))
+				require.False(t, w.seriesNativeMetadata[1].Truncated)
+				require.Equal(t, 1.0, client_testutil.ToFloat64(qm.metrics.unknownMetadataTotal))
+				// Applying it would have replaced the history with nothing.
+				state := w.seriesNativeMetadata[1]
+				require.True(t, state.Apply(entries[0].Kind, entries[0].Truncated, nil))
+				require.Empty(t, state.AppendPoints(nil))
+			})
+		}
+		t.Run("the Metadata record contrast", func(t *testing.T) {
+			// A Metadata record's unknown entry always has its main fields as
+			// a point, so it applies as a single-point override.
+			buf := encoding.Encbuf{}
+			buf.PutByte(byte(record.Metadata))
+			buf.PutUvarint64(1)
+			buf.PutByte(record.GetMetricType(c.Type))
+			buf.PutUvarint(3)
+			buf.PutUvarintStr("UNIT")
+			buf.PutUvarintStr(c.Unit)
+			buf.PutUvarintStr("HELP")
+			buf.PutUvarintStr(c.Help)
+			buf.PutUvarintStr("k")
+			buf.PutUvarintBytes([]byte{1 << 7})
+			entries, _, err := dec.NativeMetadata(buf.Get(), nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, record.NativeMetadataUnknown, entries[0].Kind)
+			qm, w, _ := newQM(t)
+			w.StoreNativeMetadata(nativeMetadataEntry(1, record.NativeMetadataGroup, nativeMetadataPoint(100, a), nativeMetadataPoint(200, b)))
+			w.StoreNativeMetadata(entries)
+			require.Equal(t, []string{fmt.Sprintf("c@%d", int64(math.MinInt64))}, history(w))
+			require.Equal(t, 1.0, client_testutil.ToFloat64(qm.metrics.unknownMetadataTotal))
+		})
+	})
+
+	t.Run("values are sighted once per record", func(t *testing.T) {
+		// A value in two entries of one record is sighted twice per record
+		// as entries, so its first record admits it; as a compact record it
+		// is sighted once, and its second record admits it. Both share the
+		// first sighting's value.
+		v := m("sighted " + t.Name())
+		record1 := []record.RefNativeMetadata{
+			{Ref: 1, Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{nativeMetadataPoint(10, v)}},
+			{Ref: 2, Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{nativeMetadataPoint(10, v)}},
+		}
+		record2 := []record.RefNativeMetadata{{Ref: 3, Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{nativeMetadataPoint(10, v)}}}
+		var enc record.Encoder
+		var dec record.Decoder
+		for _, compact := range []bool{false, true} {
+			in := newMetadataInterner(metadataInternerEntries, metadataInternerBytes)
+			_, w, _ := newQM(t)
+			store := func(entries []record.RefNativeMetadata) {
+				if !compact {
+					decoded, _, err := dec.NativeMetadataBorrowed(enc.NativeMetadata(entries, nil), nil, nil)
+					require.NoError(t, err)
+					w.storeNativeMetadata(decoded, in.internBorrowed)
+					return
+				}
+				var decoded record.CompactNativeMetadata
+				require.NoError(t, dec.CompactNativeMetadataBorrowed(compactNativeMetadataRecordForTest(entries), &decoded))
+				w.storeNativeMetadataRecord(&decoded, in.internBorrowed)
+			}
+			store(record1)
+			first := w.seriesNativeMetadata[1].Metadata
+			require.Same(t, first, w.seriesNativeMetadata[2].Metadata)
+			if compact {
+				require.NotContains(t, in.current, v, "one sighting per record")
+			} else {
+				require.Same(t, first, in.current[v])
+			}
+			store(record2)
+			require.Same(t, first, in.current[v])
+			require.Same(t, first, w.seriesNativeMetadata[3].Metadata)
 		}
 	})
 
