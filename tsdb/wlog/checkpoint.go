@@ -200,6 +200,8 @@ func Checkpoint(logger *slog.Logger, w *WL, from, to int, keep func(id chunks.He
 
 		reducedMetadata = make(map[chunks.HeadSeriesRef]checkpointMetadata)
 		interner        = nativemetadata.NewInterner(checkpointMetadataInternerLimit)
+		compact         record.CompactNativeMetadata
+		dictionary      nativemetadata.Dictionary
 	)
 	for r.Next() {
 		series, samples, histogramSamples, floatHistogramSamples, tstones, exemplars, metadata = series[:0], samples[:0], histogramSamples[:0], floatHistogramSamples[:0], tstones[:0], exemplars[:0], metadata[:0]
@@ -404,6 +406,38 @@ func Checkpoint(logger *slog.Logger, w *WL, from, to int, keep func(id chunks.He
 			clear(metadataValues)
 			stats.TotalMetadata += len(metadata)
 			stats.DroppedMetadata += len(metadata) - repl
+		case record.NativeMetadataCompact:
+			if err := dec.CompactNativeMetadata(rec, &compact); err != nil {
+				return nil, fmt.Errorf("decode compact native metadata: %w", err)
+			}
+			// Reduce as above, resolving each used value once. Entries that
+			// leave state unchanged count as unknown.
+			dictionary.Reset(compact.Values, interner.Intern)
+			repl := 0
+			for _, m := range compact.Entries {
+				if !keep(m.Ref) {
+					continue
+				}
+				if m.Ignored() {
+					stats.UnknownMetadata++
+					continue
+				}
+				reduced, ok := reducedMetadata[m.Ref]
+				if !ok {
+					repl++
+				}
+				metadataValues = dictionary.AppendPoints(metadataValues[:0], m.Points)
+				if reduced.Apply(m.Kind, m.Truncated, metadataValues) {
+					stats.UnknownMetadata++
+				}
+				reduced.native = true
+				reducedMetadata[m.Ref] = reduced
+			}
+			clear(metadataValues)
+			stats.TotalMetadata += len(compact.Entries)
+			stats.DroppedMetadata += len(compact.Entries) - repl
+			dictionary.Reset(nil, nil)
+			compact.Reset()
 		default:
 			// Unknown record type, probably from a future Prometheus version.
 			continue

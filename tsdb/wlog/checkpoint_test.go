@@ -519,7 +519,24 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 			// The second checkpoint continues from the first one's overrides.
 			enc.NativeMetadata([]record.RefNativeMetadata{group(2, point(5, "B")), group(3, point(5, "C"), point(6, "D")), group(5, point(1, "dropped"))}, nil),
 		},
+		{
+			// Compact records reduce with Metadata records, in WAL order.
+			enc.CompactNativeMetadata(
+				[]record.NativeMetadataValue{{Type: uint8(record.Gauge), Unit: "bytes", Help: "D"}, {Type: uint8(record.Gauge), Unit: "bytes", Help: "z"}},
+				[]record.RefCompactNativeMetadata{
+					{Ref: 2, Kind: record.NativeMetadataGroup, Points: []record.CompactNativeMetadataPoint{{EffectiveFrom: 40}}},
+					{Ref: 4, Kind: record.NativeMetadataGroup, Points: []record.CompactNativeMetadataPoint{{EffectiveFrom: 200, Value: 1}}},
+					{Ref: 5, Kind: record.NativeMetadataGroup, Points: []record.CompactNativeMetadataPoint{{EffectiveFrom: 1, Value: 1}}},
+					{Ref: 7, Kind: record.NativeMetadataOverride, Truncated: true, Points: []record.CompactNativeMetadataPoint{{EffectiveFrom: 1, Value: 1}, {EffectiveFrom: 2}}},
+				}, nil,
+			),
+			enc.NativeMetadata([]record.RefNativeMetadata{group(2, point(50, "E"))}, nil),
+			unknownCompactNativeMetadataForTest(8, "future", 9),
+			// An unknown entry without points leaves ref 1's legacy state.
+			unknownCompactNativeMetadataForTest(1, "", 0),
+		},
 	}
+	wantUnknown := []int{1, 0, 2}
 	keep := func(id chunks.HeadSeriesRef) bool { return id != 5 }
 	reduced := map[chunks.HeadSeriesRef]*nativemetadata.State{}
 	isNative := map[chunks.HeadSeriesRef]bool{}
@@ -528,10 +545,8 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 	for i, round := range rounds {
 		for _, rec := range round {
 			require.NoError(t, w.Log(rec))
-			entries, _, err := dec.NativeMetadata(rec, nil, nil)
-			require.NoError(t, err)
-			for _, e := range entries {
-				if !keep(e.Ref) {
+			for _, e := range decodeNativeMetadataForTest(t, rec) {
+				if !keep(e.Ref) || e.Ignored() {
 					continue
 				}
 				if reduced[e.Ref] == nil {
@@ -547,7 +562,7 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 		require.NoError(t, err)
 		stats, err := Checkpoint(promslog.NewNopLogger(), w, first, last, keep, 0, false)
 		require.NoError(t, err)
-		require.Equal(t, 1-i, stats.UnknownMetadata)
+		require.Equal(t, wantUnknown[i], stats.UnknownMetadata)
 
 		cpDir, _, err := LastCheckpoint(w.Dir())
 		require.NoError(t, err)
@@ -556,12 +571,10 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 		r := NewReader(sr)
 		got := map[chunks.HeadSeriesRef]record.RefNativeMetadata{}
 		for r.Next() {
-			if dec.Type(r.Record()) != record.Metadata {
+			if typ := dec.Type(r.Record()); typ != record.Metadata && typ != record.NativeMetadataCompact {
 				continue
 			}
-			entries, _, err := dec.NativeMetadata(r.Record(), nil, nil)
-			require.NoError(t, err)
-			for _, e := range entries {
+			for _, e := range decodeNativeMetadataForTest(t, r.Record()) {
 				require.NotContains(t, got, e.Ref)
 				got[e.Ref] = e
 			}
@@ -584,10 +597,48 @@ func TestCheckpoint_NativeMetadata(t *testing.T) {
 		}
 	}
 	require.Equal(t, "b", reduced[1].Metadata.Help)
+	require.False(t, isNative[1])
 	require.True(t, reduced[3].Truncated, "ref 3 exceeded the version cap")
 	require.Equal(t, int64(math.MinInt64), reduced[4].AppendPoints(nil)[0].EffectiveFrom)
+	require.Equal(t, "z", reduced[4].Metadata.Help)
 	require.Equal(t, int64(7), reduced[6].EffectiveFrom)
+	require.True(t, reduced[7].Truncated)
+	require.Equal(t, "future", reduced[8].Metadata.Help)
+	require.Equal(t, "E", reduced[2].Metadata.Help)
 	require.NoError(t, w.Close())
+}
+
+// unknownCompactNativeMetadataForTest encodes a compact record of one entry of
+// unknown kind 7 for ref, below 64, with one point of help at from if help is
+// not empty.
+func unknownCompactNativeMetadataForTest(ref chunks.HeadSeriesRef, help string, from int64) []byte {
+	var enc record.Encoder
+	var values []record.NativeMetadataValue
+	var points []record.CompactNativeMetadataPoint
+	if help != "" {
+		values = []record.NativeMetadataValue{{Type: uint8(record.Gauge), Unit: "bytes", Help: help}}
+		points = []record.CompactNativeMetadataPoint{{EffectiveFrom: from}}
+	}
+	rec := enc.CompactNativeMetadata(values, []record.RefCompactNativeMetadata{{Ref: ref, Kind: record.NativeMetadataOverride, Points: points}}, nil)
+	// The entry ends the record: kind, ref delta and count bytes, then two
+	// bytes per point.
+	rec[len(rec)-3-2*len(points)] = 7
+	return rec
+}
+
+// decodeNativeMetadataForTest decodes the entries of a Metadata or compact
+// record.
+func decodeNativeMetadataForTest(t *testing.T, rec []byte) []record.RefNativeMetadata {
+	var dec record.Decoder
+	if dec.Type(rec) == record.NativeMetadataCompact {
+		var compact record.CompactNativeMetadata
+		require.NoError(t, dec.CompactNativeMetadata(rec, &compact))
+		entries, _ := compact.AppendNativeMetadata(nil, nil)
+		return entries
+	}
+	entries, _, err := dec.NativeMetadata(rec, nil, nil)
+	require.NoError(t, err)
+	return entries
 }
 
 // TestCheckpointV2HistogramsToV1 verifies that when a WAL contains V2 histogram
