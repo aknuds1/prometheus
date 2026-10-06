@@ -137,6 +137,10 @@ func populateTestWL(t testing.TB, w *wlog.WL, recs []any, buf []byte, enableSTSt
 			buf = enc.Metadata(v, buf)
 		case []record.RefNativeMetadata:
 			buf = enc.NativeMetadata(v, buf)
+		case record.CompactNativeMetadata:
+			buf = enc.CompactNativeMetadata(v.Values, v.Entries, buf)
+		case []byte:
+			buf = append(buf, v...)
 		default:
 			continue
 		}

@@ -22,11 +22,13 @@ import (
 // nativeMetadataReplayInternerLimit bounds the distinct values replay shares.
 const nativeMetadataReplayInternerLimit = 1 << 16
 
-// nativeMetadataReplayRecord carries one decoded Metadata record to the replay
-// loop. Entries alias points.
+// nativeMetadataReplayRecord carries one decoded Metadata record, or compact
+// record, to the replay loop. Entries alias points.
 type nativeMetadataReplayRecord struct {
-	entries []record.RefNativeMetadata
-	points  []record.RefNativeMetadataPoint
+	entries   []record.RefNativeMetadata
+	points    []record.RefNativeMetadataPoint
+	isCompact bool
+	compact   record.CompactNativeMetadata
 }
 
 // nativeMetadataReplay reduces native metadata WAL entries during replay, per
@@ -37,10 +39,11 @@ type nativeMetadataReplay struct {
 	states map[chunks.HeadSeriesRef]nativemetadata.State
 	// current maps surviving refs to later duplicate Series records. Without
 	// an entry, a surviving series is its own current incarnation.
-	current  map[chunks.HeadSeriesRef]chunks.HeadSeriesRef
-	interner *nativemetadata.Interner
-	points   []nativemetadata.Point
-	unknown  uint64
+	current    map[chunks.HeadSeriesRef]chunks.HeadSeriesRef
+	interner   *nativemetadata.Interner
+	dictionary nativemetadata.Dictionary
+	points     []nativemetadata.Point
+	unknown    uint64
 }
 
 func newNativeMetadataReplay() *nativeMetadataReplay {
@@ -75,6 +78,29 @@ func (r *nativeMetadataReplay) apply(entries []record.RefNativeMetadata) {
 		r.states[e.Ref] = state
 	}
 	clear(r.points)
+}
+
+// applyCompact reduces a compact record's entries as apply does, resolving each
+// used value once. Entries that leave state unchanged count as unknown.
+func (r *nativeMetadataReplay) applyCompact(rec *record.CompactNativeMetadata) {
+	r.dictionary.Reset(rec.Values, r.interner.Intern)
+	for _, e := range rec.Entries {
+		if e.Ref == 0 {
+			continue
+		}
+		if e.Ignored() {
+			r.unknown++
+			continue
+		}
+		r.points = r.dictionary.AppendPoints(r.points[:0], e.Points)
+		state := r.states[e.Ref]
+		if state.Apply(e.Kind, e.Truncated, r.points) {
+			r.unknown++
+		}
+		r.states[e.Ref] = state
+	}
+	clear(r.points)
+	r.dictionary.Reset(nil, nil)
 }
 
 // seedNativeMetricMetadata gives each replayed series the newest version of

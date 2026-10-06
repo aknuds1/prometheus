@@ -14,12 +14,15 @@
 package tsdb
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 
+	prom_testutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 
@@ -27,6 +30,7 @@ import (
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/encoding"
 	"github.com/prometheus/prometheus/tsdb/nativemetadata"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/tsdb/wlog"
@@ -58,13 +62,18 @@ func readNativeMetadataWAL(t testing.TB, dir string) nativeMetadataWAL {
 	var out nativeMetadataWAL
 	var dec record.Decoder
 	r := wlog.NewReader(sr)
+	var compact record.CompactNativeMetadata
 	for r.Next() {
 		typ := dec.Type(r.Record())
 		out.types = append(out.types, typ)
-		if typ == record.Metadata {
+		switch typ {
+		case record.Metadata:
 			entries, _, err := dec.NativeMetadata(r.Record(), nil, nil)
 			require.NoError(t, err)
 			out.entries = append(out.entries, entries...)
+		case record.NativeMetadataCompact:
+			require.NoError(t, dec.CompactNativeMetadata(r.Record(), &compact))
+			out.entries, _ = compact.AppendNativeMetadata(out.entries, nil)
 		}
 	}
 	require.NoError(t, r.Err())
@@ -76,11 +85,66 @@ func (w nativeMetadataWAL) reduce() map[chunks.HeadSeriesRef]nativemetadata.Stat
 	states := map[chunks.HeadSeriesRef]nativemetadata.State{}
 	intern := func(m metadata.Metadata) *metadata.Metadata { return &m }
 	for _, e := range w.entries {
+		if e.Ignored() {
+			continue
+		}
 		state := states[e.Ref]
 		state.Apply(e.Kind, e.Truncated, nativemetadata.AppendRecordPoints(nil, e.Points, intern))
 		states[e.Ref] = state
 	}
 	return states
+}
+
+// compactNativeMetadataForTest returns entries, which must be groups or
+// overrides, as a compact record whose dictionary holds each distinct value once.
+func compactNativeMetadataForTest(entries ...record.RefNativeMetadata) record.CompactNativeMetadata {
+	var rec record.CompactNativeMetadata
+	indices := map[record.NativeMetadataValue]uint32{}
+	for _, e := range entries {
+		compact := record.RefCompactNativeMetadata{Ref: e.Ref, Kind: e.Kind, Truncated: e.Truncated}
+		for _, p := range e.Points {
+			v := record.NativeMetadataValue{Type: p.Type, Unit: p.Unit, Help: p.Help}
+			index, ok := indices[v]
+			if !ok {
+				index = uint32(len(rec.Values))
+				indices[v] = index
+				rec.Values = append(rec.Values, v)
+			}
+			compact.Points = append(compact.Points, record.CompactNativeMetadataPoint{EffectiveFrom: p.EffectiveFrom, Value: index})
+		}
+		rec.Entries = append(rec.Entries, compact)
+	}
+	return rec
+}
+
+// unknownCompactNativeMetadataForTest encodes a compact record of one entry of
+// an unknown kind, with value v at from if it has a point.
+func unknownCompactNativeMetadataForTest(ref chunks.HeadSeriesRef, v *record.NativeMetadataValue, from int64) []byte {
+	const unknownKind = 7
+	buf := encoding.Encbuf{}
+	buf.PutByte(byte(record.NativeMetadataCompact))
+	buf.PutByte(1)
+	if v == nil {
+		buf.PutVarint64(0)
+		buf.PutUvarint(0)
+	} else {
+		buf.PutVarint64(from)
+		buf.PutUvarint(1)
+		buf.PutByte(v.Type)
+		buf.PutUvarintStr(v.Unit)
+		buf.PutUvarintStr(v.Help)
+	}
+	buf.PutUvarint(1)
+	buf.PutByte(unknownKind)
+	buf.PutVarint64(int64(ref))
+	if v == nil {
+		buf.PutUvarint(0)
+	} else {
+		buf.PutUvarint(1)
+		buf.PutUvarint(0)
+		buf.PutUvarint(0)
+	}
+	return buf.Get()
 }
 
 func nativeMetadataVersions(s nativemetadata.State) []NativeMetricMetadataVersion {
@@ -344,20 +408,126 @@ func TestNativeMetricMetadataReplay(t *testing.T) {
 				want: map[string]NativeMetricMetadataVersion{other.String(): {EffectiveFrom: 100, Metadata: m("a")}},
 			},
 		} {
+			for _, compact := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/compact=%t", c.name, compact), func(t *testing.T) {
+					recs := slices.Clone(c.recs)
+					for i, rec := range recs {
+						if entries, ok := rec.([]record.RefNativeMetadata); ok && compact {
+							recs[i] = compactNativeMetadataForTest(entries...)
+						}
+					}
+					dir := t.TempDir()
+					w, err := wlog.New(nil, nil, filepath.Join(dir, "wal"), compression.None)
+					require.NoError(t, err)
+					populateTestWL(t, w, recs, nil, false)
+					require.NoError(t, w.Close())
+					db := newTestDB(t, withDir(dir), withOpts(nativeOpts()))
+					got := map[string]NativeMetricMetadataVersion{}
+					for name, s := range nativeMetadataSnapshot(t, db) {
+						require.Len(t, s.Versions, 1)
+						got[name] = s.Versions[0]
+					}
+					require.Equal(t, c.want, got)
+				})
+			}
+		}
+	})
+
+	t.Run("compact records", func(t *testing.T) {
+		point := func(from int64, help string) record.RefNativeMetadataPoint {
+			return record.RefNativeMetadataPoint{EffectiveFrom: from, Type: uint8(record.Counter), Unit: "seconds", Help: help}
+		}
+		entry := func(ref chunks.HeadSeriesRef, kind record.NativeMetadataKind, truncated bool, points ...record.RefNativeMetadataPoint) record.RefNativeMetadata {
+			return record.RefNativeMetadata{Ref: ref, Kind: kind, Truncated: truncated, Points: points}
+		}
+		ls := []labels.Labels{l, labels.FromStrings(labels.MetricName, "two"), labels.FromStrings(labels.MetricName, "three")}
+		d := record.NativeMetadataValue{Type: uint8(record.Counter), Unit: "seconds", Help: "d"}
+		// A type-6 entry of unknown kind always has a point, its main fields.
+		unknownMetadata := encoding.Encbuf{}
+		unknownMetadata.PutByte(byte(record.Metadata))
+		unknownMetadata.PutUvarint64(3)
+		unknownMetadata.PutByte(uint8(record.Counter))
+		unknownMetadata.PutUvarint(3)
+		unknownMetadata.PutUvarintStr("UNIT")
+		unknownMetadata.PutUvarintStr("seconds")
+		unknownMetadata.PutUvarintStr("HELP")
+		unknownMetadata.PutUvarintStr("e")
+		unknownMetadata.PutUvarintStr("k")
+		unknownMetadata.PutUvarintBytes([]byte{1 << 7})
+		for _, c := range []struct {
+			name  string
+			last  []byte
+			three NativeMetricMetadataSeries
+		}{
+			{
+				// An unknown entry without points leaves its ref's state as it was.
+				name:  "an unknown compact entry without points",
+				last:  unknownCompactNativeMetadataForTest(3, nil, 0),
+				three: NativeMetricMetadataSeries{Labels: ls[2], Versions: []NativeMetricMetadataVersion{{EffectiveFrom: 60, Metadata: m("b")}}, Truncated: true},
+			},
+			{
+				// The contrast: a Metadata record's unknown entry replaces the
+				// history with its main fields at an unknown start.
+				name:  "an unknown Metadata entry",
+				last:  unknownMetadata.Get(),
+				three: NativeMetricMetadataSeries{Labels: ls[2], Versions: []NativeMetricMetadataVersion{{EffectiveFrom: math.MinInt64, Metadata: m("e")}}},
+			},
+		} {
 			t.Run(c.name, func(t *testing.T) {
+				recs := []any{
+					[]record.RefSeries{{Ref: 1, Labels: ls[0]}, {Ref: 2, Labels: ls[1]}, {Ref: 3, Labels: ls[2]}},
+					[]record.RefSample{{Ref: 1, T: 300, V: 1}, {Ref: 2, T: 300, V: 1}, {Ref: 3, T: 300, V: 1}},
+					[]record.RefMetadata{{Ref: 1, Type: uint8(record.Counter), Unit: "seconds", Help: "a"}},
+					compactNativeMetadataForTest(
+						entry(1, record.NativeMetadataGroup, false, point(100, "b")),
+						entry(2, record.NativeMetadataGroup, false, point(100, "a"), point(200, "c")),
+						entry(3, record.NativeMetadataOverride, true, point(50, "a"), point(60, "b")),
+					),
+					// Mixed WALs apply both kinds of record in WAL order.
+					[]record.RefNativeMetadata{entry(1, record.NativeMetadataGroup, false, point(300, "c"))},
+					unknownCompactNativeMetadataForTest(2, &d, 250),
+					c.last,
+				}
 				dir := t.TempDir()
 				w, err := wlog.New(nil, nil, filepath.Join(dir, "wal"), compression.None)
 				require.NoError(t, err)
-				populateTestWL(t, w, c.recs, nil, false)
+				populateTestWL(t, w, recs, nil, false)
 				require.NoError(t, w.Close())
 				db := newTestDB(t, withDir(dir), withOpts(nativeOpts()))
-				got := map[string]NativeMetricMetadataVersion{}
-				for name, s := range nativeMetadataSnapshot(t, db) {
-					require.Len(t, s.Versions, 1)
-					got[name] = s.Versions[0]
-				}
-				require.Equal(t, c.want, got)
+				require.Equal(t, map[string]NativeMetricMetadataSeries{
+					ls[0].String(): {Labels: ls[0], Versions: []NativeMetricMetadataVersion{{EffectiveFrom: 300, Metadata: m("c")}}, Truncated: true},
+					// An unknown entry with a point applies as a single-point override.
+					ls[1].String(): {Labels: ls[1], Versions: []NativeMetricMetadataVersion{{EffectiveFrom: 250, Metadata: m("d")}}},
+					ls[2].String(): c.three,
+				}, nativeMetadataSnapshot(t, db))
+				require.Equal(t, 2.0, prom_testutil.ToFloat64(db.head.metrics.nativeMetadataUnknownEntries))
 			})
+		}
+	})
+
+	t.Run("compact records in legacy mode", func(t *testing.T) {
+		// Legacy mode reads each entry's newest point, if any, as legacy
+		// metadata; entries without points change nothing.
+		for _, walRecords := range []bool{false, true} {
+			dir := t.TempDir()
+			w, err := wlog.New(nil, nil, filepath.Join(dir, "wal"), compression.None)
+			require.NoError(t, err)
+			two := labels.FromStrings(labels.MetricName, "two")
+			populateTestWL(t, w, []any{
+				[]record.RefSeries{{Ref: 1, Labels: l}, {Ref: 2, Labels: two}},
+				[]record.RefSample{{Ref: 1, T: 2, V: 1}, {Ref: 2, T: 2, V: 1}},
+				[]record.RefMetadata{{Ref: 2, Type: uint8(record.Counter), Unit: "seconds", Help: "a"}},
+				compactNativeMetadataForTest(
+					record.RefNativeMetadata{Ref: 1, Kind: record.NativeMetadataGroup, Points: []record.RefNativeMetadataPoint{{EffectiveFrom: 1, Help: "x"}, {EffectiveFrom: 2, Type: uint8(record.Gauge), Unit: "seconds", Help: "b"}}},
+					record.RefNativeMetadata{Ref: 2, Kind: record.NativeMetadataOverride},
+				),
+			}, nil, false)
+			require.NoError(t, w.Close())
+			opts := DefaultOptions()
+			opts.EnableMetadataWALRecords = walRecords
+			db := newTestDB(t, withDir(dir), withOpts(opts))
+			require.Equal(t, &metadata.Metadata{Type: model.MetricTypeGauge, Unit: "seconds", Help: "b"}, legacyMetadataForTest(db.head.series.getByID(1)))
+			require.Equal(t, &metadata.Metadata{Type: model.MetricTypeCounter, Unit: "seconds", Help: "a"}, legacyMetadataForTest(db.head.series.getByID(2)))
 		}
 	})
 

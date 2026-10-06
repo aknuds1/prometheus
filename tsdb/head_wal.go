@@ -180,6 +180,7 @@ func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[ch
 		defer close(decoded)
 		var err error
 		dec := record.NewDecoder(syms, h.logger)
+		var legacyCompact record.CompactNativeMetadata
 		for r.Next() {
 			switch dec.Type(r.Record()) {
 			case record.Series:
@@ -283,6 +284,36 @@ func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[ch
 					return
 				}
 				decoded <- meta
+			case record.NativeMetadataCompact:
+				if nativeReplay != nil {
+					native := h.wlReplayNativeMetadataPool.Get()
+					if native == nil {
+						native = &nativeMetadataReplayRecord{}
+					}
+					native.isCompact = true
+					if err := dec.CompactNativeMetadata(r.Record(), &native.compact); err != nil {
+						decodeErr = &wlog.CorruptionErr{
+							Err:     fmt.Errorf("decode compact native metadata: %w", err),
+							Segment: r.Segment(),
+							Offset:  r.Offset(),
+						}
+						return
+					}
+					decoded <- native
+					continue
+				}
+				// Legacy mode reads each entry's newest point, as it reads the
+				// newest point of native entries in Metadata records.
+				if err := dec.CompactNativeMetadata(r.Record(), &legacyCompact); err != nil {
+					decodeErr = &wlog.CorruptionErr{
+						Err:     fmt.Errorf("decode compact native metadata: %w", err),
+						Segment: r.Segment(),
+						Offset:  r.Offset(),
+					}
+					return
+				}
+				decoded <- legacyCompact.AppendNewest(h.wlReplayMetadataPool.Get()[:0])
+				legacyCompact.Reset()
 			default:
 				// Noop.
 			}
@@ -503,6 +534,21 @@ Outer:
 			clear(v) // Zero out to avoid retaining metadata strings.
 			h.wlReplayMetadataPool.Put(v[:0])
 		case *nativeMetadataReplayRecord:
+			if v.isCompact {
+				nativeReplay.applyCompact(&v.compact)
+				for _, e := range v.compact.Entries {
+					// Compact entries are native, as above.
+					if len(e.Points) == 0 || !h.opts.EnableMetadataWALRecords {
+						continue
+					}
+					newest := v.compact.Values[e.Points[len(e.Points)-1].Value]
+					h.replayLegacyMetadata(e.Ref, newest.Type, newest.Unit, newest.Help, multiRef, missingSeries, &unknownMetadataRefs)
+				}
+				v.isCompact = false
+				v.compact.Reset() // Avoid retaining metadata strings.
+				h.wlReplayNativeMetadataPool.Put(v)
+				continue
+			}
 			nativeReplay.apply(v.entries)
 			for _, e := range v.entries {
 				// Native entries update legacy metadata only where WAL metadata
