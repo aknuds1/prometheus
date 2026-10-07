@@ -122,11 +122,10 @@ func dsSightings(d *w1Decoder) []dsSighting {
 	return out
 }
 
-// dsDecodedRefs returns the refs of d's record's entries.
-func dsDecodedRefs(d *w1Decoder) []chunks.HeadSeriesRef {
-	refs := make([]chunks.HeadSeriesRef, 0, len(d.compact.Entries))
+// dsDecodedRefs appends the refs of d's record's entries to dst.
+func dsDecodedRefs(d *w1Decoder, dst []chunks.HeadSeriesRef) []chunks.HeadSeriesRef {
 	for _, e := range d.compact.Entries {
-		refs = append(refs, e.Ref)
+		dst = append(dst, e.Ref)
 	}
-	return refs
+	return dst
 }
