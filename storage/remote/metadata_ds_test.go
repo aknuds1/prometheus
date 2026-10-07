@@ -16,17 +16,20 @@
 package remote
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 	"weak"
 
+	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/model/metadata"
@@ -49,9 +52,10 @@ import (
 // Every iteration ends, outside its timed regions, with checks of every
 // series' history and, on builds with the WAL metadata interner, of the
 // interner and of which points share an object, against an independent model.
-// This file is identical on every build. metadata_ds_interner_test.go is
-// identical on builds with the WAL metadata interner, and
-// metadata_ds_adapter_test.go holds each build's own parts.
+// Expected values are recomputed from the workloads, so no oracle stays live
+// across a window or a collection. This file is identical on every build.
+// metadata_ds_interner_test.go is identical on builds with the WAL metadata
+// interner, and metadata_ds_adapter_test.go holds each build's own parts.
 
 var dsWorkloads = []string{"db", "sb", "dv"}
 
@@ -72,17 +76,57 @@ type dsVersion struct {
 	m    *metadata.Metadata
 }
 
-// dsExpected returns each series' value at each step, indexed by step and
-// slot.
-func dsExpected(workload string, steps int) [][]metadata.Metadata {
-	expected := make([][]metadata.Metadata, steps+1)
-	for step := range expected {
-		expected[step] = make([]metadata.Metadata, w1Series)
-		for slot := range w1Series {
-			expected[step][slot] = w1Metadata(workload, slot, step)
-		}
+// dsIsExpected reports whether m is workload's value for slot at step, as
+// w1Metadata returns it, without allocating.
+func dsIsExpected(workload string, slot, step int, m *metadata.Metadata) bool {
+	if workload == "dv" {
+		return dsIsVaried(slot, step, m)
 	}
-	return expected
+	family := slot
+	if workload == "sb" {
+		family = slot % 100
+	}
+	var buf [64]byte
+	help := append(buf[:0], "family "...)
+	help = strconv.AppendInt(help, int64(family), 10)
+	help = append(help, " version "...)
+	help = strconv.AppendInt(help, int64(step), 10)
+	help = append(help, ' ')
+	for len(help) < len(buf) {
+		help = append(help, 'x')
+	}
+	return m.Type == model.MetricTypeCounter && m.Unit == "seconds" && m.Help == string(help)
+}
+
+// dsIsVaried reports whether m is dv's value for slot at step, as w1Varied
+// returns it, without allocating.
+func dsIsVaried(slot, step int, m *metadata.Metadata) bool {
+	var buf [32]byte
+	key := append(buf[:0], "w1 dv "...)
+	key = strconv.AppendInt(key, int64(slot), 10)
+	key = append(key, ' ')
+	key = strconv.AppendInt(key, int64(step), 10)
+	h := sha256.Sum256(key)
+	types := [...]model.MetricType{model.MetricTypeCounter, model.MetricTypeGauge, model.MetricTypeHistogram, model.MetricTypeSummary}
+	units := [...]string{"seconds", "bytes", "requests", "", "ratio", "celsius"}
+	if m.Type != types[h[0]%4] || m.Unit != units[h[1]%6] {
+		return false
+	}
+	help := m.Help
+	for i := range 5 + int(h[2]%8) {
+		if i > 0 {
+			if help == "" || help[0] != ' ' {
+				return false
+			}
+			help = help[1:]
+		}
+		word := w1Vocabulary[int(h[3+i])%len(w1Vocabulary)]
+		if !strings.HasPrefix(help, word) {
+			return false
+		}
+		help = help[len(word):]
+	}
+	return help == ""
 }
 
 // dsRecords returns a workload's records, with extra further change sweeps.
@@ -157,8 +201,8 @@ func (r *dsRun) close() { r.restore() }
 // dsCheckRun checks every series' history against the workload's values, and
 // the interner and shared objects against the model, after an iteration's
 // window.
-func dsCheckRun(tb testing.TB, r *dsRun, expected [][]metadata.Metadata) {
-	dsCheckHistories(tb, r.qm, expected, func(int) int { return w1Sweeps }, nil)
+func dsCheckRun(tb testing.TB, r *dsRun) {
+	dsCheckHistories(tb, r.qm, r.workload, func(int) int { return w1Sweeps }, nil)
 	dsCheckModel(tb, r)
 }
 
@@ -175,11 +219,11 @@ func dsStepAfter(i int) func(slot int) int {
 	}
 }
 
-// dsCheckHistories checks that each series holds its values up to its step,
-// in order and with their starts, as deep as the build keeps them. With
+// dsCheckHistories checks that each series holds workload's values up to its
+// step, in order and with their starts, as deep as the build keeps them. With
 // poison set, each string must also be free of it.
-func dsCheckHistories(tb testing.TB, qm *QueueManager, expected [][]metadata.Metadata, stepOf func(slot int) int, poison []byte) {
-	var versions []dsVersion
+func dsCheckHistories(tb testing.TB, qm *QueueManager, workload string, stepOf func(slot int) int, poison []byte) {
+	versions := make([]dsVersion, 0, dsHistoryDepth()+1)
 	for slot := range w1Series {
 		step := stepOf(slot)
 		depth := min(step+1, dsHistoryDepth())
@@ -194,8 +238,8 @@ func dsCheckHistories(tb testing.TB, qm *QueueManager, expected [][]metadata.Met
 		}
 		for i, v := range versions {
 			s := step + 1 - depth + i
-			if *v.m != expected[s][slot] {
-				require.Equal(tb, expected[s][slot], *v.m, "series %d version %d", ref, i)
+			if !dsIsExpected(workload, slot, s, v.m) {
+				require.Equal(tb, w1Metadata(workload, slot, s), *v.m, "series %d version %d", ref, i)
 			}
 			if !dsLegacy() && v.from != w1Timestamp(s) {
 				require.Equal(tb, w1Timestamp(s), v.from, "series %d version %d start", ref, i)
@@ -326,10 +370,29 @@ func (t *dsTimer) report(unit string, perIteration int, gcOff bool) {
 }
 
 // dsCollections times M2's two explicit collections and applies the
-// reclamation gate.
+// reclamation gate. It also records what the checks before them allocate:
+// that garbage is still in the heap at the live collection.
 type dsCollections struct {
-	live, dropped, diff []float64
-	unverified          int
+	live, dropped, diff      []float64
+	checkBytes, checkObjects []float64
+	unverified               int
+	allocs                   []metrics.Sample
+}
+
+// check runs the checks that follow M2's window, recording the bytes and
+// objects they allocate. The runtime counts small objects when their span
+// leaves the allocator's cache, so both are approximate to within the cached
+// spans.
+func (c *dsCollections) check(run func()) {
+	if c.allocs == nil {
+		c.allocs = []metrics.Sample{{Name: "/gc/heap/allocs:bytes"}, {Name: "/gc/heap/allocs:objects"}}
+	}
+	metrics.Read(c.allocs)
+	bytes, objects := c.allocs[0].Value.Uint64(), c.allocs[1].Value.Uint64()
+	run()
+	metrics.Read(c.allocs)
+	c.checkBytes = append(c.checkBytes, float64(c.allocs[0].Value.Uint64()-bytes))
+	c.checkObjects = append(c.checkObjects, float64(c.allocs[1].Value.Uint64()-objects))
 }
 
 // measure runs the live collection with r reachable, releases every reference
@@ -361,6 +424,8 @@ func (c *dsCollections) report(b *testing.B) {
 	b.ReportMetric(dsMedian(c.live), "live-gc-cpu-ns")
 	b.ReportMetric(dsMedian(c.dropped), "dropped-gc-cpu-ns")
 	b.ReportMetric(dsMedian(c.diff), "live-minus-dropped-cpu-ns")
+	b.ReportMetric(dsMedian(c.checkBytes), "check-alloc-B")
+	b.ReportMetric(dsMedian(c.checkObjects), "check-allocs")
 	b.ReportMetric(float64(c.unverified), "unverified-probes")
 }
 
@@ -422,7 +487,7 @@ func dsCount(tb testing.TB, workload string) dsCounts {
 		rec, err := compression.Decode(compression.Snappy, compressed, r.decBuf)
 		require.NoError(tb, err)
 		r.decoder.decode(tb, rec)
-		refs := dsDecodedRefs(r.decoder)
+		refs := dsDecodedRefs(r.decoder, nil)
 		for _, ref := range refs {
 			caps[ref] = dsOlderCap(r.qm, ref)
 		}
@@ -469,7 +534,6 @@ func dsKernel(b *testing.B, mode string) {
 				b.Skip("unavailable on this build: " + reason)
 			}
 			records := w1RecordsFor(b, workload)
-			expected := dsExpected(workload, w1Sweeps)
 			counts := dsCount(b, workload)
 			var collections dsCollections
 			gcOff := mode != "int"
@@ -481,10 +545,11 @@ func dsKernel(b *testing.B, mode string) {
 					timer.gcOff(b)
 				}
 				timer.time(func() { r.apply(b) })
-				dsCheckRun(b, r, expected)
 				if mode == "nogc" {
+					collections.check(func() { dsCheckRun(b, r) })
 					collections.measure(&r)
 				} else {
+					dsCheckRun(b, r)
 					r.close()
 				}
 				if gcOff {
@@ -502,8 +567,10 @@ func dsKernel(b *testing.B, mode string) {
 
 // BenchmarkMetadataDSSplit (M3) times each record's decompression and
 // decoding (D), resolution (R) and application (A) separately, with automatic
-// GC off, so that the gaps between them hide no collection. The gaps check the
-// series each record changed, against poison written over its memory.
+// GC off, so that the gaps between them hide no collection. Its CPU and
+// elapsed time are those of the records' phases alone; the record checks in
+// the gaps, which allocate nothing, are outside them. Go's own ns/op still
+// covers the checks.
 func BenchmarkMetadataDSSplit(b *testing.B) {
 	for _, workload := range dsWorkloads {
 		b.Run("workload="+workload, func(b *testing.B) {
@@ -512,63 +579,149 @@ func BenchmarkMetadataDSSplit(b *testing.B) {
 				b.Skip("unavailable on this build: " + reason)
 			}
 			records := w1RecordsFor(b, workload)
-			expected := dsExpected(workload, w1Sweeps)
 			counts := dsCount(b, workload)
-			var d, res, a time.Duration
 			split := &dsSplit{}
+			check := newDSRecordCheck(workload)
+			checkAllocs := dsRecordCheckAllocs(b, workload, split, check.check)
+			if checkAllocs != 0 {
+				b.Fatalf("the record checks allocated %d objects", checkAllocs)
+			}
+			var account dsSplitAccount
 			timer.start()
 			for range b.N {
 				r := newDSRun(b, workload, false)
+				verify := func(i int, rec []byte) { check.check(b, r, i, rec) }
 				runtime.GC()
 				timer.gcOff(b)
-				timer.time(func() {
-					for i, compressed := range r.records.compressed {
-						t0 := w1CPU()
-						rec, err := compression.Decode(compression.Snappy, compressed, r.decBuf)
-						if err != nil {
-							require.NoError(b, err)
-						}
-						r.decoder.decode(b, rec)
-						t1 := w1CPU()
-						split.resolve(r.decoder, r.qm, dsProcessIntern())
-						t2 := w1CPU()
-						split.apply(r.decoder, r.qm)
-						t3 := w1CPU()
-						d, res, a = d+t1-t0, res+t2-t1, a+t3-t2
-						dsCheckRecord(b, r, i, rec, expected)
-					}
-				})
-				dsCheckRun(b, r, expected)
+				timer.time(func() { dsSplitWindow(b, r, split, dsRealClocks, &account, verify) })
+				dsCheckRun(b, r)
 				r.close()
 				timer.gcOn(b)
 			}
-			units := float64(b.N) * float64(records.points())
 			timer.report("point", records.points(), true)
-			b.ReportMetric(float64(d.Nanoseconds())/units, "cpu-d-ns/point")
-			b.ReportMetric(float64(res.Nanoseconds())/units, "cpu-r-ns/point")
-			b.ReportMetric(float64(a.Nanoseconds())/units, "cpu-a-ns/point")
-			b.ReportMetric(float64((d+res+a).Nanoseconds())/units, "cpu-dra-ns/point")
+			for unit, v := range account.metrics(float64(b.N) * float64(records.points())) {
+				b.ReportMetric(v, unit)
+			}
+			b.ReportMetric(float64(checkAllocs), "record-check-allocs")
 			counts.report(b, len(records.changes))
 		})
 	}
 }
 
-// dsCheckRecord poisons record i's memory, then checks, without allocating,
-// that every series it changed holds its new value and none of the poison.
-func dsCheckRecord(tb testing.TB, r *dsRun, i int, rec []byte, expected [][]metadata.Metadata) {
-	refs := dsDecodedRefs(r.decoder)
+// dsClocks are the clocks M3 accounts with: process CPU time, and monotonic
+// elapsed time.
+type dsClocks struct{ cpu, wall func() time.Duration }
+
+var (
+	dsEpoch      = time.Now()
+	dsRealClocks = dsClocks{cpu: w1CPU, wall: func() time.Duration { return time.Since(dsEpoch) }}
+)
+
+// dsSplitAccount is M3's accounting: each phase's CPU time, and the elapsed
+// time from each record's decoding to the end of its application.
+type dsSplitAccount struct{ d, r, a, elapsed time.Duration }
+
+// metrics returns what M3 reports per unit from its account. Its CPU is the
+// phases' sum.
+func (a dsSplitAccount) metrics(units float64) map[string]float64 {
+	per := func(d time.Duration) float64 { return float64(d.Nanoseconds()) / units }
+	return map[string]float64{
+		"cpu-ns/point":     per(a.d + a.r + a.a),
+		"cpu-dra-ns/point": per(a.d + a.r + a.a),
+		"cpu-d-ns/point":   per(a.d),
+		"cpu-r-ns/point":   per(a.r),
+		"cpu-a-ns/point":   per(a.a),
+		"elapsed-ns/point": per(a.elapsed),
+	}
+}
+
+// dsSplitWindow decodes, resolves and applies each of r's change records,
+// accounting each record's phases, and calls verify after each record,
+// outside every interval it accounts.
+func dsSplitWindow(tb testing.TB, r *dsRun, split *dsSplit, clocks dsClocks, account *dsSplitAccount, verify func(i int, rec []byte)) {
+	for i, compressed := range r.records.compressed {
+		w0 := clocks.wall()
+		t0 := clocks.cpu()
+		rec, err := compression.Decode(compression.Snappy, compressed, r.decBuf)
+		if err != nil {
+			require.NoError(tb, err)
+		}
+		r.decoder.decode(tb, rec)
+		t1 := clocks.cpu()
+		split.resolve(r.decoder, r.qm, dsProcessIntern())
+		t2 := clocks.cpu()
+		split.apply(r.decoder, r.qm)
+		t3 := clocks.cpu()
+		w1 := clocks.wall()
+		account.d, account.r, account.a = account.d+t1-t0, account.r+t2-t1, account.a+t3-t2
+		account.elapsed += w1 - w0
+		verify(i, rec)
+	}
+}
+
+// dsRecordCheck is M3's check after each record, with scratch allocated once
+// so that the check allocates nothing.
+type dsRecordCheck struct {
+	workload string
+	refs     []chunks.HeadSeriesRef
+	versions []dsVersion
+}
+
+func newDSRecordCheck(workload string) *dsRecordCheck {
+	return &dsRecordCheck{workload: workload, refs: make([]chunks.HeadSeriesRef, 0, w1Commit), versions: make([]dsVersion, 0, dsHistoryDepth()+1)}
+}
+
+// check poisons record i's memory, then fails unless every series the record
+// changed holds its new value and none of the poison.
+func (c *dsRecordCheck) check(tb testing.TB, r *dsRun, i int, rec []byte) {
 	for j := range rec {
 		rec[j] = dsPoison
 	}
-	step := 1 + i/(w1Series/w1Commit)
-	var versions []dsVersion
-	for _, ref := range refs {
-		versions, _ = dsVersions(r.qm, ref, versions[:0])
-		newest := versions[len(versions)-1].m
-		if *newest != expected[step][ref-1] || strings.IndexByte(newest.Help, dsPoison) >= 0 || strings.IndexByte(newest.Unit, dsPoison) >= 0 {
-			tb.Fatalf("record %d: series %d holds %+v, not %+v", i, ref, *newest, expected[step][ref-1])
+	if err := c.mismatch(r, dsRecordStep(i)); err != nil {
+		tb.Fatalf("record %d: %v", i, err)
+	}
+}
+
+// mismatch returns how a series the decoder's record changed differs from its
+// value at step, or holds poison, or nil.
+func (c *dsRecordCheck) mismatch(r *dsRun, step int) error {
+	c.refs = dsDecodedRefs(r.decoder, c.refs[:0])
+	for _, ref := range c.refs {
+		c.versions, _ = dsVersions(r.qm, ref, c.versions[:0])
+		newest := c.versions[len(c.versions)-1].m
+		if !dsIsExpected(c.workload, int(ref)-1, step, newest) || strings.IndexByte(newest.Help, dsPoison) >= 0 || strings.IndexByte(newest.Unit, dsPoison) >= 0 {
+			return fmt.Errorf("series %d holds %+v, not %+v", ref, *newest, w1Metadata(c.workload, int(ref)-1, step))
 		}
 	}
+	return nil
+}
+
+// dsRecordStep returns the step change record i stores.
+func dsRecordStep(i int) int {
+	return 1 + i/(w1Series/w1Commit)
+}
+
+// dsRecordCheckAllocs runs one untimed split window with automatic GC off, as
+// M3's are, and returns the objects its record checks allocate, counted
+// exactly from the runtime's memory statistics around each check. The counts
+// are process-wide, so GC is off to keep a collection's own allocations out
+// of them.
+func dsRecordCheckAllocs(tb testing.TB, workload string, split *dsSplit, check func(tb testing.TB, r *dsRun, i int, rec []byte)) uint64 {
+	r := newDSRun(tb, workload, false)
+	defer r.close()
+	var before, after runtime.MemStats
+	var allocs uint64
+	var account dsSplitAccount
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	dsSplitWindow(tb, r, split, dsRealClocks, &account, func(i int, rec []byte) {
+		runtime.ReadMemStats(&before)
+		check(tb, r, i, rec)
+		runtime.ReadMemStats(&after)
+		allocs += after.Mallocs - before.Mallocs
+	})
+	dsCheckRun(tb, r)
+	return allocs
 }
 
 // The stores-only kernels: Retained (M4) predecodes the records after the
@@ -586,7 +739,6 @@ func dsStores(b *testing.B, mode string) {
 				b.Skip("unavailable on this build: " + reason)
 			}
 			records := w1RecordsFor(b, workload)
-			expected := dsExpected(workload, w1Sweeps)
 			counts := dsCount(b, workload)
 			timer.start()
 			for range b.N {
@@ -603,7 +755,7 @@ func dsStores(b *testing.B, mode string) {
 						d.store(r.qm)
 					}
 				})
-				dsCheckRun(b, r, expected)
+				dsCheckRun(b, r)
 				r.close()
 			}
 			timer.report("point", records.points(), false)
@@ -674,7 +826,6 @@ func TestMetadataDSEquivalence(t *testing.T) {
 
 func dsEquivalence(t *testing.T, workload string, extra int, variant string) {
 	records := dsRecords(t, workload, extra)
-	expected := dsExpected(workload, w1Sweeps+extra)
 	refIntern, refHandle := dsNewInterner(nil)
 	varIntern, varHandle := dsNewInterner(refHandle)
 	if variant == "warm" {
@@ -743,8 +894,8 @@ func dsEquivalence(t *testing.T, workload string, extra int, variant string) {
 		for j := range varRec {
 			varRec[j] = dsPoison
 		}
-		dsCheckHistories(t, refQM, expected, dsStepAfter(i), poison)
-		dsCheckHistories(t, varQM, expected, dsStepAfter(i), poison)
+		dsCheckHistories(t, refQM, workload, dsStepAfter(i), poison)
+		dsCheckHistories(t, varQM, workload, dsStepAfter(i), poison)
 		require.NoError(t, dsStatesMismatch(refQM, varQM), "record %d", i)
 		dsCompareInterners(t, refHandle, varHandle, poison)
 	}
@@ -804,7 +955,7 @@ func TestMetadataDSModel(t *testing.T) {
 			r := newDSRun(t, workload, true)
 			defer r.close()
 			r.apply(t)
-			dsCheckRun(t, r, dsExpected(workload, w1Sweeps))
+			dsCheckRun(t, r)
 			dsCheckModelDetects(t, r)
 		})
 	}
@@ -905,4 +1056,108 @@ func TestMetadataDSCollections(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMetadataDSExpected checks that the checks' value test agrees exactly
+// with the workloads' values, for every series and step the diagnostic
+// stores, rejects a change to any field, and allocates nothing.
+func TestMetadataDSExpected(t *testing.T) {
+	for _, workload := range dsWorkloads {
+		t.Run("workload="+workload, func(t *testing.T) {
+			for step := range w1Sweeps + 2 {
+				for slot := range w1Series {
+					m := w1Metadata(workload, slot, step)
+					if !dsIsExpected(workload, slot, step, &m) {
+						t.Fatalf("slot %d step %d: %+v rejected", slot, step, m)
+					}
+					for _, wrong := range []metadata.Metadata{
+						w1Metadata(workload, slot, step+1),
+						w1Metadata(workload, slot^1, step),
+						{Type: m.Type, Unit: m.Unit, Help: m.Help + " "},
+						{Type: m.Type, Unit: m.Unit, Help: m.Help[:len(m.Help)-1]},
+						{Type: m.Type, Unit: m.Unit + "s", Help: m.Help},
+						{Type: model.MetricTypeUnknown, Unit: m.Unit, Help: m.Help},
+					} {
+						if wrong != m && dsIsExpected(workload, slot, step, &wrong) {
+							t.Fatalf("slot %d step %d: %+v accepted for %+v", slot, step, wrong, m)
+						}
+					}
+				}
+			}
+			m := w1Metadata(workload, 1, 1)
+			require.Zero(t, testing.AllocsPerRun(100, func() { dsIsExpected(workload, 1, 1, &m) }))
+		})
+	}
+}
+
+// dsCheckSink keeps an allocating check's allocations live.
+var dsCheckSink []byte
+
+// TestMetadataDSSplitAccounting checks that M3's accounting excludes its
+// record checks. Checks that take any time on either clock leave each phase's
+// CPU, the records' elapsed time and what M3 reports from them unchanged. The
+// record checks allocate nothing in any workload, and the untimed pass that
+// M3 fails on counts what an allocating check allocates.
+func TestMetadataDSSplitAccounting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	t.Run("expensive checks", func(t *testing.T) {
+		var cpu, wall time.Duration
+		clocks := dsClocks{
+			cpu:  func() time.Duration { cpu += time.Microsecond; return cpu },
+			wall: func() time.Duration { wall += time.Millisecond; return wall },
+		}
+		r := newDSRun(t, "db", false)
+		defer r.close()
+		check := newDSRecordCheck("db")
+		var account dsSplitAccount
+		dsSplitWindow(t, r, &dsSplit{}, clocks, &account, func(i int, rec []byte) {
+			cpu += time.Hour
+			wall += time.Hour
+			check.check(t, r, i, rec)
+		})
+		dsCheckRun(t, r)
+		n := time.Duration(len(r.records.compressed))
+		require.Equal(t, dsSplitAccount{d: n * time.Microsecond, r: n * time.Microsecond, a: n * time.Microsecond, elapsed: n * time.Millisecond}, account)
+		units := float64(r.records.points())
+		perPoint := func(d time.Duration) float64 { return float64(d.Nanoseconds()) / units }
+		require.Equal(t, map[string]float64{
+			"cpu-ns/point": perPoint(3 * n * time.Microsecond), "cpu-dra-ns/point": perPoint(3 * n * time.Microsecond),
+			"cpu-d-ns/point": perPoint(n * time.Microsecond), "cpu-r-ns/point": perPoint(n * time.Microsecond),
+			"cpu-a-ns/point": perPoint(n * time.Microsecond), "elapsed-ns/point": perPoint(n * time.Millisecond),
+		}, account.metrics(units))
+	})
+	t.Run("allocating checks", func(t *testing.T) {
+		for _, workload := range dsWorkloads {
+			if reason := dsUnavailable("split", workload); reason != "" {
+				continue
+			}
+			check := newDSRecordCheck(workload)
+			require.Zero(t, dsRecordCheckAllocs(t, workload, &dsSplit{}, check.check), workload)
+		}
+		check := newDSRecordCheck("db")
+		gcOff := true
+		allocating := func(tb testing.TB, r *dsRun, i int, rec []byte) {
+			previous := debug.SetGCPercent(-1)
+			debug.SetGCPercent(previous)
+			gcOff = gcOff && previous == -1
+			dsCheckSink = make([]byte, 64)
+			check.check(tb, r, i, rec)
+		}
+		require.Equal(t, uint64(len(w1RecordsFor(t, "db").compressed)), dsRecordCheckAllocs(t, "db", &dsSplit{}, allocating))
+		require.True(t, gcOff, "the checks ran with automatic GC on")
+	})
+	t.Run("detecting checks", func(t *testing.T) {
+		r := newDSRun(t, "db", false)
+		defer r.close()
+		check := newDSRecordCheck("db")
+		var account dsSplitAccount
+		perSweep := w1Series / w1Commit
+		dsSplitWindow(t, r, &dsSplit{}, dsRealClocks, &account, func(i int, rec []byte) {
+			check.check(t, r, i, rec)
+			require.Error(t, check.mismatch(r, dsRecordStep(i)-1), "record %d against the previous step", i)
+			require.Error(t, check.mismatch(r, dsRecordStep(i+perSweep)), "record %d against the next step", i)
+		})
+	})
 }
