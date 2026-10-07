@@ -242,12 +242,13 @@ func rmClassify(m *dsModel, v metadata.Metadata, p *rmPaths) {
 }
 
 // rmModeled is a model of an interner built in a state, with the snapshots
-// after the seed and after conditioning, the paths and objects of the change
-// sightings, and each point's object.
+// after the seed and after conditioning, the paths, values and objects of the
+// change sightings, and each point's object.
 type rmModeled struct {
 	m                  *dsModel
 	postSeed, postCond rmSnapshot
 	paths              rmPaths
+	changeValues       []metadata.Metadata
 	changeIDs          []int
 	objects            map[dsPointRef]int
 }
@@ -270,7 +271,7 @@ func rmModel(i *metadataInterner, s rmState, seed, changes []dsSighting, applied
 		for _, sg := range changes {
 			rmClassify(r.m, sg.value, &r.paths)
 			id := r.m.intern(sg.value)
-			r.changeIDs = append(r.changeIDs, id)
+			r.changeValues, r.changeIDs = append(r.changeValues, sg.value), append(r.changeIDs, id)
 			for _, p := range sg.points {
 				r.objects[p] = id
 			}
@@ -280,9 +281,10 @@ func rmModel(i *metadataInterner, s rmState, seed, changes []dsSighting, applied
 }
 
 // rmMismatch returns the first difference between i and the model: the
-// bounds, the generations, the ledger and its replacement order, and which
-// objects the ledger, the generations and, if set, qm's histories and the
-// returned values share.
+// bounds, the generations and their values' content, the ledger and its
+// replacement order, the returned values' content, and which objects the
+// ledger, the generations and, if set, qm's histories and the returned values
+// share.
 func rmMismatch(i *metadataInterner, r *rmModeled, qm *QueueManager, returned []*metadata.Metadata) error {
 	m := r.m
 	if len(i.current) > i.entries || len(i.older) > i.entries || i.bytes > i.limit || i.ledgerBytes > i.ledgerLimit {
@@ -333,6 +335,12 @@ func rmMismatch(i *metadataInterner, r *rmModeled, qm *QueueManager, returned []
 			if !ok {
 				return fmt.Errorf("a generation lacks %+v", k)
 			}
+			if v == nil {
+				return fmt.Errorf("a generation holds nil for %+v", k)
+			}
+			if *v != k {
+				return fmt.Errorf("a generation holds %+v for %+v", *v, k)
+			}
 			if err := match(v, id, "a generation"); err != nil {
 				return err
 			}
@@ -343,6 +351,12 @@ func rmMismatch(i *metadataInterner, r *rmModeled, qm *QueueManager, returned []
 			return fmt.Errorf("%d values returned, the model %d", len(returned), len(r.changeIDs))
 		}
 		for k, v := range returned {
+			if v == nil {
+				return fmt.Errorf("returned value %d is nil", k)
+			}
+			if *v != r.changeValues[k] {
+				return fmt.Errorf("returned value %d is %+v, not %+v", k, *v, r.changeValues[k])
+			}
 			if err := match(v, r.changeIDs[k], fmt.Sprintf("returned value %d", k)); err != nil {
 				return err
 			}
@@ -881,6 +895,63 @@ func TestMetadataRMReplay(t *testing.T) {
 		other.occupied++
 		_, err = rmCheckState(t, i, r.state, r.records, true, postSeed, other, nil, returned)
 		require.Error(t, err, "a changed snapshot")
+	})
+}
+
+// TestMetadataRMContent checks that the comparison reads content, not only
+// pointers: a generation's value that differs from its key, a returned value
+// that differs from its sighting, and a nil one in either, each fail it, even
+// where no other holder shares the object.
+func TestMetadataRMContent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	replayed := func(t *testing.T, name string) (*rmReplayer, *metadataInterner, rmSnapshot, rmSnapshot, []*metadata.Metadata) {
+		r := newRMReplayer(t, "db", rmStateNamed(t, name))
+		i, postSeed, postCond := r.prepare()
+		returned := make([]*metadata.Metadata, len(r.values))
+		for k, v := range r.values {
+			returned[k] = i.internBorrowed(v)
+		}
+		_, err := rmCheckState(t, i, r.state, r.records, true, postSeed, postCond, nil, returned)
+		require.NoError(t, err)
+		return r, i, postSeed, postCond, returned
+	}
+	wrong := func(m *metadata.Metadata) *metadata.Metadata {
+		c := *m
+		c.Help += " wrong"
+		return &c
+	}
+	for _, c := range []struct{ name, state, generation string }{{"current", "G1L0", "current"}, {"older", "G2L0", "older"}} {
+		t.Run(c.name+" generation", func(t *testing.T) {
+			r, i, postSeed, postCond, returned := replayed(t, c.state)
+			gen := i.current
+			if c.generation == "older" {
+				gen = i.older
+			}
+			var key metadata.Metadata
+			for k := range gen {
+				key = k
+				break
+			}
+			saved := gen[key]
+			for _, v := range []*metadata.Metadata{wrong(saved), nil} {
+				gen[key] = v
+				_, err := rmCheckState(t, i, r.state, r.records, true, postSeed, postCond, nil, returned)
+				gen[key] = saved
+				require.Error(t, err, "%s holds %+v for %+v", c.generation, v, key)
+			}
+		})
+	}
+	t.Run("returned value", func(t *testing.T) {
+		r, i, postSeed, postCond, returned := replayed(t, "G0Lf")
+		saved := returned[0]
+		for _, v := range []*metadata.Metadata{wrong(saved), nil} {
+			returned[0] = v
+			_, err := rmCheckState(t, i, r.state, r.records, true, postSeed, postCond, nil, returned)
+			returned[0] = saved
+			require.Error(t, err, "returned %+v", v)
+		}
 	})
 }
 
