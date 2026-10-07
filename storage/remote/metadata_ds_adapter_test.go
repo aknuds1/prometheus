@@ -73,12 +73,12 @@ func (*dsSplit) resolve(*w1Decoder, *QueueManager, func(metadata.Metadata) *meta
 
 func (*dsSplit) apply(d *w1Decoder, qm *QueueManager) { qm.StoreMetadata(d.meta) }
 
-func dsDecodedRefs(d *w1Decoder) []chunks.HeadSeriesRef {
-	refs := make([]chunks.HeadSeriesRef, 0, len(d.meta))
+// dsDecodedRefs appends the refs of d's entries to dst.
+func dsDecodedRefs(d *w1Decoder, dst []chunks.HeadSeriesRef) []chunks.HeadSeriesRef {
 	for _, m := range d.meta {
-		refs = append(refs, m.Ref)
+		dst = append(dst, m.Ref)
 	}
-	return refs
+	return dst
 }
 
 // dsModelMismatch checks that every series holds an object of its own, and
