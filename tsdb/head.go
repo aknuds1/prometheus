@@ -2816,15 +2816,16 @@ type memSeries struct {
 	// been explicitly enabled in TSDB.
 	shardHash uint64
 
-	// Everything after here should only be accessed with the lock held.
+	// Fields below require the lock unless documented otherwise.
 	sync.Mutex
 
 	lset labels.Labels // Locking required with -tags dedupelabels, not otherwise.
 
 	// Lazily allocated after either metadata path commits state for this series.
-	// The series lock protects this pointer and its contents, except during
-	// legacy WAL replay, which exclusively owns metadata until initialization completes.
-	metadata *memSeriesMetadata
+	// The pointer is atomic so native lookups can read it under the publication
+	// barrier. Writers hold the series lock; legacy fields require that lock too,
+	// except during legacy WAL replay, which exclusively owns metadata.
+	metadata atomic.Pointer[memSeriesMetadata]
 
 	// Immutable chunks on disk that have not yet gone into a block, in order of ascending time stamps.
 	// When compaction runs, chunks get moved into a block and all pointers are shifted like so:
@@ -2880,17 +2881,20 @@ type memSeriesMetadata struct {
 }
 
 func (s *memSeries) ensureMetadataLocked() *memSeriesMetadata {
-	if s.metadata == nil {
-		s.metadata = &memSeriesMetadata{}
+	m := s.metadata.Load()
+	if m == nil {
+		m = &memSeriesMetadata{}
+		s.metadata.Store(m)
 	}
-	return s.metadata
+	return m
 }
 
 func (s *memSeries) legacyMetadataLocked() *metadata.Metadata {
-	if s.metadata == nil {
+	m := s.metadata.Load()
+	if m == nil {
 		return nil
 	}
-	return s.metadata.legacy
+	return m.legacy
 }
 
 func (s *memSeries) setLegacyMetadataLocked(m *metadata.Metadata) {
@@ -2898,10 +2902,11 @@ func (s *memSeries) setLegacyMetadataLocked(m *metadata.Metadata) {
 }
 
 func (s *memSeries) nativeMetadataLocked() *nativeSeriesMetadata {
-	if s.metadata == nil || s.metadata.native.metadata == nil {
+	m := s.metadata.Load()
+	if m == nil || m.native.metadata == nil {
 		return nil
 	}
-	return &s.metadata.native
+	return &m.native
 }
 
 func (s *memSeries) setNativeMetadataLocked(m *metadata.Metadata, effectiveFrom int64) {

@@ -382,7 +382,7 @@ func BenchmarkHeadSeriesWithoutMetadataRetainedHeap(b *testing.B) {
 				for _, i := range []int{0, numSeries - 1} {
 					series := h.series.getByID(chunks.HeadSeriesRef(refs[i]))
 					series.Lock()
-					state := series.metadata
+					state := series.metadata.Load()
 					series.Unlock()
 					if state != nil {
 						b.Fatalf("untouched series %d allocated metadata state", refs[i])

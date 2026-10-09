@@ -678,6 +678,11 @@ func TestNativeMetricMetadataStoreCapsVersions(t *testing.T) {
 }
 
 func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
+	t.Run("atomic pointer has no size overhead", func(t *testing.T) {
+		var series memSeries
+		require.Equal(t, unsafe.Sizeof((*memSeriesMetadata)(nil)), unsafe.Sizeof(series.metadata))
+	})
+
 	meta := metadata.Metadata{Type: model.MetricTypeCounter, Unit: "requests", Help: "requests"}
 	for _, tc := range []struct {
 		name   string
@@ -701,13 +706,13 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 			require.NoError(t, err)
 			series := head.series.getByID(chunks.HeadSeriesRef(ref))
 			series.Lock()
-			hasSidecar := series.metadata != nil
+			hasSidecar := series.metadata.Load() != nil
 			series.Unlock()
 			require.False(t, hasSidecar, "uncommitted metadata must not allocate the sidecar")
 			require.NoError(t, app.Commit())
 
 			series.Lock()
-			hasSidecar = series.metadata != nil
+			hasSidecar = series.metadata.Load() != nil
 			hasLegacy := series.legacyMetadataLocked() != nil
 			hasNative := series.nativeMetadataLocked() != nil
 			series.Unlock()
@@ -730,7 +735,7 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 		series := head.series.getByID(chunks.HeadSeriesRef(ref))
 		require.NoError(t, app.Rollback())
 		series.Lock()
-		hasSidecar := series.metadata != nil
+		hasSidecar := series.metadata.Load() != nil
 		series.Unlock()
 		require.False(t, hasSidecar)
 
@@ -740,7 +745,7 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 		require.NoError(t, app.Commit())
 		series = head.series.getByID(chunks.HeadSeriesRef(ref))
 		series.Lock()
-		hasSidecar = series.metadata != nil
+		hasSidecar = series.metadata.Load() != nil
 		series.Unlock()
 		require.False(t, hasSidecar)
 	})
@@ -764,7 +769,7 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 		require.NoError(t, app.Rollback())
 		series := head.series.getByID(chunks.HeadSeriesRef(ref))
 		series.Lock()
-		hasSidecar := series.metadata != nil
+		hasSidecar := series.metadata.Load() != nil
 		series.Unlock()
 		require.False(t, hasSidecar)
 	})
@@ -782,7 +787,7 @@ func TestHeadAppenderV2MetadataSidecar(t *testing.T) {
 		require.NoError(t, wal.Close())
 		require.Error(t, app.Commit())
 		series.Lock()
-		hasSidecar := series.metadata != nil
+		hasSidecar := series.metadata.Load() != nil
 		series.Unlock()
 		require.False(t, hasSidecar)
 	})
@@ -853,7 +858,7 @@ func TestHeadMetadataWALReplayPopulatesOnlyLegacySidecarState(t *testing.T) {
 						series := reopened.head.series.getByHash(lset.Hash(), lset)
 						require.NotNil(t, series)
 						series.Lock()
-						hasSidecar := series.metadata != nil
+						hasSidecar := series.metadata.Load() != nil
 						series.Unlock()
 						require.Equal(t, i < numMetadataSeries, hasSidecar)
 						if i < numMetadataSeries {
@@ -1197,7 +1202,7 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 
 		series := head.series.getByID(chunks.HeadSeriesRef(ref))
 		series.Lock()
-		first := series.metadata
+		first := series.metadata.Load()
 		series.Unlock()
 		require.NotNil(t, first)
 
@@ -1212,7 +1217,7 @@ func TestHeadAppenderV2NativeMetricMetadataTransactions(t *testing.T) {
 			require.NoError(t, app.Commit())
 
 			series.Lock()
-			same := series.metadata
+			same := series.metadata.Load()
 			series.Unlock()
 			require.Same(t, first, same)
 		}

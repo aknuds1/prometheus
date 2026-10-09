@@ -16,10 +16,12 @@ package tsdb
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"unique"
 
 	"go.uber.org/atomic"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
@@ -29,8 +31,9 @@ import (
 )
 
 const (
-	nativeMetricMetadataStripes     = 256
-	maxNativeMetricMetadataVersions = 5
+	nativeMetricMetadataStripes            = 256
+	maxNativeMetricMetadataVersions        = 5
+	nativeMetricMetadataPublicationPermits = math.MaxInt64
 )
 
 // ErrNativeMetadataDisabled is returned when native metadata storage is not enabled.
@@ -74,7 +77,8 @@ type nativeMetricMetadataStripe struct {
 
 // nativeSeriesMetadata caches committed metadata for append-time comparisons.
 // It can lag the history store until publication. The series lock protects the
-// cache; its immutable pointee is shared within the publishing transaction.
+// cache; forwarding may also read it while holding the publication barrier.
+// Its immutable pointee is shared within the publishing transaction.
 type nativeSeriesMetadata struct {
 	metadata      *metadata.Metadata
 	effectiveFrom int64
@@ -92,10 +96,14 @@ type nativeMetricMetadataStore struct {
 
 	stripes      [nativeMetricMetadataStripes]nativeMetricMetadataStripe
 	appenderPool sync.Pool
+	// Commits hold one permit from before WAL logging through cache publication.
+	// Senders acquire all permits for a bounded lookup batch. FIFO acquisition
+	// prevents a steady stream of commits from starving senders.
+	publication *semaphore.Weighted
 }
 
 func newNativeMetricMetadataStore() *nativeMetricMetadataStore {
-	s := &nativeMetricMetadataStore{}
+	s := &nativeMetricMetadataStore{publication: semaphore.NewWeighted(nativeMetricMetadataPublicationPermits)}
 	for i := range s.stripes {
 		s.stripes[i].histories = make(map[chunks.HeadSeriesRef]nativeMetricMetadataHistory)
 	}

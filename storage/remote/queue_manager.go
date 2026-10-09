@@ -45,6 +45,7 @@ import (
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	"github.com/prometheus/prometheus/schema"
 	"github.com/prometheus/prometheus/scrape"
+	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/tsdb/wlog"
@@ -462,6 +463,10 @@ type QueueManager struct {
 	metrics              *queueManagerMetrics
 	interner             *pool
 	highestRecvTimestamp *maxTimestamp
+
+	metadataReader  storage.NativeMetricMetadataReader
+	metadataContext context.Context
+	cancelMetadata  context.CancelFunc
 }
 
 // NewQueueManager builds a new QueueManager and starts a new
@@ -491,6 +496,7 @@ func NewQueueManager(
 	protoMsg remoteapi.WriteMessageType,
 	recordBuf *record.BuffersPool,
 	failedRequestLogging bool,
+	metadataReader storage.NativeMetricMetadataReader,
 ) *QueueManager {
 	if logger == nil {
 		logger = promslog.NewNopLogger()
@@ -540,15 +546,17 @@ func NewQueueManager(
 	}
 
 	walMetadata := t.protoMsg != remoteapi.WriteV1MessageType
+	if walMetadata && metadataReader != nil {
+		t.metadataReader = metadataReader
+		t.metadataContext, t.cancelMetadata = context.WithCancel(context.Background())
+	}
 
 	t.watcher = wlog.NewWatcher(watcherMetrics, readerMetrics, logger, client.Name(), t, dir, enableExemplarRemoteWrite, enableNativeHistogramRemoteWrite, walMetadata, recordBuf)
 
-	// The current MetadataWatcher implementation is mutually exclusive
-	// with the new approach, which stores metadata as WAL records and
-	// ships them alongside series. If both mechanisms are set, the new one
-	// takes precedence by implicitly disabling the older one.
+	// MetadataWatcher sends separate metric-family metadata for RW1. RW2
+	// instead includes per-series metadata from native storage or WAL records.
 	if t.mcfg.Send && t.protoMsg != remoteapi.WriteV1MessageType {
-		logger.Warn("usage of 'metadata_config.send' is redundant when using remote write v2 (or higher) as metadata will always be gathered from the WAL and included for every series within each write request")
+		logger.Warn("usage of 'metadata_config.send' is redundant when using remote write v2 (or higher) as available metadata from native storage or the WAL is included with series")
 		t.mcfg.Send = false
 	}
 
@@ -728,6 +736,8 @@ func isV2TimeSeriesOldFilter(metrics *queueManagerMetrics, baseTime time.Time, s
 // Append queues a sample to be sent to the remote storage. Blocks until all samples are
 // enqueued on their shards or a shutdown signal is received.
 func (t *QueueManager) Append(samples []record.RefSample) bool {
+	batch := t.getNativeMetadataBatch()
+	defer batch.release()
 	currentTime := time.Now()
 outer:
 	for _, s := range samples {
@@ -752,6 +762,16 @@ outer:
 		// See https://github.com/prometheus/prometheus/issues/14405
 		meta := t.seriesMetadata[s.Ref]
 		t.seriesMtx.Unlock()
+		if batch != nil {
+			batch.series[batch.count] = timeSeries{
+				seriesLabels: lbls, metadata: meta, startTimestamp: s.ST,
+				timestamp: s.T, value: s.V, sType: tSample,
+			}
+			if !batch.append(t, s.Ref, model.Duration(5*time.Millisecond)) {
+				return false
+			}
+			continue
+		}
 		// Start with a very small backoff. This should not be t.cfg.MinBackoff
 		// as it can happen without errors, and we want to pickup work after
 		// filling a queue/resharding as quickly as possible.
@@ -764,12 +784,8 @@ outer:
 			default:
 			}
 			if t.shards.enqueue(s.Ref, timeSeries{
-				seriesLabels:   lbls,
-				metadata:       meta,
-				startTimestamp: s.ST,
-				timestamp:      s.T,
-				value:          s.V,
-				sType:          tSample,
+				seriesLabels: lbls, metadata: meta, startTimestamp: s.ST,
+				timestamp: s.T, value: s.V, sType: tSample,
 			}) {
 				continue outer
 			}
@@ -784,13 +800,15 @@ outer:
 			}
 		}
 	}
-	return true
+	return batch.flush(t, model.Duration(5*time.Millisecond))
 }
 
 func (t *QueueManager) AppendExemplars(exemplars []record.RefExemplar) bool {
 	if !t.sendExemplars {
 		return true
 	}
+	batch := t.getNativeMetadataBatch()
+	defer batch.release()
 	currentTime := time.Now()
 outer:
 	for _, e := range exemplars {
@@ -814,6 +832,16 @@ outer:
 		}
 		meta := t.seriesMetadata[e.Ref]
 		t.seriesMtx.Unlock()
+		if batch != nil {
+			batch.series[batch.count] = timeSeries{
+				seriesLabels: lbls, metadata: meta, timestamp: e.T, value: e.V,
+				exemplarLabels: e.Labels, sType: tExemplar,
+			}
+			if !batch.append(t, e.Ref, t.cfg.MinBackoff) {
+				return false
+			}
+			continue
+		}
 		// This will only loop if the queues are being resharded.
 		backoff := t.cfg.MinBackoff
 		for {
@@ -823,12 +851,8 @@ outer:
 			default:
 			}
 			if t.shards.enqueue(e.Ref, timeSeries{
-				seriesLabels:   lbls,
-				metadata:       meta,
-				timestamp:      e.T,
-				value:          e.V,
-				exemplarLabels: e.Labels,
-				sType:          tExemplar,
+				seriesLabels: lbls, metadata: meta, timestamp: e.T, value: e.V,
+				exemplarLabels: e.Labels, sType: tExemplar,
 			}) {
 				continue outer
 			}
@@ -841,13 +865,15 @@ outer:
 			}
 		}
 	}
-	return true
+	return batch.flush(t, t.cfg.MinBackoff)
 }
 
 func (t *QueueManager) AppendHistograms(histograms []record.RefHistogramSample) bool {
 	if !t.sendNativeHistograms {
 		return true
 	}
+	batch := t.getNativeMetadataBatch()
+	defer batch.release()
 	currentTime := time.Now()
 outer:
 	for _, h := range histograms {
@@ -876,6 +902,16 @@ outer:
 		}
 		meta := t.seriesMetadata[h.Ref]
 		t.seriesMtx.Unlock()
+		if batch != nil {
+			batch.series[batch.count] = timeSeries{
+				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
+				timestamp: h.T, histogram: h.H, sType: tHistogram,
+			}
+			if !batch.append(t, h.Ref, model.Duration(5*time.Millisecond)) {
+				return false
+			}
+			continue
+		}
 
 		backoff := model.Duration(5 * time.Millisecond)
 		for {
@@ -885,12 +921,8 @@ outer:
 			default:
 			}
 			if t.shards.enqueue(h.Ref, timeSeries{
-				seriesLabels:   lbls,
-				metadata:       meta,
-				startTimestamp: h.ST,
-				timestamp:      h.T,
-				histogram:      h.H,
-				sType:          tHistogram,
+				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
+				timestamp: h.T, histogram: h.H, sType: tHistogram,
 			}) {
 				continue outer
 			}
@@ -903,13 +935,15 @@ outer:
 			}
 		}
 	}
-	return true
+	return batch.flush(t, model.Duration(5*time.Millisecond))
 }
 
 func (t *QueueManager) AppendFloatHistograms(floatHistograms []record.RefFloatHistogramSample) bool {
 	if !t.sendNativeHistograms {
 		return true
 	}
+	batch := t.getNativeMetadataBatch()
+	defer batch.release()
 	currentTime := time.Now()
 outer:
 	for _, h := range floatHistograms {
@@ -938,6 +972,16 @@ outer:
 		}
 		meta := t.seriesMetadata[h.Ref]
 		t.seriesMtx.Unlock()
+		if batch != nil {
+			batch.series[batch.count] = timeSeries{
+				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
+				timestamp: h.T, floatHistogram: h.FH, sType: tFloatHistogram,
+			}
+			if !batch.append(t, h.Ref, model.Duration(5*time.Millisecond)) {
+				return false
+			}
+			continue
+		}
 
 		backoff := model.Duration(5 * time.Millisecond)
 		for {
@@ -947,12 +991,8 @@ outer:
 			default:
 			}
 			if t.shards.enqueue(h.Ref, timeSeries{
-				seriesLabels:   lbls,
-				metadata:       meta,
-				startTimestamp: h.ST,
-				timestamp:      h.T,
-				floatHistogram: h.FH,
-				sType:          tFloatHistogram,
+				seriesLabels: lbls, metadata: meta, startTimestamp: h.ST,
+				timestamp: h.T, floatHistogram: h.FH, sType: tFloatHistogram,
 			}) {
 				continue outer
 			}
@@ -965,7 +1005,7 @@ outer:
 			}
 		}
 	}
-	return true
+	return batch.flush(t, model.Duration(5*time.Millisecond))
 }
 
 // Start the queue manager sending samples to the remote storage.
@@ -997,6 +1037,9 @@ func (t *QueueManager) Stop() {
 	defer t.logger.Info("Remote storage stopped.")
 
 	close(t.quit)
+	if t.cancelMetadata != nil {
+		t.cancelMetadata()
+	}
 	// Wait for all QueueManager routines to end before stopping shards, metadata watcher, and WAL watcher. This
 	// is to ensure we don't end up executing a reshard and shards.stop() at the same time, which
 	// causes a closed channel panic.

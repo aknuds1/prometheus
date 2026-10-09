@@ -59,6 +59,26 @@ var (
 // their own reference types.
 type SeriesRef uint64
 
+// NativeMetricMetadataLookup contains a Head series reference, a timestamp in
+// milliseconds, and the metadata found at that timestamp. Metadata is nil on a miss.
+type NativeMetricMetadataLookup struct {
+	Ref       SeriesRef
+	Timestamp int64
+	Metadata  *metadata.Metadata
+}
+
+// NativeMetricMetadataReader looks up retained, committed per-series metadata.
+// Implementations must support concurrent calls, overwrite every result, and not
+// retain lookups. Returned metadata is immutable and may outlive subsequent calls
+// and series deletion. Results need not form an atomic snapshot across series.
+type NativeMetricMetadataReader interface {
+	// LookupNativeMetricMetadata selects the latest retained version at or before
+	// each timestamp. Unavailable history produces a miss, never a newer version.
+	// On error, callers must discard all results. Cancellation must interrupt waits
+	// for metadata publication; lookups must not wait for new observations to arrive.
+	LookupNativeMetricMetadata(ctx context.Context, lookups []NativeMetricMetadataLookup) error
+}
+
 // Appendable allows creating Appender.
 //
 // WARNING(bwplotka): Switch to AppendableV2 is in progress (https://github.com/prometheus/prometheus/issues/17632).

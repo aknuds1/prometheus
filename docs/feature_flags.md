@@ -166,10 +166,29 @@ When enabled, Prometheus ingests metric type, unit, and help from scrapes, OTLP,
 and Remote Write 2.0 as versioned metadata attached to each series. The
 metadata is exposed by the experimental `/api/v1/series/metadata` endpoint.
 
+Remote Write 2.0 also sends this metadata with samples, native histograms, and
+exemplars. At enqueue time, the sender selects the newest retained version at
+or before the sample or exemplar timestamp, using the original series reference
+before write relabeling. Once queued, metadata is unchanged by later observations
+or retries. Type and unit labels still take precedence when that feature is enabled.
+
+This does not require `metadata-wal-records`. If native history is unavailable,
+the sender falls back to legacy WAL metadata when present, otherwise it sends
+unspecified metadata. This includes timestamps before the first retained version,
+such as synthetic start-timestamp zero samples and older exemplars. Receivers may
+reject unspecified metric types. Native forwarding is supported only in server
+mode, and `metadata_config.send` does not control Remote Write 2.0 metadata.
+
 This prototype stores metadata only in the Head's memory. It is not written to
 the WAL, checkpoints, snapshots, or blocks, so it is lost on restart and when
 the corresponding Head series is removed. Remote Write 1.0 does not populate
 this store. At most 5 versions are retained per series.
+
+Consequently, native forwarding is best effort: it cannot guarantee metadata for
+WAL backlog after a restart, series removal, or history eviction. It uses retained
+Head history, not an exact record of the metadata originally supplied with every
+sample. Keeping legacy metadata WAL records enabled preserves the existing fallback,
+but does not make native history persistent or the fallback timestamp-aware.
 
 The store costs Head memory per series, along two axes. For example, retained-heap
 benchmarks on Go 1.27, darwin/arm64, measured roughly 100 extra bytes per series
