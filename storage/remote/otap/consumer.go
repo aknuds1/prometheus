@@ -29,6 +29,8 @@ import (
 
 	colarspb "github.com/open-telemetry/otel-arrow/go/api/experimental/arrow/v1"
 	"github.com/open-telemetry/otel-arrow/go/pkg/otel/arrow_record"
+	metricsotlp "github.com/open-telemetry/otel-arrow/go/pkg/otel/metrics/otlp"
+	"github.com/open-telemetry/otel-arrow/go/pkg/record_message"
 	"go.opentelemetry.io/collector/consumer"
 )
 
@@ -52,6 +54,23 @@ type Option func(*options)
 
 type options struct {
 	memoryLimit uint64
+	recordSink  RecordSink
+}
+
+// RecordSink receives the Arrow records of a decoded batch, before they are
+// converted to OTLP. It exists so that a columnar consumer can ingest the
+// records directly, without a second decode and without the row-oriented
+// round trip.
+type RecordSink interface {
+	// ConsumeRecords is called with the records of one batch. The records are
+	// owned by the caller and released when the call returns, so implementations
+	// must not retain them or their child arrays.
+	ConsumeRecords(ctx context.Context, records []*record_message.RecordMessage) error
+}
+
+// WithRecordSink adds a sink receiving the Arrow records of every batch.
+func WithRecordSink(sink RecordSink) Option {
+	return func(o *options) { o.recordSink = sink }
 }
 
 // WithMemoryLimit sets the Arrow memory limit for decoding a stream, in bytes.
@@ -74,6 +93,7 @@ func WithMemoryLimit(bytes int64) Option {
 // sequentially, which is what the OTAP bidirectional gRPC streams require anyway.
 type StreamConsumer struct {
 	consumer consumer.Metrics
+	records  RecordSink
 
 	mtx     sync.Mutex
 	decoder *arrow_record.Consumer
@@ -89,6 +109,7 @@ func NewStreamConsumer(c consumer.Metrics, opts ...Option) *StreamConsumer {
 
 	return &StreamConsumer{
 		consumer: c,
+		records:  o.recordSink,
 		decoder:  arrow_record.NewConsumer(arrow_record.WithMemoryLimit(o.memoryLimit)),
 	}
 }
@@ -110,7 +131,7 @@ func (s *StreamConsumer) ConsumeBatch(ctx context.Context, batch *colarspb.Batch
 		return fmt.Errorf("%w: nil batch", ErrInvalidBatch)
 	}
 
-	metrics, err := s.decoder.MetricsFrom(batch)
+	records, err := s.decoder.Consume(batch)
 	if err != nil {
 		if errors.Is(err, arrow_record.ErrConsumerMemoryLimit) {
 			return fmt.Errorf("%w: %w", ErrMemoryLimit, err)
@@ -118,15 +139,44 @@ func (s *StreamConsumer) ConsumeBatch(ctx context.Context, batch *colarspb.Batch
 		return fmt.Errorf("%w: %w", ErrInvalidBatch, err)
 	}
 
-	// MetricsFrom returns at most one entry. An empty batch decodes into one empty
-	// metrics object, which appends nothing.
-	for _, md := range metrics {
-		if err := s.consumer.ConsumeMetrics(ctx, md); err != nil {
-			return fmt.Errorf("appending decoded OTAP metrics: %w", err)
+	// The record sink runs first, because converting the records to OTLP releases
+	// them. A columnar sink therefore has to be cheap or it is on the critical path
+	// of both consumers, which is exactly what the ingestion comparison measures.
+	if s.records != nil {
+		if err := s.records.ConsumeRecords(ctx, records); err != nil {
+			releaseRecords(records)
+			return fmt.Errorf("consuming OTAP records: %w", err)
 		}
 	}
 
+	if s.consumer == nil {
+		releaseRecords(records)
+		return nil
+	}
+
+	// RelatedDataFrom takes ownership of the records and releases them.
+	relatedData, metricsRecord, err := metricsotlp.RelatedDataFrom(records)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidBatch, err)
+	}
+	if metricsRecord == nil {
+		return nil
+	}
+	md, err := metricsotlp.MetricsFrom(metricsRecord.Record(), relatedData)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidBatch, err)
+	}
+	if err := s.consumer.ConsumeMetrics(ctx, md); err != nil {
+		return fmt.Errorf("appending decoded OTAP metrics: %w", err)
+	}
 	return nil
+}
+
+// releaseRecords releases the Arrow records of a batch.
+func releaseRecords(records []*record_message.RecordMessage) {
+	for _, record := range records {
+		record.Record().Release()
+	}
 }
 
 // Close releases the resources held by the decoder. The StreamConsumer must not

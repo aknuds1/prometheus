@@ -33,6 +33,11 @@ type ReceiverOptions struct {
 	// MemoryLimit is the Arrow memory limit per stream, in bytes. Zero selects
 	// [DefaultMemoryLimit].
 	MemoryLimit int64
+
+	// RecordSink, if set, receives the Arrow records of every batch in addition to
+	// the OTLP consumer. It lets a columnar consumer ingest a batch without a
+	// second decode.
+	RecordSink RecordSink
 }
 
 // Receiver serves the OTAP metrics gRPC service.
@@ -96,7 +101,11 @@ func (r *Receiver) ArrowMetrics(stream colarspb.ArrowMetricsService_ArrowMetrics
 	streams.Inc()
 	defer streams.Dec()
 
-	dec := NewStreamConsumer(r.consumer, WithMemoryLimit(r.opts.MemoryLimit))
+	opts := []Option{WithMemoryLimit(r.opts.MemoryLimit)}
+	if r.opts.RecordSink != nil {
+		opts = append(opts, WithRecordSink(r.opts.RecordSink))
+	}
+	dec := NewStreamConsumer(r.consumer, opts...)
 	defer func() {
 		if err := dec.Close(); err != nil {
 			r.logger.Warn("Failed to close OTAP stream decoder", "err", err)

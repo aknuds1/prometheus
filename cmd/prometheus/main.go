@@ -1332,6 +1332,30 @@ func main() {
 	}
 
 	var (
+		columnarStorage  *columnar.Storage
+		columnarServer   *http.Server
+		columnarListener net.Listener
+	)
+	if cfg.enableColumnarPrototype {
+		columnarDir := filepath.Join(localStoragePath, "columnar")
+		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{})
+		if err != nil {
+			logger.Error("Unable to open the experimental columnar storage", "dir", columnarDir, "err", err)
+			os.Exit(1)
+		}
+
+		mux := http.NewServeMux()
+		mux.Handle("/arrow", columnar.NewArrowHandler(columnarStorage, logger.With("component", "columnar"), columnar.ArrowOptions{}))
+
+		columnarListener, err = net.Listen("tcp", cfg.columnarAddress)
+		if err != nil {
+			logger.Error("Unable to start the experimental columnar listener", "address", cfg.columnarAddress, "err", err)
+			os.Exit(1)
+		}
+		columnarServer = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	}
+
+	var (
 		otapListener net.Listener
 		otapServer   *grpc.Server
 	)
@@ -1374,32 +1398,15 @@ func main() {
 					EnableTypeAndUnitLabels: cfg.scrape.EnableTypeAndUnitLabels,
 				},
 			),
-			otap.ServerOptions{},
+			otap.ServerOptions{
+				ReceiverOptions: otap.ReceiverOptions{
+					// When the columnar prototype is on, the same decode feeds it as
+					// well, so the row-oriented path and the columnar path can be
+					// compared on identical input.
+					RecordSink: columnarRecordSink(columnarStorage, logger),
+				},
+			},
 		)
-	}
-
-	var (
-		columnarStorage  *columnar.Storage
-		columnarServer   *http.Server
-		columnarListener net.Listener
-	)
-	if cfg.enableColumnarPrototype {
-		columnarDir := filepath.Join(localStoragePath, "columnar")
-		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{})
-		if err != nil {
-			logger.Error("Unable to open the experimental columnar storage", "dir", columnarDir, "err", err)
-			os.Exit(1)
-		}
-
-		mux := http.NewServeMux()
-		mux.Handle("/arrow", columnar.NewArrowHandler(columnarStorage, logger.With("component", "columnar"), columnar.ArrowOptions{}))
-
-		columnarListener, err = net.Listen("tcp", cfg.columnarAddress)
-		if err != nil {
-			logger.Error("Unable to start the experimental columnar listener", "address", cfg.columnarAddress, "err", err)
-			os.Exit(1)
-		}
-		columnarServer = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	}
 
 	var g run.Group
@@ -1847,6 +1854,15 @@ func main() {
 		}
 	}()
 	logger.Info("See you next time!")
+}
+
+// columnarRecordSink returns the OTAP record sink for the columnar prototype, or
+// nil when the prototype is disabled.
+func columnarRecordSink(storage *columnar.Storage, logger *slog.Logger) otap.RecordSink {
+	if storage == nil {
+		return nil
+	}
+	return columnar.NewOTAPSink(storage, logger.With("component", "columnar"))
 }
 
 func openDBWithMetrics(dir string, logger *slog.Logger, reg prometheus.Registerer, opts *tsdb.Options, stats *tsdb.DBStats) (*tsdb.DB, error) {
