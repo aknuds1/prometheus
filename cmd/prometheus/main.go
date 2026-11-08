@@ -1346,6 +1346,7 @@ func main() {
 
 		mux := http.NewServeMux()
 		mux.Handle("/arrow", columnar.NewArrowHandler(columnarStorage, logger.With("component", "columnar"), columnar.ArrowOptions{}))
+		mux.Handle("/query_range", columnar.NewQueryHandler(queryEngine, columnarStorage, logger.With("component", "columnar")))
 
 		columnarListener, err = net.Listen("tcp", cfg.columnarAddress)
 		if err != nil {
