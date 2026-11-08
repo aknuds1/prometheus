@@ -110,15 +110,27 @@ func (*blockQuerier) LabelNames(context.Context, *storage.LabelHints, ...*labels
 
 func (*blockQuerier) Close() error { return nil }
 
-func (q *blockQuerier) Select(ctx context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-	// Every row group is read. The block format allows skipping row groups, and a
-	// selector that narrows to a few series should, but that optimisation is not
-	// implemented yet: this reads the whole block and filters.
-	series, err := q.block.Series(ctx)
+func (q *blockQuerier) Select(ctx context.Context, _ bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
+	mint, maxt := relevantRange(q.mint, q.maxt, hints)
+	series, err := q.block.Select(ctx, mint, maxt, [][]*labels.Matcher{matchers}, 0)
 	if err != nil {
 		return storage.ErrSeriesSet(err)
 	}
-	return selectFromSeries(series, q.mint, q.maxt, sortSeries, hints, matchers)
+	return &seriesSet{series: series}
+}
+
+// relevantRange applies the hint bounds to a querier range.
+func relevantRange(mint, maxt int64, hints *storage.SelectHints) (int64, int64) {
+	if hints == nil {
+		return mint, maxt
+	}
+	if hints.Start > mint {
+		mint = hints.Start
+	}
+	if hints.End < maxt {
+		maxt = hints.End
+	}
+	return mint, maxt
 }
 
 // selectFromSeries applies matchers and the time range to a set of series.
@@ -175,25 +187,28 @@ func trimSeries(s Series, mint, maxt int64) Series {
 		return s
 	}
 	return Series{
-		Labels:     s.Labels,
-		Timestamps: s.Timestamps[from:to],
-		Kinds:      s.Kinds[from:to],
-		Values:     s.Values[from:to],
-		Histograms: s.Histograms[from:to],
+		Labels:          s.Labels,
+		Timestamps:      s.Timestamps[from:to],
+		StartTimestamps: s.StartTimestamps[from:to],
+		Kinds:           s.Kinds[from:to],
+		Values:          s.Values[from:to],
+		Histograms:      s.Histograms[from:to],
 	}
 }
 
 // headToSeries converts a buffered series to the block representation.
 func headToSeries(hs *headSeries) Series {
 	s := Series{
-		Labels:     hs.labels,
-		Timestamps: make([]int64, len(hs.samples)),
-		Kinds:      make([]SampleKind, len(hs.samples)),
-		Values:     make([]float64, len(hs.samples)),
-		Histograms: make([][]byte, len(hs.samples)),
+		Labels:          hs.labels,
+		Timestamps:      make([]int64, len(hs.samples)),
+		StartTimestamps: make([]int64, len(hs.samples)),
+		Kinds:           make([]SampleKind, len(hs.samples)),
+		Values:          make([]float64, len(hs.samples)),
+		Histograms:      make([][]byte, len(hs.samples)),
 	}
 	for i, smpl := range hs.samples {
 		s.Timestamps[i] = smpl.t
+		s.StartTimestamps[i] = smpl.st
 		s.Kinds[i] = smpl.kind
 		s.Values[i] = smpl.v
 		s.Histograms[i] = smpl.hist
@@ -315,8 +330,13 @@ func (it *sampleIterator) AtFloatHistogram(reuse *histogram.FloatHistogram) (int
 
 func (it *sampleIterator) AtT() int64 { return it.series.Timestamps[it.pos] }
 
-// AtST reports no start timestamp: the format does not store them.
-func (*sampleIterator) AtST() int64 { return 0 }
+// AtST returns the start timestamp of the current sample, or 0 when unknown.
+func (it *sampleIterator) AtST() int64 {
+	if it.pos < 0 || it.pos >= len(it.series.StartTimestamps) {
+		return 0
+	}
+	return it.series.StartTimestamps[it.pos]
+}
 
 func (*sampleIterator) Err() error { return nil }
 

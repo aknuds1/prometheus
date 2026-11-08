@@ -337,22 +337,57 @@ func TestReplayRealCorpus(t *testing.T) {
 	require.NotZero(t, totalSamples, "the corpus must contain samples")
 
 	colDir := t.TempDir()
-	st, err := columnar.NewStorage(colDir, columnar.StorageOptions{FlushSamples: 145_000})
+	st, err := columnar.NewStorage(colDir, columnar.StorageOptions{
+		// One block per ingestion window, flushed explicitly below.
+		FlushSamples: 1 << 40,
+	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, st.Close()) }()
 
 	ingestStart := time.Now()
 	var appended int
+
+	// Ingest in time order, in one-hour windows, flushing a block per window.
+	//
+	// This matters more than it looks. Appending series by series would write blocks
+	// that each hold complete series across months, so every block would overlap
+	// every query window and a three-hour query would decode months of data - a
+	// property of the harness, not of the format. A real ingestion stream advances
+	// in time, so blocks become time slices and a time-bounded query reads only the
+	// slices it needs.
+	var dataMin int64 = math.MaxInt64
 	for _, s := range all {
-		app := st.AppenderV2(t.Context())
-		for i := range s.timestamps {
-			if _, err := app.Append(0, s.labels, 0, s.timestamps[i], s.values[i], nil, nil, storage.AOptions{}); err != nil {
-				t.Fatalf("appending %s at %d: %v", s.labels, s.timestamps[i], err)
-			}
-			appended++
+		if len(s.timestamps) > 0 {
+			dataMin = min(dataMin, s.timestamps[0])
 		}
-		_ = appended
+	}
+
+	const window = int64(6 * 60 * 60 * 1000)
+	cursor := make([]int, len(all))
+	for from := dataMin; from <= maxTime; from += window {
+		to := from + window
+		app := st.AppenderV2(t.Context())
+		var inWindow int
+		for si := range all {
+			s := &all[si]
+			for cursor[si] < len(s.timestamps) && s.timestamps[cursor[si]] < to {
+				i := cursor[si]
+				if s.timestamps[i] >= from {
+					if _, err := app.Append(0, s.labels, 0, s.timestamps[i], s.values[i], nil, nil, storage.AOptions{}); err != nil {
+						t.Fatalf("appending %s at %d: %v", s.labels, s.timestamps[i], err)
+					}
+					appended++
+					inWindow++
+				}
+				cursor[si]++
+			}
+		}
+		if inWindow == 0 {
+			require.NoError(t, app.Rollback())
+			continue
+		}
 		require.NoError(t, app.Commit())
+		require.NoError(t, st.Flush())
 	}
 	ingestElapsed := time.Since(ingestStart)
 
@@ -386,8 +421,8 @@ func TestReplayRealCorpus(t *testing.T) {
 	})
 	// Query the last three hours of the corpus: a step over its whole multi-month
 	// span would be millions of steps and measure the sample limit, not the storage.
-	const window = int64(3 * 60 * 60 * 1000)
-	rangeStart := time.UnixMilli(maxTime - window)
+	const queryWindow = int64(3 * 60 * 60 * 1000)
+	rangeStart := time.UnixMilli(maxTime - queryWindow)
 	rangeEnd := time.UnixMilli(maxTime)
 	t.Logf("querying %s to %s (%s step)", rangeStart.Format(time.RFC3339), rangeEnd.Format(time.RFC3339), "1m")
 	_ = start

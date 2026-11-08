@@ -96,7 +96,9 @@ func (s *Storage) SelectSeries(ctx context.Context, mint, maxt int64, matcherSet
 		if !block.Overlaps(mint, maxt) {
 			continue
 		}
-		series, err := block.Series(ctx)
+		// Select prunes row groups by labels, so a narrow selector does not pay for
+		// the whole block.
+		series, err := block.Select(ctx, mint, maxt, matcherSets, 0)
 		if err != nil {
 			return nil, fmt.Errorf("reading block %s: %w", block.Meta().ULID, err)
 		}
@@ -169,6 +171,7 @@ func mergeSeries(series []Series) []Series {
 func mergeOne(group []Series) Series {
 	type entry struct {
 		t    int64
+		st   int64
 		kind SampleKind
 		v    float64
 		hist []byte
@@ -176,7 +179,7 @@ func mergeOne(group []Series) Series {
 	var entries []entry
 	for _, s := range group {
 		for i := range s.Len() {
-			entries = append(entries, entry{t: s.Timestamps[i], kind: s.Kinds[i], v: s.Values[i], hist: s.Histograms[i]})
+			entries = append(entries, entry{t: s.Timestamps[i], st: s.StartTimestamps[i], kind: s.Kinds[i], v: s.Values[i], hist: s.Histograms[i]})
 		}
 	}
 	slices.SortStableFunc(entries, func(a, b entry) int {
@@ -191,17 +194,19 @@ func mergeOne(group []Series) Series {
 	})
 
 	merged := Series{
-		Labels:     group[0].Labels,
-		Timestamps: make([]int64, 0, len(entries)),
-		Kinds:      make([]SampleKind, 0, len(entries)),
-		Values:     make([]float64, 0, len(entries)),
-		Histograms: make([][]byte, 0, len(entries)),
+		Labels:          group[0].Labels,
+		Timestamps:      make([]int64, 0, len(entries)),
+		StartTimestamps: make([]int64, 0, len(entries)),
+		Kinds:           make([]SampleKind, 0, len(entries)),
+		Values:          make([]float64, 0, len(entries)),
+		Histograms:      make([][]byte, 0, len(entries)),
 	}
 	for i, e := range entries {
 		if i > 0 && e.t == entries[i-1].t {
 			continue
 		}
 		merged.Timestamps = append(merged.Timestamps, e.t)
+		merged.StartTimestamps = append(merged.StartTimestamps, e.st)
 		merged.Kinds = append(merged.Kinds, e.kind)
 		merged.Values = append(merged.Values, e.v)
 		merged.Histograms = append(merged.Histograms, e.hist)

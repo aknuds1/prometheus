@@ -24,6 +24,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/oklog/ulid/v2"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -40,6 +41,10 @@ type Meta struct {
 	NumSeries     int    `json:"num_series"`
 	NumSamples    int    `json:"num_samples"`
 	FormatVersion int    `json:"format_version"`
+	// SeriesPerRowGroup is the row group size the block was written with. A select
+	// needs it to map a matching row to the row group that contains it, so that it
+	// reads only those groups.
+	SeriesPerRowGroup int64 `json:"series_per_row_group"`
 }
 
 // WriteBlock writes a new block directory below dir containing series.
@@ -64,9 +69,10 @@ func WriteBlock(dir string, series []Series, opts WriteOptions) (Meta, error) {
 	slices.SortFunc(series, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
 
 	meta := Meta{
-		ULID:          ulid.Make().String(),
-		FormatVersion: FormatVersion,
-		NumSeries:     len(series),
+		ULID:              ulid.Make().String(),
+		FormatVersion:     FormatVersion,
+		NumSeries:         len(series),
+		SeriesPerRowGroup: opts.MaxSeriesPerRowGroup,
 	}
 	if len(series) > 0 {
 		// An empty block has no meaningful range; leave it zero.
@@ -191,6 +197,34 @@ func (b *Block) Overlaps(mint, maxt int64) bool {
 
 // ErrNoBlocks is returned when a directory contains no blocks.
 var ErrNoBlocks = errors.New("no columnar blocks")
+
+// newRecordReader returns an Arrow record reader over the given row groups and
+// columns. A nil rowGroups selects all of them, and a nil columns selects all
+// columns.
+func (b *Block) newRecordReader(ctx context.Context, rowGroups, columns []int) (pqarrow.RecordReader, *file.Reader, *os.File, error) {
+	f, err := os.Open(blockDataPath(b.dir))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	pf, err := file.NewParquetReader(f)
+	if err != nil {
+		f.Close()
+		return nil, nil, nil, err
+	}
+	reader, err := pqarrow.NewFileReader(pf, pqarrow.ArrowReadProperties{}, b.mem)
+	if err != nil {
+		pf.Close()
+		f.Close()
+		return nil, nil, nil, err
+	}
+	rr, err := reader.GetRecordReader(ctx, columns, rowGroups)
+	if err != nil {
+		pf.Close()
+		f.Close()
+		return nil, nil, nil, err
+	}
+	return rr, pf, f, nil
+}
 
 // ListBlocks returns the blocks in dir, sorted by ULID, which sorts by creation
 // time.
