@@ -168,6 +168,7 @@ var (
 		GlobalConfig: DefaultGlobalConfig,
 		Runtime:      DefaultRuntimeConfig,
 		OTLPConfig:   DefaultOTLPConfig,
+		OTAPConfig:   DefaultOTAPConfig,
 	}
 
 	// DefaultGlobalConfig is the default global configuration.
@@ -277,6 +278,11 @@ var (
 		MaxExemplars: 100000,
 	}
 
+	// DefaultOTAPConfig is the default experimental OTAP receiver configuration.
+	DefaultOTAPConfig = OTAPConfig{
+		ListenAddress: "localhost:4317",
+	}
+
 	// DefaultOTLPConfig is the default OTLP configuration.
 	DefaultOTLPConfig = OTLPConfig{
 		TranslationStrategy: otlptranslator.UnderscoreEscapingWithSuffixes,
@@ -304,6 +310,7 @@ type Config struct {
 	RemoteWriteConfigs []*RemoteWriteConfig `yaml:"remote_write,omitempty"`
 	RemoteReadConfigs  []*RemoteReadConfig  `yaml:"remote_read,omitempty"`
 	OTLPConfig         OTLPConfig           `yaml:"otlp,omitempty"`
+	OTAPConfig         OTAPConfig           `yaml:"otap,omitempty"`
 
 	loaded bool // Certain methods require configuration to use Load validation.
 }
@@ -415,6 +422,12 @@ func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
 	// We have to restore it here.
 	if c.Runtime.isZero() {
 		c.Runtime = DefaultRuntimeConfig
+	}
+
+	// An empty otap section decodes into a zero value without calling
+	// OTAPConfig.UnmarshalYAML, so restore the default address here.
+	if c.OTAPConfig.ListenAddress == "" {
+		c.OTAPConfig = DefaultOTAPConfig
 	}
 
 	// If no storage.tsdb section is present, TSDBConfig is nil and its
@@ -1810,6 +1823,20 @@ func getGoGC() int {
 		}
 	}
 	return DefaultGoGCPercentage
+}
+
+// OTAPConfig is the configuration for the experimental OTAP receiver.
+type OTAPConfig struct {
+	// ListenAddress is the address the OTAP gRPC receiver listens on. It can only
+	// be changed by restarting Prometheus.
+	ListenAddress string `yaml:"listen_address,omitempty"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *OTAPConfig) UnmarshalYAML(unmarshal func(any) error) error {
+	*c = DefaultOTAPConfig
+	type plain OTAPConfig
+	return unmarshal((*plain)(c))
 }
 
 // OTLPConfig is the configuration for writing to the OTLP endpoint.

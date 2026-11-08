@@ -56,6 +56,7 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/automaxprocs/maxprocs"
 	"go.yaml.in/yaml/v2"
+	"google.golang.org/grpc"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog"
 	klogv2 "k8s.io/klog/v2"
@@ -75,6 +76,7 @@ import (
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
+	"github.com/prometheus/prometheus/storage/remote/otap"
 	"github.com/prometheus/prometheus/template"
 	"github.com/prometheus/prometheus/tracing"
 	"github.com/prometheus/prometheus/tsdb"
@@ -495,6 +497,9 @@ func main() {
 
 	a.Flag("web.enable-otlp-receiver", "Enable API endpoint accepting OTLP write requests.").
 		Default("false").BoolVar(&cfg.web.EnableOTLPWriteReceiver)
+
+	a.Flag("web.enable-otap-receiver", fmt.Sprintf("Enable the experimental gRPC endpoint accepting OTAP write requests, listening on the address configured by otap.listen_address (default %q). OTAP support is experimental: the wire format is a draft, and the receiver accepts metrics only, without TLS or authentication.", config.DefaultOTAPConfig.ListenAddress)).
+		Default("false").BoolVar(&cfg.web.EnableOTAPReceiver)
 
 	a.Flag("web.console.templates", "Path to the console template directory, available at /consoles.").
 		Default("consoles").StringVar(&cfg.web.ConsoleTemplatesPath)
@@ -1316,6 +1321,53 @@ func main() {
 		os.Exit(1)
 	}
 
+	var (
+		otapListener net.Listener
+		otapServer   *grpc.Server
+	)
+	if cfg.web.EnableOTAPReceiver {
+		otapListenAddress := cfgFile.OTAPConfig.ListenAddress
+		otapListener, err = net.Listen("tcp", otapListenAddress)
+		if err != nil {
+			logger.Error("Unable to start OTAP listener", "address", otapListenAddress, "err", err)
+			os.Exit(1)
+		}
+
+		// The OTLP translation settings are read per batch, so the OTAP receiver has
+		// to observe config reloads the same way the OTLP receiver does. Only the
+		// listen address is read once, at startup.
+		liveConfig := atomic.NewPointer[config.Config](cfgFile)
+		reloaders = append(reloaders, reloader{
+			name: "otap_receiver",
+			reloader: func(c *config.Config) error {
+				liveConfig.Store(c)
+				if addr := c.OTAPConfig.ListenAddress; addr != otapListenAddress {
+					logger.Warn("Ignoring otap.listen_address change, restart Prometheus to move the OTAP receiver",
+						"running", otapListenAddress, "configured", addr)
+				}
+				return nil
+			},
+		})
+
+		otapServer = otap.NewGRPCServer(
+			logger.With("component", "otap_receiver"),
+			prometheus.DefaultRegisterer,
+			remote.NewMetricsConsumer(
+				logger.With("component", "otap_receiver"),
+				prometheus.DefaultRegisterer,
+				localStorage,
+				func() config.Config { return *liveConfig.Load() },
+				remote.OTLPOptions{
+					ConvertDelta:            cfg.web.ConvertOTLPDelta,
+					NativeDelta:             cfg.web.NativeOTLPDeltaIngestion,
+					LookbackDelta:           time.Duration(cfg.lookbackDelta),
+					EnableTypeAndUnitLabels: cfg.scrape.EnableTypeAndUnitLabels,
+				},
+			),
+			otap.ServerOptions{},
+		)
+	}
+
 	var g run.Group
 	{
 		// Termination handler.
@@ -1678,6 +1730,35 @@ func main() {
 				cancelWeb()
 			},
 		)
+	}
+	{
+		// Experimental OTAP receiver.
+		if otapServer != nil {
+			g.Add(
+				func() error {
+					logger.Info("Starting experimental OTAP receiver", "address", otapListener.Addr().String())
+					if err := otapServer.Serve(otapListener); err != nil {
+						return fmt.Errorf("error serving OTAP receiver: %w", err)
+					}
+					return nil
+				},
+				func(error) {
+					logger.Info("Stopping OTAP receiver...")
+					// GracefulStop waits for all streams to finish, which a client can
+					// delay indefinitely, so bound the wait and drop the rest.
+					done := make(chan struct{})
+					go func() {
+						otapServer.GracefulStop()
+						close(done)
+					}()
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						otapServer.Stop()
+					}
+				},
+			)
+		}
 	}
 	{
 		// Notifier.

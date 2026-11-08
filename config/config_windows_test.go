@@ -21,6 +21,7 @@ var ruleFilesExpectedConf = &Config{
 	GlobalConfig:  DefaultGlobalConfig,
 	Runtime:       DefaultRuntimeConfig,
 	OTLPConfig:    DefaultOTLPConfig,
+	OTAPConfig:    DefaultOTAPConfig,
 	StorageConfig: StorageConfig{TSDBConfig: &TSDBConfig{Retention: &TSDBRetentionConfig{}}},
 	RuleFiles: []string{
 		"testdata\\first.rules",

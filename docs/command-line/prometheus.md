@@ -31,6 +31,7 @@ The Prometheus monitoring server
 | <code class="text-nowrap">--web.enable-remote-write-receiver</code> | Enable API endpoint accepting remote write requests. | `false` |
 | <code class="text-nowrap">--web.remote-write-receiver.accepted-protobuf-messages</code> | List of the remote write protobuf messages to accept when receiving the remote writes. Supported values: prometheus.WriteRequest, io.prometheus.write.v2.Request | `prometheus.WriteRequest` |
 | <code class="text-nowrap">--web.enable-otlp-receiver</code> | Enable API endpoint accepting OTLP write requests. | `false` |
+| <code class="text-nowrap">--web.enable-otap-receiver</code> | Enable the experimental gRPC endpoint accepting OTAP write requests, listening on the address configured by otap.listen_address (default "localhost:4317"). OTAP support is experimental: the wire format is a draft, and the receiver accepts metrics only, without TLS or authentication. | `false` |
 | <code class="text-nowrap">--web.console.templates</code> | Path to the console template directory, available at /consoles. | `consoles` |
 | <code class="text-nowrap">--web.console.libraries</code> | Path to the console library directory. | `console_libraries` |
 | <code class="text-nowrap">--web.page-title</code> | Document title of Prometheus instance. | `Prometheus Time Series Collection and Processing Server` |

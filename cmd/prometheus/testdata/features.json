@@ -17,6 +17,9 @@
     "time_range_labels": true,
     "time_range_series": true
   },
+  "otap_receiver": {
+    "metrics": false
+  },
   "otlp_receiver": {
     "delta_conversion": false,
     "native_delta_ingestion": false
