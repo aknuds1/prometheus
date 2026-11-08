@@ -313,7 +313,7 @@ func TestOTLPWriteHandler(t *testing.T) {
 			handler := NewOTLPWriteHandler(log, prometheus.NewRegistry(), teststorage.NewAppendable(), func() config.Config {
 				return config.Config{OTLPConfig: config.OTLPConfig{TranslationStrategy: otlptranslator.UnderscoreEscapingWithSuffixes}}
 			}, OTLPOptions{})
-			return handler.(*otlpWriteHandler).defaultConsumer.(*rwExporter)
+			return handler.(*otlpWriteHandler).consumer.(*metricsIngestConsumer).plain.(*rwExporter)
 		}
 
 		t.Run("label name collision", func(t *testing.T) {
