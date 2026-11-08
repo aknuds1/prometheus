@@ -75,6 +75,7 @@ import (
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/storage/columnar"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/storage/remote/otap"
 	"github.com/prometheus/prometheus/template"
@@ -209,6 +210,9 @@ type flagConfig struct {
 
 	enableAutoReload   bool
 	autoReloadInterval model.Duration
+
+	enableColumnarPrototype bool
+	columnarAddress         string
 
 	maxprocsEnable          bool
 	memlimitEnable          bool
@@ -358,6 +362,9 @@ func (c *flagConfig) setFeatureListOptions(logger *slog.Logger) error {
 			case "fast-startup":
 				c.tsdb.EnableFastStartup = true
 				logger.Info("Experimental fast startup is enabled.")
+			case "columnar-prototype":
+				c.enableColumnarPrototype = true
+				logger.Warn("Experimental columnar prototype enabled. It is not durable, does not compact, and is not a Prometheus storage backend; do not use it for real data.")
 			case "search-api":
 				c.web.EnableSearch = true
 				logger.Info("Experimental search API enabled.")
@@ -497,6 +504,9 @@ func main() {
 
 	a.Flag("web.enable-otlp-receiver", "Enable API endpoint accepting OTLP write requests.").
 		Default("false").BoolVar(&cfg.web.EnableOTLPWriteReceiver)
+
+	serverOnlyFlag(a, "web.columnar-address", "Address on which the experimental columnar prototype serves its Arrow endpoint (--enable-feature=columnar-prototype).").
+		Default("localhost:9091").StringVar(&cfg.columnarAddress)
 
 	a.Flag("web.enable-otap-receiver", fmt.Sprintf("Enable the experimental gRPC endpoint accepting OTAP write requests, listening on the address configured by otap.listen_address (default %q). OTAP support is experimental: the wire format is a draft, and the receiver accepts metrics only, without TLS or authentication.", config.DefaultOTAPConfig.ListenAddress)).
 		Default("false").BoolVar(&cfg.web.EnableOTAPReceiver)
@@ -671,7 +681,7 @@ func main() {
 	a.Flag("scrape.discovery-reload-interval", "Interval used by scrape manager to throttle target groups updates.").
 		Hidden().Default("5s").SetValue(&cfg.scrape.DiscoveryReloadInterval)
 
-	a.Flag("enable-feature", "Comma separated feature names to enable. Valid options: concurrent-rule-eval, created-timestamp-zero-ingestion, delayed-compaction, exemplar-storage, extra-scrape-metrics, histograms-st-encoding, memory-snapshot-on-shutdown, metadata-wal-records, old-ui, openmetrics2, otlp-deltatocumulative, otlp-native-delta-ingestion, promql-binop-fill-modifiers, promql-delayed-name-removal, promql-experimental-functions, promql-native-histograms-as-classic, promql-per-step-stats, promql-unquoted-utf8-names, query-cost, search-api, st-storage, st-synthesis, type-and-unit-labels, use-start-timestamps, use-uncached-io, xor2-encoding, zstd-scrape. See https://prometheus.io/docs/prometheus/latest/feature_flags/ for more details.").
+	a.Flag("enable-feature", "Comma separated feature names to enable. Valid options: columnar-prototype, concurrent-rule-eval, created-timestamp-zero-ingestion, delayed-compaction, exemplar-storage, extra-scrape-metrics, histograms-st-encoding, memory-snapshot-on-shutdown, metadata-wal-records, old-ui, openmetrics2, otlp-deltatocumulative, otlp-native-delta-ingestion, promql-binop-fill-modifiers, promql-delayed-name-removal, promql-experimental-functions, promql-native-histograms-as-classic, promql-per-step-stats, promql-unquoted-utf8-names, query-cost, search-api, st-storage, st-synthesis, type-and-unit-labels, use-start-timestamps, use-uncached-io, xor2-encoding, zstd-scrape. See https://prometheus.io/docs/prometheus/latest/feature_flags/ for more details.").
 		StringsVar(&cfg.featureList)
 
 	a.Flag("agent", "Run Prometheus in 'Agent mode'.").BoolVar(&agentMode)
@@ -1368,6 +1378,30 @@ func main() {
 		)
 	}
 
+	var (
+		columnarStorage  *columnar.Storage
+		columnarServer   *http.Server
+		columnarListener net.Listener
+	)
+	if cfg.enableColumnarPrototype {
+		columnarDir := filepath.Join(localStoragePath, "columnar")
+		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{})
+		if err != nil {
+			logger.Error("Unable to open the experimental columnar storage", "dir", columnarDir, "err", err)
+			os.Exit(1)
+		}
+
+		mux := http.NewServeMux()
+		mux.Handle("/arrow", columnar.NewArrowHandler(columnarStorage, logger.With("component", "columnar"), columnar.ArrowOptions{}))
+
+		columnarListener, err = net.Listen("tcp", cfg.columnarAddress)
+		if err != nil {
+			logger.Error("Unable to start the experimental columnar listener", "address", cfg.columnarAddress, "err", err)
+			os.Exit(1)
+		}
+		columnarServer = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	}
+
 	var g run.Group
 	{
 		// Termination handler.
@@ -1730,6 +1764,29 @@ func main() {
 				cancelWeb()
 			},
 		)
+	}
+	{
+		// Experimental columnar prototype endpoint.
+		if columnarServer != nil {
+			g.Add(
+				func() error {
+					logger.Info("Starting experimental columnar Arrow endpoint", "address", columnarListener.Addr().String())
+					if err := columnarServer.Serve(columnarListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+						return fmt.Errorf("error serving the columnar endpoint: %w", err)
+					}
+					return nil
+				},
+				func(error) {
+					logger.Info("Stopping columnar endpoint...")
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = columnarServer.Shutdown(shutdownCtx)
+					if columnarStorage != nil {
+						_ = columnarStorage.Close()
+					}
+				},
+			)
+		}
 	}
 	{
 		// Experimental OTAP receiver.

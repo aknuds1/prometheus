@@ -190,6 +190,37 @@ fixes the possible problem with the feature flag.)
 
 It is possible to craft a query that aggregates by `__name__` and puts samples with and without delayed name removal into the same group. In that case, the name is removed from the affected group. Note that this case hardly occurs in queries that fulfill a practical purpose.
 
+## Columnar Prototype
+
+`--enable-feature=columnar-prototype`
+
+> **WARNING:** This is a research prototype, not a storage backend. It is not
+> durable, it does not compact, it has no WAL or crash recovery, and it does not
+> store exemplars or metadata. Do not use it with data you care about.
+
+When enabled, Prometheus writes ingested samples into a columnar block store in
+`<storage.tsdb.path>/columnar` and serves it over an Arrow endpoint on
+`--web.columnar-address` (default `localhost:9091`).
+
+This exists to measure two questions with numbers rather than assertions: whether
+an Arrow-native ingestion path is cheaper than the row-oriented one, and whether
+a columnar store can answer PromQL competitively.
+
+A block is a write-once Parquet file holding one row per series: the label set,
+and the series' timestamps, values and native histograms as parallel lists.
+Adding `?match[]=<selector>&start=<unix-seconds>&end=<unix-seconds>` to the
+`/arrow` path returns an [Arrow IPC](https://arrow.apache.org/docs/format/Columnar.html)
+stream of those rows, which is the [SeriesSource][series-source] shape: the store
+selects series and returns Arrow, and any engine can evaluate queries over it.
+
+Two properties of the format are worth knowing when reading the output.
+Staleness is carried by a per-sample kind column rather than by a NaN value,
+because Arrow and Parquet canonicalise NaN payloads and a stale marker is a
+signalling NaN. And samples may not survive a round trip through Arrow unchanged
+in every case yet; see the conformance notes in `storage/columnar`.
+
+[series-source]: https://github.com/prometheus-community/promql-rs
+
 ## OTLP Delta Conversion
 
 `--enable-feature=otlp-deltatocumulative`

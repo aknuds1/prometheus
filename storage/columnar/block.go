@@ -364,6 +364,18 @@ func readAllSeries(ctx context.Context, path string) ([]Series, error) {
 	return out, nil
 }
 
+// DecodeRecord converts a record batch in the block schema back into series.
+//
+// It is exported because it is also the decoder a consumer of the Arrow endpoint
+// needs: the stream carries exactly this schema.
+func DecodeRecord(record arrow.RecordBatch) ([]Series, error) {
+	var out []Series
+	if err := appendRecordSeries(&out, record); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func appendRecordSeries(out *[]Series, record arrow.RecordBatch) error {
 	labelsCol := record.Column(1).(*array.List)
 	labelsStruct := labelsCol.ListValues().(*array.Struct)
