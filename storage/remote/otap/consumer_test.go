@@ -32,14 +32,16 @@ import (
 
 // recordingConsumer captures the metrics handed to the ingestion consumer.
 type recordingConsumer struct {
-	got  []pmetric.Metrics
-	err  error
-	call int
+	got []pmetric.Metrics
+	err error
+	// failFirst makes only the first ConsumeMetrics call fail.
+	failFirst bool
+	call      int
 }
 
 func (c *recordingConsumer) ConsumeMetrics(_ context.Context, md pmetric.Metrics) error {
 	c.call++
-	if c.err != nil {
+	if c.err != nil && (!c.failFirst || c.call == 1) {
 		return c.err
 	}
 	c.got = append(c.got, md)
