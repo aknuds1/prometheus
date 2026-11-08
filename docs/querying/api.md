@@ -2136,6 +2136,47 @@ To enable native delta ingestion, pass `--enable-feature=otlp-native-delta-inges
 
 The previous `--enable-feature=otlp-deltatocumulative` flag, which converts delta metrics to cumulative metrics using the OpenTelemetry Collector's [deltatocumulative processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/deltatocumulativeprocessor), is deprecated and will be removed in a future major version.
 
+### OTAP Receiver (experimental)
+
+Prometheus can also receive metrics encoded with OTAP, the OpenTelemetry
+Protocol with Apache Arrow, over gRPC.
+
+Enable the receiver by setting `--web.enable-otap-receiver`. It listens on the
+address configured by [`otap.listen_address`](../configuration/configuration.md),
+`localhost:4317` by default, on a dedicated gRPC listener rather than on the web
+listener. Only metrics are accepted; the OTAP logs and traces services are not
+served, and requests for them fail with `UNIMPLEMENTED`.
+
+OTAP is a columnar, losslessly convertible encoding of OTLP. Prometheus decodes
+each batch back into OTLP and feeds the result through the same translation as
+the OTLP receiver, so series, metadata, exemplars, histograms, resource
+attribute promotion, and delta handling are identical to OTLP ingestion. Nothing
+columnar is retained: the benefit is on the wire and in fewer conversions
+upstream, not in storage or query.
+
+Be aware of the following:
+
+- This is experimental. The OTAP specification is a draft and its protobuf
+  package is explicitly subject to change, so the receiver may change or be
+  removed without notice.
+- There is no TLS and no authentication. Bind it accordingly; enabling it does
+  not make the endpoint safe to expose.
+- Batches are acknowledged individually, and acknowledgements may arrive out of
+  order. They report the outcome of decoding and appending, and are **not** a
+  delivery guarantee: Prometheus does not deduplicate, so a client that retries
+  a batch it did not see acknowledged can append duplicate samples.
+- A client must not resend a batch that carried an Arrow schema message on the
+  same stream, because the decoder has already consumed that schema. Retrying
+  means reconnecting the stream.
+- Decoding memory is limited per stream, and the number of streams per
+  connection is bounded, so a client that needs higher throughput should batch
+  more rather than open more streams.
+
+For bandwidth-sensitive deployments, terminating OTAP in an OpenTelemetry
+Collector close to Prometheus and forwarding over OTLP/HTTP is preferable: it
+keeps the stateful OTAP handling out of Prometheus, and it remains the reference
+architecture until a native receiver is shown to be better end to end.
+
 ## Notifications
 
 The following endpoints provide information about active status notifications concerning the Prometheus server itself.
