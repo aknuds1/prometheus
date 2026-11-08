@@ -27,6 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/consumer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -36,7 +37,7 @@ import (
 	"github.com/prometheus/prometheus/storage/remote/otap"
 )
 
-func newTestReceiver(t *testing.T, sink *recordingConsumer, reg *prometheus.Registry, opts otap.ReceiverOptions) (colarspb.ArrowMetricsServiceClient, colarspb.ArrowLogsServiceClient) {
+func newTestReceiver(t *testing.T, sink consumer.Metrics, reg *prometheus.Registry, opts otap.ReceiverOptions) (colarspb.ArrowMetricsServiceClient, colarspb.ArrowLogsServiceClient) {
 	t.Helper()
 
 	if reg == nil {
