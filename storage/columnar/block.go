@@ -43,6 +43,7 @@ const (
 	kindsColumn     = "kinds"
 	valuesColumn    = "values"
 	histogramsCol   = "histograms"
+	startTimesCol   = "start_timestamps"
 	labelNameColumn = "name"
 	labelValueCol   = "value"
 )
@@ -90,6 +91,9 @@ func BlockSchema() *arrow.Schema {
 		{Name: kindsColumn, Type: arrow.ListOf(arrow.PrimitiveTypes.Int8), Nullable: false},
 		{Name: valuesColumn, Type: arrow.ListOf(arrow.PrimitiveTypes.Float64), Nullable: false},
 		{Name: histogramsCol, Type: arrow.ListOf(arrow.BinaryTypes.Binary), Nullable: false},
+		// Start timestamps are sample data, not metadata: PromQL uses them for rate()
+		// over delta series. Zero means unknown, which is how the TSDB models it too.
+		{Name: startTimesCol, Type: arrow.ListOf(arrow.PrimitiveTypes.Int64), Nullable: false},
 	}, nil)
 }
 
@@ -102,7 +106,9 @@ func BlockSchema() *arrow.Schema {
 type Series struct {
 	Labels     labels.Labels
 	Timestamps []int64
-	Kinds      []SampleKind
+	// StartTimestamps is the start timestamp of each sample, or 0 when unknown.
+	StartTimestamps []int64
+	Kinds           []SampleKind
 	// Values holds the float64 value of every sample, 0 for histogram samples.
 	Values []float64
 	// Histograms holds the encoded histogram of every sample, nil for float samples.
@@ -115,11 +121,12 @@ type Series struct {
 func NewFloatSeries(lbls labels.Labels, timestamps []int64, values []float64) Series {
 	kinds := make([]SampleKind, len(timestamps))
 	return Series{
-		Labels:     lbls,
-		Timestamps: timestamps,
-		Kinds:      kinds,
-		Values:     values,
-		Histograms: make([][]byte, len(timestamps)),
+		Labels:          lbls,
+		Timestamps:      timestamps,
+		StartTimestamps: make([]int64, len(timestamps)),
+		Kinds:           kinds,
+		Values:          values,
+		Histograms:      make([][]byte, len(timestamps)),
 	}
 }
 
@@ -161,6 +168,9 @@ func (s Series) Validate() error {
 		return errors.New("series without labels")
 	}
 	n := len(s.Timestamps)
+	if len(s.StartTimestamps) != n {
+		return fmt.Errorf("series %s: %d timestamps but %d start timestamps", s.Labels, n, len(s.StartTimestamps))
+	}
 	if len(s.Kinds) != n || len(s.Values) != n || len(s.Histograms) != n {
 		return fmt.Errorf("series %s: %d timestamps, %d kinds, %d values, %d histograms",
 			s.Labels, n, len(s.Kinds), len(s.Values), len(s.Histograms))
@@ -234,6 +244,17 @@ func writeBlockFile(path string, series []Series, opts WriteOptions) (err error)
 		parquet.NewWriterProperties(
 			parquet.WithCompression(opts.Compression),
 			parquet.WithMaxRowGroupLength(opts.MaxSeriesPerRowGroup),
+			// Dictionary encoding must stay off for the sample values.
+			//
+			// A dictionary is keyed by value, and NaN never equals itself, so every NaN
+			// lands in whichever slot the encoder happens to reuse. That silently
+			// rewrites a quiet NaN into a signalling one, or the reverse, depending on
+			// what else is in the column. Prometheus marks staleness with a signalling
+			// NaN, so this is the difference between a stale marker and a value of NaN.
+			// The kind column carries staleness explicitly, but the value column must
+			// still round trip unchanged.
+			parquet.WithDictionaryPath(parquet.ColumnPath{"values", "list", "element"}, false),
+			parquet.WithDictionaryPath(parquet.ColumnPath{"histograms", "list", "element"}, false),
 		),
 		pqarrow.NewArrowWriterProperties(
 			// Keep the Arrow schema in the file metadata, so the reader does not
@@ -281,6 +302,8 @@ func buildRecord(mem memory.Allocator, series []Series) (arrow.RecordBatch, erro
 	valValueBuilder := valBuilder.ValueBuilder().(*array.Float64Builder)
 	histBuilder := rb.Field(5).(*array.ListBuilder)
 	histValueBuilder := histBuilder.ValueBuilder().(*array.BinaryBuilder)
+	stBuilder := rb.Field(6).(*array.ListBuilder)
+	stValueBuilder := stBuilder.ValueBuilder().(*array.Int64Builder)
 
 	for i, s := range series {
 		idBuilder.Append(uint64(i))
@@ -309,6 +332,9 @@ func buildRecord(mem memory.Allocator, series []Series) (arrow.RecordBatch, erro
 			}
 			valValueBuilder.AppendNull()
 		}
+
+		stBuilder.Append(true)
+		stValueBuilder.AppendValues(s.StartTimestamps, nil)
 
 		histBuilder.Append(true)
 		for _, hb := range s.Histograms {
@@ -389,6 +415,8 @@ func appendRecordSeries(out *[]Series, record arrow.RecordBatch) error {
 	valValues := valCol.ListValues().(*array.Float64)
 	histCol := record.Column(5).(*array.List)
 	histValues := histCol.ListValues().(*array.Binary)
+	stCol := record.Column(6).(*array.List)
+	stValues := stCol.ListValues().(*array.Int64)
 
 	for row := range int(record.NumRows()) {
 		start, end := labelsCol.ValueOffsets(row)
@@ -402,6 +430,12 @@ func appendRecordSeries(out *[]Series, record arrow.RecordBatch) error {
 		timestamps := make([]int64, n)
 		for i := range timestamps {
 			timestamps[i] = tsValues.Value(int(tsStart) + i)
+		}
+
+		stStart, _ := stCol.ValueOffsets(row)
+		startTimestamps := make([]int64, n)
+		for i := range startTimestamps {
+			startTimestamps[i] = stValues.Value(int(stStart) + i)
 		}
 
 		kindStart, _ := kindCol.ValueOffsets(row)
@@ -429,11 +463,12 @@ func appendRecordSeries(out *[]Series, record arrow.RecordBatch) error {
 		}
 
 		*out = append(*out, Series{
-			Labels:     labels.New(ls...),
-			Timestamps: timestamps,
-			Kinds:      kinds,
-			Values:     vals,
-			Histograms: hists,
+			Labels:          labels.New(ls...),
+			Timestamps:      timestamps,
+			StartTimestamps: startTimestamps,
+			Kinds:           kinds,
+			Values:          vals,
+			Histograms:      hists,
 		})
 	}
 	return nil

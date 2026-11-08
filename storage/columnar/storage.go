@@ -16,7 +16,6 @@ package columnar
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
 	"path/filepath"
 	"slices"
@@ -77,8 +76,12 @@ type Storage struct {
 type seriesState struct {
 	labels labels.Labels
 	t      int64
-	h      *histogram.Histogram
-	fh     *histogram.FloatHistogram
+	st     int64
+	// count is the number of samples the series has. Counter reset hints depend on
+	// chunk boundaries, which are counted in samples.
+	count int
+	h     *histogram.Histogram
+	fh    *histogram.FloatHistogram
 }
 
 // headSeries is a series in the in-memory buffer.
@@ -94,6 +97,7 @@ type headSeries struct {
 // flush a copy rather than an encode.
 type headSample struct {
 	t    int64
+	st   int64
 	v    float64
 	kind SampleKind
 	hist []byte
@@ -200,14 +204,16 @@ func (s *Storage) flushLocked() error {
 	for _, ls := range keys {
 		hs := s.buffer[ls.Hash()]
 		row := Series{
-			Labels:     hs.labels,
-			Timestamps: make([]int64, len(hs.samples)),
-			Kinds:      make([]SampleKind, len(hs.samples)),
-			Values:     make([]float64, len(hs.samples)),
-			Histograms: make([][]byte, len(hs.samples)),
+			Labels:          hs.labels,
+			Timestamps:      make([]int64, len(hs.samples)),
+			StartTimestamps: make([]int64, len(hs.samples)),
+			Kinds:           make([]SampleKind, len(hs.samples)),
+			Values:          make([]float64, len(hs.samples)),
+			Histograms:      make([][]byte, len(hs.samples)),
 		}
 		for i, smpl := range hs.samples {
 			row.Timestamps[i] = smpl.t
+			row.StartTimestamps[i] = smpl.st
 			row.Kinds[i] = smpl.kind
 			row.Values[i] = smpl.v
 			row.Histograms[i] = smpl.hist
@@ -246,12 +252,6 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 		return 0, errors.New("columnar: appender used after Commit or Rollback")
 	}
 
-	// Start timestamps are not implemented. Silently accepting them would change
-	// what query results mean, so refuse instead.
-	if st != 0 {
-		return 0, fmt.Errorf("%w: start timestamps", errUnsupported)
-	}
-
 	hs, err := a.seriesFor(ls)
 	if err != nil {
 		return 0, err
@@ -267,13 +267,23 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 		}
 	}
 
-	smpl := headSample{t: t, v: v, kind: SampleFloat}
+	smpl := headSample{t: t, st: st, v: v, kind: SampleFloat}
 	if value.IsStaleNaN(v) {
 		// Record staleness explicitly; see SampleStale.
 		smpl.kind = SampleStale
 	}
 	if h != nil || fh != nil {
-		h, fh = withInferredResetHint(prev, h, fh)
+		prevHint := sampleHintState{
+			first: !hasPrev,
+			reset: detectsReset(prev, h, fh),
+		}
+		switch {
+		case prev.fh != nil:
+			prevHint.gauge = prev.fh.CounterResetHint == histogram.GaugeType
+		case prev.h != nil:
+			prevHint.gauge = prev.h.CounterResetHint == histogram.GaugeType
+		}
+		h, fh = withInferredResetHint(prevHint, h, fh)
 		encoded, err := encodeHistogram(h, fh)
 		if err != nil {
 			return 0, err
@@ -289,23 +299,66 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 	return refFor(ls), nil
 }
 
+// sampleHintState is what hint inference needs about the previous sample.
+type sampleHintState struct {
+	// first is set when the current sample starts the series or follows a real
+	// counter reset, which is where the TSDB would have started a new chunk.
+	first bool
+	// gauge is set when the previous histogram was a gauge, which keeps the rest of
+	// its chunk gauge too.
+	gauge bool
+	// reset is set when the current histogram contains a counter reset relative to
+	// the previous one.
+	reset bool
+}
+
 // withInferredResetHint fills in a counter reset hint when the caller did not
-// provide one, matching what the TSDB chunk encoding does on append.
+// provide one, following what the TSDB iterator exposes.
 //
-// The hint is not cosmetic: PromQL aggregation and rate() derive results and
-// warnings from it, so leaving every hint at unknown changes query results. Only
-// counter-like histograms get an inferred hint; gauge histograms keep theirs.
-func withInferredResetHint(prev seriesState, h *histogram.Histogram, fh *histogram.FloatHistogram) (*histogram.Histogram, *histogram.FloatHistogram) {
+// The TSDB derives the hint from the chunk header rather than from each sample:
+// the first sample of a chunk reads as unknown, the rest as not-reset, and a
+// chunk that starts with a reset also reads as unknown. Reproducing that matters
+// in both directions. Reporting NotCounterReset across a real reset makes
+// resets() and irate() skip work they must do, and reporting CounterReset where
+// the TSDB reports unknown makes aggregations emit a spurious "conflicting
+// counter resets" warning, because no TSDB query ever sees a mid-series reset
+// hint. See https://github.com/prometheus/prometheus/issues/15346.
+func withInferredResetHint(prev sampleHintState, h *histogram.Histogram, fh *histogram.FloatHistogram) (*histogram.Histogram, *histogram.FloatHistogram) {
 	var hint histogram.CounterResetHint
 	if fh != nil {
 		hint = fh.CounterResetHint
 	} else {
 		hint = h.CounterResetHint
 	}
-	if hint != histogram.UnknownCounterReset {
+
+	var target histogram.CounterResetHint
+	switch {
+	case hint == histogram.GaugeType:
+		return h, fh
+	case prev.gauge:
+		target = histogram.GaugeType
+	case prev.first, prev.reset, hint == histogram.CounterReset:
+		target = histogram.UnknownCounterReset
+	default:
+		target = histogram.NotCounterReset
+	}
+	if target == hint {
 		return h, fh
 	}
 
+	// Copy before mutating: the caller owns the histogram it passed in.
+	if fh != nil {
+		cp := fh.Copy()
+		cp.CounterResetHint = target
+		return nil, cp
+	}
+	cp := h.Copy()
+	cp.CounterResetHint = target
+	return cp, nil
+}
+
+// detectsReset reports whether cur contains a counter reset relative to prev.
+func detectsReset(prev seriesState, h *histogram.Histogram, fh *histogram.FloatHistogram) bool {
 	var prevFH *histogram.FloatHistogram
 	switch {
 	case prev.fh != nil:
@@ -313,41 +366,32 @@ func withInferredResetHint(prev seriesState, h *histogram.Histogram, fh *histogr
 	case prev.h != nil:
 		prevFH = prev.h.ToFloat(nil)
 	default:
-		// No previous histogram to compare against, so no inference possible.
-		return h, fh
+		return false
 	}
-
-	// Compare as float histograms: DetectReset only needs relative counts, and
-	// converting avoids implementing the same check twice.
 	var curFH *histogram.FloatHistogram
 	if fh != nil {
 		curFH = fh
 	} else {
 		curFH = h.ToFloat(nil)
 	}
-	if curFH.DetectReset(prevFH) {
-		hint = histogram.CounterReset
-	} else {
-		hint = histogram.NotCounterReset
+	if prevFH.Schema != curFH.Schema || prevFH.ZeroThreshold != curFH.ZeroThreshold {
+		// Not comparable, so treat it as a new chunk rather than guessing.
+		return true
 	}
-
-	if fh != nil {
-		// Copy before mutating: the caller owns the histogram it passed in.
-		cp := fh.Copy()
-		cp.CounterResetHint = hint
-		return nil, cp
-	}
-	cp := h.Copy()
-	cp.CounterResetHint = hint
-	return cp, nil
+	return curFH.DetectReset(prevFH)
 }
 
 // previousLocked returns the newest sample of ls, looking in the transaction first
 // and then in the committed state.
 func (a *appender) previousLocked(ls labels.Labels, tx *headSeries) (seriesState, bool) {
+	priorCount := 0
+	if st, ok := a.s.last[ls.Hash()]; ok {
+		priorCount = st.count
+	}
+
 	if len(tx.samples) > 0 {
 		last := tx.samples[len(tx.samples)-1]
-		state := seriesState{labels: ls, t: last.t}
+		state := seriesState{labels: ls, t: last.t, st: last.st, count: priorCount + len(tx.samples) - 1}
 		if last.kind != SampleFloat {
 			h, fh, err := last.decode()
 			if err == nil {
@@ -424,7 +468,11 @@ func (a *appender) Commit() error {
 		hs.samples = append(hs.samples, tx.samples...)
 		s.bufferN += len(tx.samples)
 		if last := tx.samples[len(tx.samples)-1]; true {
-			state := &seriesState{labels: tx.labels, t: last.t}
+			priorCount := 0
+			if previous, ok := s.last[hash]; ok {
+				priorCount = previous.count
+			}
+			state := &seriesState{labels: tx.labels, t: last.t, st: last.st, count: priorCount + len(tx.samples)}
 			if last.kind != SampleFloat {
 				if h, fh, err := last.decode(); err == nil {
 					state.h, state.fh = h, fh
@@ -455,24 +503,22 @@ func (a *appender) Rollback() error {
 	return nil
 }
 
-// errUnsupported marks functionality this prototype deliberately does not
-// implement.
-var errUnsupported = errors.New("columnar: unsupported by prototype")
-
 // AppendHistogram adds a histogram sample. It exists for the v1 appender
 // interface; AppenderV2 callers pass histograms to Append.
 func (a *appender) AppendHistogram(ref storage.SeriesRef, ls labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
 	return a.Append(ref, ls, 0, t, 0, h, fh, storage.AOptions{})
 }
 
-// AppendHistogramSTZeroSample is not implemented.
-func (*appender) AppendHistogramSTZeroSample(storage.SeriesRef, labels.Labels, int64, int64, *histogram.Histogram, *histogram.FloatHistogram) (storage.SeriesRef, error) {
-	return 0, fmt.Errorf("%w: histogram start timestamp zero samples", errUnsupported)
+// AppendHistogramSTZeroSample appends the synthetic zero histogram sample of a
+// start timestamp.
+func (a *appender) AppendHistogramSTZeroSample(_ storage.SeriesRef, ls labels.Labels, _, st int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
+	return a.Append(0, ls, 0, st, 0, h, fh, storage.AOptions{})
 }
 
-// AppendSTZeroSample is not implemented.
-func (*appender) AppendSTZeroSample(_ storage.SeriesRef, _ labels.Labels, _, _ int64) (storage.SeriesRef, error) {
-	return 0, fmt.Errorf("%w: start timestamp zero samples", errUnsupported)
+// AppendSTZeroSample appends the synthetic zero sample of a start timestamp, as
+// the TSDB does: a zero value at st.
+func (a *appender) AppendSTZeroSample(_ storage.SeriesRef, ls labels.Labels, _, st int64) (storage.SeriesRef, error) {
+	return a.Append(0, ls, 0, st, 0, nil, nil, storage.AOptions{})
 }
 
 // AppendExemplar accepts and drops exemplars: the block format has no exemplar

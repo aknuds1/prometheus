@@ -60,17 +60,16 @@ eval instant at 10m http_requests_total{path="/foo"}
 // semantically usable at all; a layout that cannot pass it is not worth
 // measuring.
 func TestBuiltinConformance(t *testing.T) {
-	// TODO(prototype): re-enable once these are fixed. Current state of the full
-	// built-in suite: 414 of 440 subtests pass. The remaining failures are in
-	// three files, with two causes:
+	// TODO(prototype): re-enable once counter reset hints match the TSDB exactly.
 	//
-	//   - operators.test: NaN samples are not visible to comparisons. Arrow and
-	//     Parquet canonicalise NaN payloads, so a NaN cannot be distinguished from
-	//     a stale marker by its bits, and some NaN samples come back altered.
-	//   - native_histograms.test: counter reset hints are inferred on append, but
-	//     aggregation still reports conflicting resets where the TSDB does not.
-	//   - start_timestamps.test: start timestamps are rejected by the appender.
-	t.Skip("known failures documented above; the suite is the gate for finishing this prototype")
+	// Current state: 431 of 440 subtests pass. The remaining failures are nine
+	// subtests in functions.test, extended_vectors.test and native_histograms.test,
+	// all about the counter reset hint the TSDB exposes for synthetic histogram
+	// sequences. The TSDB derives that hint from chunk headers it wrote itself, so
+	// matching it exactly means reproducing its chunk splitting, not just detecting
+	// resets in the values.
+	t.Skip("nine hint-fidelity subtests remain; see the comment above")
+
 	promqltest.RunBuiltinTestsWithStorage(t,
 		promqltest.NewTestEngine(t, false, 5*time.Minute, promqltest.DefaultMaxSamplesPerQuery),
 		newConformanceStorage,
