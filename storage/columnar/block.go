@@ -28,7 +28,9 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 
+	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/prompb"
 )
 
 const (
@@ -38,18 +40,44 @@ const (
 	seriesIDColumn  = "series_id"
 	labelsColumn    = "labels"
 	timestampsCol   = "timestamps"
+	kindsColumn     = "kinds"
 	valuesColumn    = "values"
+	histogramsCol   = "histograms"
 	labelNameColumn = "name"
 	labelValueCol   = "value"
+)
+
+// SampleKind describes what one sample of a series holds.
+type SampleKind int8
+
+const (
+	// SampleFloat is a float64 sample.
+	SampleFloat SampleKind = 0
+	// SampleHistogram is an integer-count native histogram sample.
+	SampleHistogram SampleKind = 1
+	// SampleFloatHistogram is a float-count native histogram sample.
+	SampleFloatHistogram SampleKind = 2
+	// SampleStale is a staleness marker.
+	//
+	// Staleness gets its own kind rather than being a NaN payload, because Arrow
+	// and Parquet canonicalise every NaN to a quiet NaN. Prometheus marks staleness
+	// with a signalling NaN, so a NaN round trip through this format silently turns
+	// a stale marker back into a normal NaN sample, which changes query results.
+	// The stored value of a stale sample is not meaningful.
+	SampleStale SampleKind = 3
 )
 
 // BlockSchema is the Arrow schema of a block file.
 //
 // One row is one series: a block-local series ID, the full label set, and the
-// series' timestamps and values as parallel lists. Timestamps are int64
-// milliseconds, matching Prometheus. Values are float64 for now; native
-// histogram samples are not representable yet, which is why ingestion rejects
-// them rather than silently dropping them.
+// series' samples as parallel lists. Timestamps are int64 milliseconds, matching
+// Prometheus.
+//
+// Samples of different types share the row rather than getting a row each,
+// because a PromQL range over a series must see one interleaved sequence. The
+// per-sample kind column says which of the value columns is populated, so a
+// float-only series pays for the histogram column only as a run of nulls, which
+// Parquet encodes almost for free.
 func BlockSchema() *arrow.Schema {
 	labelsType := arrow.ListOf(arrow.StructOf(
 		arrow.Field{Name: labelNameColumn, Type: arrow.BinaryTypes.String, Nullable: false},
@@ -59,18 +87,72 @@ func BlockSchema() *arrow.Schema {
 		{Name: seriesIDColumn, Type: arrow.PrimitiveTypes.Uint64, Nullable: false},
 		{Name: labelsColumn, Type: labelsType, Nullable: false},
 		{Name: timestampsCol, Type: arrow.ListOf(arrow.PrimitiveTypes.Int64), Nullable: false},
+		{Name: kindsColumn, Type: arrow.ListOf(arrow.PrimitiveTypes.Int8), Nullable: false},
 		{Name: valuesColumn, Type: arrow.ListOf(arrow.PrimitiveTypes.Float64), Nullable: false},
+		{Name: histogramsCol, Type: arrow.ListOf(arrow.BinaryTypes.Binary), Nullable: false},
 	}, nil)
 }
 
 // Series is one series of a block: its identity and its samples.
 //
-// Timestamps must be sorted ascending and contain no duplicates; a block is a
-// sorted, immutable unit. Values must have the same length as Timestamps.
+// Timestamps, Kinds, Values and Histograms are parallel and must have the same
+// length. Timestamps must be strictly increasing; a block is a sorted, immutable
+// unit. For a SampleFloat entry the value in Values is used and Histograms holds
+// nil; for a histogram entry the reverse.
 type Series struct {
 	Labels     labels.Labels
 	Timestamps []int64
-	Values     []float64
+	Kinds      []SampleKind
+	// Values holds the float64 value of every sample, 0 for histogram samples.
+	Values []float64
+	// Histograms holds the encoded histogram of every sample, nil for float samples.
+	Histograms [][]byte
+}
+
+// NewFloatSeries returns a Series holding only float samples, which is the
+// common case. Callers with histogram samples must fill Kinds and Histograms
+// themselves.
+func NewFloatSeries(lbls labels.Labels, timestamps []int64, values []float64) Series {
+	kinds := make([]SampleKind, len(timestamps))
+	return Series{
+		Labels:     lbls,
+		Timestamps: timestamps,
+		Kinds:      kinds,
+		Values:     values,
+		Histograms: make([][]byte, len(timestamps)),
+	}
+}
+
+// Len returns the number of samples in the series.
+func (s Series) Len() int { return len(s.Timestamps) }
+
+// HistogramAt decodes the histogram at index i.
+func (s Series) HistogramAt(i int) (*histogram.Histogram, *histogram.FloatHistogram, error) {
+	var hp prompb.Histogram
+	if err := hp.Unmarshal(s.Histograms[i]); err != nil {
+		return nil, nil, fmt.Errorf("decoding histogram sample %d: %w", i, err)
+	}
+	if hp.IsFloatHistogram() {
+		return nil, hp.ToFloatHistogram(), nil
+	}
+	return hp.ToIntHistogram(), nil, nil
+}
+
+// encodeHistogram serialises a histogram sample.
+//
+// The timestamp is not stored in the blob: it is a column of its own, and
+// duplicating it would let the two disagree.
+func encodeHistogram(h *histogram.Histogram, fh *histogram.FloatHistogram) ([]byte, error) {
+	var hp prompb.Histogram
+	switch {
+	case fh != nil:
+		hp = prompb.FromFloatHistogram(0, fh)
+	case h != nil:
+		hp = prompb.FromIntHistogram(0, h)
+	default:
+		return nil, errors.New("encodeHistogram called without a histogram")
+	}
+	return hp.Marshal()
 }
 
 // Validate reports whether the series is well formed.
@@ -78,13 +160,27 @@ func (s Series) Validate() error {
 	if s.Labels.IsEmpty() {
 		return errors.New("series without labels")
 	}
-	if len(s.Timestamps) != len(s.Values) {
-		return fmt.Errorf("series %s: %d timestamps but %d values", s.Labels, len(s.Timestamps), len(s.Values))
+	n := len(s.Timestamps)
+	if len(s.Kinds) != n || len(s.Values) != n || len(s.Histograms) != n {
+		return fmt.Errorf("series %s: %d timestamps, %d kinds, %d values, %d histograms",
+			s.Labels, n, len(s.Kinds), len(s.Values), len(s.Histograms))
 	}
-	for i := 1; i < len(s.Timestamps); i++ {
-		if s.Timestamps[i] <= s.Timestamps[i-1] {
+	for i := range n {
+		if i > 0 && s.Timestamps[i] <= s.Timestamps[i-1] {
 			return fmt.Errorf("series %s: timestamps not strictly increasing at index %d (%d after %d)",
 				s.Labels, i, s.Timestamps[i], s.Timestamps[i-1])
+		}
+		switch s.Kinds[i] {
+		case SampleFloat, SampleStale:
+			if s.Histograms[i] != nil {
+				return fmt.Errorf("series %s: float sample at index %d carries a histogram", s.Labels, i)
+			}
+		case SampleHistogram, SampleFloatHistogram:
+			if len(s.Histograms[i]) == 0 {
+				return fmt.Errorf("series %s: histogram sample at index %d has no payload", s.Labels, i)
+			}
+		default:
+			return fmt.Errorf("series %s: unknown sample kind %d at index %d", s.Labels, s.Kinds[i], i)
 		}
 	}
 	return nil
@@ -179,8 +275,12 @@ func buildRecord(mem memory.Allocator, series []Series) (arrow.RecordBatch, erro
 	valueBuilder := labelsBuilder.FieldBuilder(1).(*array.StringBuilder)
 	tsBuilder := rb.Field(2).(*array.ListBuilder)
 	tsValueBuilder := tsBuilder.ValueBuilder().(*array.Int64Builder)
-	valBuilder := rb.Field(3).(*array.ListBuilder)
+	kindBuilder := rb.Field(3).(*array.ListBuilder)
+	kindValueBuilder := kindBuilder.ValueBuilder().(*array.Int8Builder)
+	valBuilder := rb.Field(4).(*array.ListBuilder)
 	valValueBuilder := valBuilder.ValueBuilder().(*array.Float64Builder)
+	histBuilder := rb.Field(5).(*array.ListBuilder)
+	histValueBuilder := histBuilder.ValueBuilder().(*array.BinaryBuilder)
 
 	for i, s := range series {
 		idBuilder.Append(uint64(i))
@@ -196,18 +296,38 @@ func buildRecord(mem memory.Allocator, series []Series) (arrow.RecordBatch, erro
 		tsBuilder.Append(true)
 		tsValueBuilder.AppendValues(s.Timestamps, nil)
 
+		kindBuilder.Append(true)
+		for _, kind := range s.Kinds {
+			kindValueBuilder.Append(int8(kind))
+		}
+
 		valBuilder.Append(true)
-		valValueBuilder.AppendValues(s.Values, nil)
+		for j, kind := range s.Kinds {
+			if kind == SampleFloat || kind == SampleStale {
+				valValueBuilder.Append(s.Values[j])
+				continue
+			}
+			valValueBuilder.AppendNull()
+		}
+
+		histBuilder.Append(true)
+		for _, hb := range s.Histograms {
+			if hb == nil {
+				histValueBuilder.AppendNull()
+				continue
+			}
+			histValueBuilder.Append(hb)
+		}
 	}
 
 	return rb.NewRecordBatch(), nil
 }
 
-// ReadAll reads every series of the block file at path.
+// readAllSeries reads every series of the block file at path.
 //
-// It materialises the whole block, which is acceptable for tests and for small
-// blocks but not for the query path: selectors must read only the series they
-// need, and row groups are the only unit Parquet allows that to happen at.
+// It materialises the whole block, which is acceptable for small blocks and for
+// the conformance path, but not for querying: a selector should read only the
+// row groups it needs, and Parquet offers no finer unit.
 func readAllSeries(ctx context.Context, path string) ([]Series, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -234,8 +354,7 @@ func readAllSeries(ctx context.Context, path string) ([]Series, error) {
 
 	var out []Series
 	for rr.Next() {
-		record := rr.RecordBatch()
-		if err := appendRecordSeries(&out, record); err != nil {
+		if err := appendRecordSeries(&out, rr.RecordBatch()); err != nil {
 			return nil, err
 		}
 	}
@@ -252,8 +371,12 @@ func appendRecordSeries(out *[]Series, record arrow.RecordBatch) error {
 	values := labelsStruct.Field(1).(*array.String)
 	tsCol := record.Column(2).(*array.List)
 	tsValues := tsCol.ListValues().(*array.Int64)
-	valCol := record.Column(3).(*array.List)
+	kindCol := record.Column(3).(*array.List)
+	kindValues := kindCol.ListValues().(*array.Int8)
+	valCol := record.Column(4).(*array.List)
 	valValues := valCol.ListValues().(*array.Float64)
+	histCol := record.Column(5).(*array.List)
+	histValues := histCol.ListValues().(*array.Binary)
 
 	for row := range int(record.NumRows()) {
 		start, end := labelsCol.ValueOffsets(row)
@@ -263,21 +386,43 @@ func appendRecordSeries(out *[]Series, record arrow.RecordBatch) error {
 		}
 
 		tsStart, tsEnd := tsCol.ValueOffsets(row)
-		timestamps := make([]int64, tsEnd-tsStart)
+		n := int(tsEnd - tsStart)
+		timestamps := make([]int64, n)
 		for i := range timestamps {
 			timestamps[i] = tsValues.Value(int(tsStart) + i)
 		}
 
-		vStart, vEnd := valCol.ValueOffsets(row)
-		vals := make([]float64, vEnd-vStart)
-		for i := range vals {
-			vals[i] = valValues.Value(int(vStart) + i)
-		}
-		if len(timestamps) != len(vals) {
-			return fmt.Errorf("malformed block row %d: %d timestamps but %d values", row, len(timestamps), len(vals))
+		kindStart, _ := kindCol.ValueOffsets(row)
+		kinds := make([]SampleKind, n)
+		for i := range kinds {
+			kinds[i] = SampleKind(kindValues.Value(int(kindStart) + i))
 		}
 
-		*out = append(*out, Series{Labels: labels.New(ls...), Timestamps: timestamps, Values: vals})
+		valStart, _ := valCol.ValueOffsets(row)
+		vals := make([]float64, n)
+		for i := range vals {
+			if valValues.IsNull(int(valStart) + i) {
+				continue
+			}
+			vals[i] = valValues.Value(int(valStart) + i)
+		}
+
+		histStart, _ := histCol.ValueOffsets(row)
+		hists := make([][]byte, n)
+		for i := range hists {
+			if histValues.IsNull(int(histStart) + i) {
+				continue
+			}
+			hists[i] = append([]byte(nil), histValues.Value(int(histStart)+i)...)
+		}
+
+		*out = append(*out, Series{
+			Labels:     labels.New(ls...),
+			Timestamps: timestamps,
+			Kinds:      kinds,
+			Values:     vals,
+			Histograms: hists,
+		})
 	}
 	return nil
 }

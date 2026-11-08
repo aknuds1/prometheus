@@ -32,4 +32,4 @@ package columnar
 // FormatVersion is the version of the block format written by this package.
 //
 // It is bumped whenever the on-disk schema changes; blocks are not migrated.
-const FormatVersion = 1
+const FormatVersion = 2

@@ -27,16 +27,16 @@ import (
 func TestWriteAndReadBlock(t *testing.T) {
 	dir := t.TempDir()
 	series := []Series{
-		{
-			Labels:     labels.FromStrings("__name__", "b_metric", "instance", "localhost:9100"),
-			Timestamps: []int64{1000, 2000, 3000},
-			Values:     []float64{1.5, 2.5, 3.5},
-		},
-		{
-			Labels:     labels.FromStrings("__name__", "a_metric", "cpu", "0"),
-			Timestamps: []int64{1000, 2000},
-			Values:     []float64{-1, 0},
-		},
+		NewFloatSeries(
+			labels.FromStrings("__name__", "b_metric", "instance", "localhost:9100"),
+			[]int64{1000, 2000, 3000},
+			[]float64{1.5, 2.5, 3.5},
+		),
+		NewFloatSeries(
+			labels.FromStrings("__name__", "a_metric", "cpu", "0"),
+			[]int64{1000, 2000},
+			[]float64{-1, 0},
+		),
 	}
 
 	meta, err := WriteBlock(dir, series, WriteOptions{})
@@ -72,15 +72,15 @@ func TestWriteBlockSortsSeriesAndPreservesLabels(t *testing.T) {
 
 	var series []Series
 	for _, name := range []string{"zzz", "aaa", "mmm"} {
-		series = append(series, Series{
-			Labels: labels.FromStrings(
+		series = append(series, NewFloatSeries(
+			labels.FromStrings(
 				labels.MetricName, name,
 				"mountpoint", "/var/lib/ü-does-not-matter",
 				"weird", "with space",
 			),
-			Timestamps: []int64{1},
-			Values:     []float64{1},
-		})
+			[]int64{1},
+			[]float64{1},
+		))
 	}
 
 	meta, err := WriteBlock(dir, series, WriteOptions{})
@@ -106,11 +106,11 @@ func TestWriteBlockMultipleRowGroups(t *testing.T) {
 	const seriesCount = 7
 	var series []Series
 	for i := range seriesCount {
-		series = append(series, Series{
-			Labels:     labels.FromStrings(labels.MetricName, "rowgroup_test", "idx", string(rune('a'+i))),
-			Timestamps: []int64{int64(i), int64(i + 1)},
-			Values:     []float64{float64(i), float64(i)},
-		})
+		series = append(series, NewFloatSeries(
+			labels.FromStrings(labels.MetricName, "rowgroup_test", "idx", string(rune('a'+i))),
+			[]int64{int64(i), int64(i + 1)},
+			[]float64{float64(i), float64(i)},
+		))
 	}
 
 	meta, err := WriteBlock(dir, series, WriteOptions{MaxSeriesPerRowGroup: 2})
@@ -141,16 +141,20 @@ func TestWriteBlockRejectsMalformedSeries(t *testing.T) {
 			series: Series{
 				Labels:     labels.FromStrings(labels.MetricName, "m"),
 				Timestamps: []int64{1, 2},
+				Kinds:      []SampleKind{SampleFloat, SampleFloat},
 				Values:     []float64{1},
+				Histograms: make([][]byte, 2),
 			},
-			errMsg: "timestamps but",
+			errMsg: "1 values",
 		},
 		{
 			name: "duplicate timestamp",
 			series: Series{
 				Labels:     labels.FromStrings(labels.MetricName, "m"),
 				Timestamps: []int64{1, 1},
+				Kinds:      []SampleKind{SampleFloat, SampleFloat},
 				Values:     []float64{1, 2},
+				Histograms: make([][]byte, 2),
 			},
 			errMsg: "timestamps not strictly increasing",
 		},
@@ -159,7 +163,9 @@ func TestWriteBlockRejectsMalformedSeries(t *testing.T) {
 			series: Series{
 				Labels:     labels.FromStrings(labels.MetricName, "m"),
 				Timestamps: []int64{2, 1},
+				Kinds:      []SampleKind{SampleFloat, SampleFloat},
 				Values:     []float64{1, 2},
+				Histograms: make([][]byte, 2),
 			},
 			errMsg: "timestamps not strictly increasing",
 		},
@@ -167,7 +173,9 @@ func TestWriteBlockRejectsMalformedSeries(t *testing.T) {
 			name: "no labels",
 			series: Series{
 				Timestamps: []int64{1},
+				Kinds:      []SampleKind{SampleFloat},
 				Values:     []float64{1},
+				Histograms: make([][]byte, 1),
 			},
 			errMsg: "without labels",
 		},
@@ -207,11 +215,11 @@ func TestListBlocks(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoBlocks)
 
 	mk := func(i int) Meta {
-		meta, err := WriteBlock(dir, []Series{{
-			Labels:     labels.FromStrings(labels.MetricName, "list_test", "idx", string(rune('a'+i))),
-			Timestamps: []int64{int64(i)},
-			Values:     []float64{1},
-		}}, WriteOptions{})
+		meta, err := WriteBlock(dir, []Series{NewFloatSeries(
+			labels.FromStrings(labels.MetricName, "list_test", "idx", string(rune('a'+i))),
+			[]int64{int64(i)},
+			[]float64{1},
+		)}, WriteOptions{})
 		require.NoError(t, err)
 		return meta
 	}
@@ -229,21 +237,22 @@ func TestListBlocks(t *testing.T) {
 
 func TestBlockOverlaps(t *testing.T) {
 	dir := t.TempDir()
-	meta, err := WriteBlock(dir, []Series{{
-		Labels:     labels.FromStrings(labels.MetricName, "overlap_test"),
-		Timestamps: []int64{100, 200},
-		Values:     []float64{1, 2},
-	}}, WriteOptions{})
+	meta, err := WriteBlock(dir, []Series{NewFloatSeries(
+		labels.FromStrings(labels.MetricName, "overlap_test"),
+		[]int64{100, 200},
+		[]float64{1, 2},
+	)}, WriteOptions{})
 	require.NoError(t, err)
 
 	block, err := OpenBlock(filepath.Join(dir, meta.ULID))
 	require.NoError(t, err)
 
-	// Block range is [100, 201).
+	// Block samples are 100 and 200, so meta range is [100, 201).
 	require.True(t, block.Overlaps(0, 101))
 	require.True(t, block.Overlaps(200, 400))
+	require.True(t, block.Overlaps(0, 100), "query end is inclusive, so a block starting at 100 must be read")
 	require.False(t, block.Overlaps(201, 400))
-	require.False(t, block.Overlaps(0, 100))
+	require.False(t, block.Overlaps(0, 99))
 }
 
 func TestOpenBlockRejectsWrongFormatVersion(t *testing.T) {

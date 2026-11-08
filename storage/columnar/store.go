@@ -178,9 +178,15 @@ func (b *Block) Series(ctx context.Context) ([]Series, error) {
 	return readAllSeries(ctx, blockDataPath(b.dir))
 }
 
-// Overlaps reports whether the block may contain samples in [mint, maxt).
+// Overlaps reports whether the block may contain samples in the inclusive range
+// [mint, maxt].
+//
+// Both ends are inclusive because that is how PromQL queries storage: a query at
+// the block's first timestamp must still see the block. The block's own range is
+// half-open in meta.json, as in TSDB, so MaxTime is compared exclusively against
+// mint and MinTime inclusively against maxt.
 func (b *Block) Overlaps(mint, maxt int64) bool {
-	return b.meta.NumSeries > 0 && b.meta.MaxTime > mint && b.meta.MinTime < maxt
+	return b.meta.NumSeries > 0 && b.meta.MaxTime > mint && b.meta.MinTime <= maxt
 }
 
 // ErrNoBlocks is returned when a directory contains no blocks.
