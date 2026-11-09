@@ -198,22 +198,14 @@ func trimSeries(s Series, mint, maxt int64) Series {
 
 // headToSeries converts a buffered series to the block representation.
 func headToSeries(hs *headSeries) Series {
-	s := Series{
+	return Series{
 		Labels:          hs.labels,
-		Timestamps:      make([]int64, len(hs.samples)),
-		StartTimestamps: make([]int64, len(hs.samples)),
-		Kinds:           make([]SampleKind, len(hs.samples)),
-		Values:          make([]float64, len(hs.samples)),
-		Histograms:      make([][]byte, len(hs.samples)),
+		Timestamps:      hs.ts,
+		StartTimestamps: hs.st,
+		Kinds:           hs.kind,
+		Values:          hs.v,
+		Histograms:      hs.hist,
 	}
-	for i, smpl := range hs.samples {
-		s.Timestamps[i] = smpl.t
-		s.StartTimestamps[i] = smpl.st
-		s.Kinds[i] = smpl.kind
-		s.Values[i] = smpl.v
-		s.Histograms[i] = smpl.hist
-	}
-	return s
 }
 
 // seriesSet is a series set over already-selected series.

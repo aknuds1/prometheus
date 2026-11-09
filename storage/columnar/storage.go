@@ -16,6 +16,7 @@ package columnar
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"path/filepath"
 	"slices"
@@ -26,19 +27,22 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/model/value"
-	"github.com/prometheus/prometheus/prompb"
 	"github.com/prometheus/prometheus/storage"
 )
 
-// DefaultFlushSamples is the default number of buffered samples that triggers a
+// DefaultFlushSamples is the default number of buffered samples triggering a
 // block flush.
 const DefaultFlushSamples = 1000
 
 // StorageOptions configures a Storage.
 type StorageOptions struct {
 	// FlushSamples is the number of samples buffered in memory before they are
-	// written out as a block. Zero selects DefaultFlushSamples.
+	// written as a block. Zero selects DefaultFlushSamples.
 	FlushSamples int
+
+	// MetadataVersionCap bounds history per owner. Zero means unbounded; it is a
+	// deliberate knob for observing churn, not a hidden current-state truncation.
+	MetadataVersionCap int
 
 	// WriteOptions are passed to the block writer.
 	WriteOptions WriteOptions
@@ -46,14 +50,10 @@ type StorageOptions struct {
 
 // Storage is an experimental columnar storage.
 //
-// Appends land in an in-memory buffer. Once the buffer holds FlushSamples
-// samples it is written out as a block, and the buffer is emptied. Queries see
-// the buffer and the blocks together, so a caller never has to know whether data
-// has been flushed yet.
-//
-// There is no WAL: a crash loses the buffered samples, and blocks are never
-// rewritten, compacted, or deleted. This is a measurement vehicle, not a
-// database.
+// Samples enter in typed per-series arrays, and metadata enters the shared
+// owner/version/membership store. There is no WAL, compaction, retention or OOO
+// sample mutation yet. This is deliberately a research tool for measuring these
+// semantics, not a production database.
 type Storage struct {
 	dir  string
 	opts StorageOptions
@@ -64,51 +64,39 @@ type Storage struct {
 	bufferMin int64
 	bufferMax int64
 	blocks    []*Block
-	// last holds the newest sample of every series, including series whose
-	// samples were already flushed to a block. The appender needs it to reject
-	// out of order and duplicate samples, and to infer counter reset hints the way
-	// the TSDB chunk encoding does.
-	last   map[uint64]*seriesState
-	closed bool
+	last      map[uint64]*seriesState
+	closed    bool
+
+	metadata *metadataStore
 }
 
-// seriesState is the newest sample of a series.
+// headSeries holds samples as typed columns. Histograms must be encoded before
+// entering the head: the caller is allowed to reuse the source histogram.
+type headSeries struct {
+	labels labels.Labels
+	ts     []int64
+	st     []int64
+	v      []float64
+	kind   []SampleKind
+	hist   [][]byte
+}
+
+// seriesState is the newest sample of a series, needed for immediate ordering
+// detection and counter reset-hint inference without re-encoding prior samples.
 type seriesState struct {
 	labels labels.Labels
 	t      int64
 	st     int64
-	// count is the number of samples the series has. Counter reset hints depend on
-	// chunk boundaries, which are counted in samples.
-	count int
-	h     *histogram.Histogram
-	fh    *histogram.FloatHistogram
+	count  int
+	h      *histogram.Histogram
+	fh     *histogram.FloatHistogram
 }
 
-// headSeries is a series in the in-memory buffer.
-type headSeries struct {
-	labels  labels.Labels
-	samples []headSample
-}
-
-// headSample is one buffered sample.
-//
-// Histograms are encoded on append rather than kept as pointers, because callers
-// are allowed to reuse the histogram they passed in, and because it makes the
-// flush a copy rather than an encode.
-type headSample struct {
-	t    int64
-	st   int64
-	v    float64
-	kind SampleKind
-	hist []byte
-}
-
-// NewStorage opens a columnar storage in dir, adopting any blocks already there.
+// NewStorage opens a columnar storage in dir, adopting existing blocks.
 func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 	if opts.FlushSamples <= 0 {
 		opts.FlushSamples = DefaultFlushSamples
 	}
-
 	s := &Storage{
 		dir:       dir,
 		opts:      opts,
@@ -116,6 +104,7 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 		last:      map[uint64]*seriesState{},
 		bufferMin: math.MaxInt64,
 		bufferMax: math.MinInt64,
+		metadata:  newMetadataStore(opts.MetadataVersionCap),
 	}
 
 	blocks, err := ListBlocks(dir)
@@ -129,29 +118,23 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 	return s, nil
 }
 
-// AppenderV2 returns an appender for the storage.
-func (s *Storage) AppenderV2(ctx context.Context) storage.AppenderV2 {
-	return s.appender(ctx)
+func (s *Storage) AppenderV2(context.Context) storage.AppenderV2 {
+	return s.appender()
 }
 
-// Appender returns an appender for the storage. The v1 interface exists because
-// storage.Storage still requires it; both entry points share one implementation.
-func (s *Storage) Appender(ctx context.Context) storage.Appender {
-	return &appenderV1{appender: s.appender(ctx)}
+// Appender implements the older storage interface through a single V2 adapter.
+func (s *Storage) Appender(context.Context) storage.Appender {
+	return &appenderV1{appender: s.appender()}
 }
 
-func (s *Storage) appender(_ context.Context) *appender {
-	return &appender{
-		s:   s,
-		txs: map[uint64]*headSeries{},
-	}
+func (s *Storage) appender() *appender {
+	return &appender{s: s, txs: map[uint64]*headSeries{}}
 }
 
 // StartTime returns the oldest timestamp in storage, or math.MinInt64 when empty.
 func (s *Storage) StartTime() (int64, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-
 	if s.bufferN > 0 {
 		return s.bufferMin, nil
 	}
@@ -161,12 +144,11 @@ func (s *Storage) StartTime() (int64, error) {
 	return s.blocks[0].Meta().MinTime, nil
 }
 
-// Close releases the storage. Blocks are read on demand, so there is nothing to
-// flush on close; buffered samples are discarded, as documented.
+// Close marks storage closed. Blocks are read on demand; no block state needs
+// teardown at this stage of the experiment.
 func (s *Storage) Close() error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-
 	if s.closed {
 		return nil
 	}
@@ -174,26 +156,25 @@ func (s *Storage) Close() error {
 	return nil
 }
 
-// Flush writes the in-memory buffer out as a block.
+// Flush writes the buffer out as a block.
 func (s *Storage) Flush() error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	return s.flushLocked()
 }
 
-// NumBlocks returns the number of written blocks.
+// NumBlocks returns written block count.
 func (s *Storage) NumBlocks() int {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	return len(s.blocks)
 }
 
-// flushLocked writes the buffer as a block and empties it.
+// flushLocked converts columns into block rows only at seal time.
 func (s *Storage) flushLocked() error {
 	if len(s.buffer) == 0 {
 		return nil
 	}
-
 	keys := make([]labels.Labels, 0, len(s.buffer))
 	for _, hs := range s.buffer {
 		keys = append(keys, hs.labels)
@@ -202,23 +183,15 @@ func (s *Storage) flushLocked() error {
 
 	series := make([]Series, 0, len(keys))
 	for _, ls := range keys {
-		hs := s.buffer[ls.Hash()]
-		row := Series{
+		hs := s.buffer[stableSeriesHash(ls)]
+		series = append(series, Series{
 			Labels:          hs.labels,
-			Timestamps:      make([]int64, len(hs.samples)),
-			StartTimestamps: make([]int64, len(hs.samples)),
-			Kinds:           make([]SampleKind, len(hs.samples)),
-			Values:          make([]float64, len(hs.samples)),
-			Histograms:      make([][]byte, len(hs.samples)),
-		}
-		for i, smpl := range hs.samples {
-			row.Timestamps[i] = smpl.t
-			row.StartTimestamps[i] = smpl.st
-			row.Kinds[i] = smpl.kind
-			row.Values[i] = smpl.v
-			row.Histograms[i] = smpl.hist
-		}
-		series = append(series, row)
+			Timestamps:      hs.ts,
+			StartTimestamps: hs.st,
+			Kinds:           hs.kind,
+			Values:          hs.v,
+			Histograms:      hs.hist,
+		})
 	}
 
 	meta, err := WriteBlock(s.dir, series, s.opts.WriteOptions)
@@ -229,7 +202,6 @@ func (s *Storage) flushLocked() error {
 	if err != nil {
 		return err
 	}
-
 	s.blocks = append(s.blocks, block)
 	s.buffer = map[uint64]*headSeries{}
 	s.bufferN = 0
@@ -238,16 +210,31 @@ func (s *Storage) flushLocked() error {
 	return nil
 }
 
-// appender buffers appends in a transaction and applies them on Commit.
+// appenderV1 adapts the typed series appender to the legacy interface.
+type appenderV1 struct{ *appender }
+
+func (a *appenderV1) Append(_ storage.SeriesRef, ls labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
+	return a.Append_(ls, t, v)
+}
+
+func (a *appenderV1) Append_(ls labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
+	return a.appender.Append(0, ls, 0, t, v, nil, nil, storage.AOptions{})
+}
+
+// appender buffers one transaction of typed series columns.
 type appender struct {
 	s *Storage
 
 	txs   map[uint64]*headSeries
 	order []uint64
+	meta  []AssociationUpdate
 	done  bool
 }
 
-func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, _ storage.AOptions) (storage.SeriesRef, error) {
+// Append implements the shared V2 appender, producing typed head arrays.
+// Prometheus metadata, where supplied, is staged alongside the transaction and
+// associated to the series metric-family owner, not converted into labels here.
+func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, opts storage.AOptions) (storage.SeriesRef, error) {
 	if a.done {
 		return 0, errors.New("columnar: appender used after Commit or Rollback")
 	}
@@ -267,10 +254,9 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 		}
 	}
 
-	smpl := headSample{t: t, st: st, v: v, kind: SampleFloat}
+	kind := SampleFloat
 	if value.IsStaleNaN(v) {
-		// Record staleness explicitly; see SampleStale.
-		smpl.kind = SampleStale
+		kind = SampleStale
 	}
 	if h != nil || fh != nil {
 		prevHint := sampleHintState{
@@ -288,41 +274,185 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 		if err != nil {
 			return 0, err
 		}
-		smpl.kind = SampleFloatHistogram
+		kind = SampleFloatHistogram
 		if h != nil {
-			smpl.kind = SampleHistogram
+			kind = SampleHistogram
 		}
-		smpl.hist = encoded
+		hs.hist = append(hs.hist, encoded)
+		if kind != SampleHistogram {
+			kind = SampleFloatHistogram
+		}
+	} else {
+		hs.hist = append(hs.hist, nil)
 	}
 
-	hs.samples = append(hs.samples, smpl)
+	hs.ts = append(hs.ts, t)
+	hs.st = append(hs.st, st)
+	hs.v = append(hs.v, v)
+	hs.kind = append(hs.kind, kind)
+	if !opts.Metadata.IsEmpty() {
+		family := opts.MetricFamilyName
+		if family == "" {
+			family = ls.Get(labels.MetricName)
+		}
+		a.meta = append(a.meta, AssociationUpdate{
+			Labels: ls,
+			Update: Update{
+				Owner: MetricOwner(family),
+				Content: Content{Attributes: map[string]string{
+					"type": string(opts.Metadata.Type), "unit": opts.Metadata.Unit, "help": opts.Metadata.Help,
+				}},
+				EffectiveFrom: t,
+			},
+		})
+	}
 	return refFor(ls), nil
 }
 
-// sampleHintState is what hint inference needs about the previous sample.
+// seriesFor returns the transaction's series.
+func (a *appender) seriesFor(ls labels.Labels) (*headSeries, error) {
+	hash := stableSeriesHash(ls)
+	if hs, ok := a.txs[hash]; ok {
+		if !labels.Equal(hs.labels, ls) {
+			return nil, fmt.Errorf("%w for labels = %q", ErrSeriesHashCollision, ls)
+		}
+		return hs, nil
+	}
+	hs := &headSeries{labels: ls}
+	a.txs[hash] = hs
+	a.order = append(a.order, hash)
+	return hs, nil
+}
+
+// Commit applies the buffered series in one transaction.
+func (a *appender) Commit() error {
+	if a.done {
+		return errors.New("columnar: appender used after Commit or Rollback")
+	}
+	a.done = true
+
+	s := a.s
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	if s.closed {
+		return errors.New("columnar: storage is closed")
+	}
+
+	for _, hash := range a.order {
+		tx := a.txs[hash]
+		if last, ok := s.last[hash]; ok && len(tx.ts) > 0 {
+			if !labels.Equal(last.labels, tx.labels) {
+				return ErrSeriesHashCollision
+			}
+			if tx.ts[0] <= last.t {
+				return fmt.Errorf("%w: series %s first buffered timestamp %d is not after committed %d",
+					storage.ErrOutOfOrderSample, tx.labels, tx.ts[0], last.t)
+			}
+		}
+	}
+
+	for _, up := range a.meta {
+		if err := s.metadata.associate(stableSeriesHash(up.Labels), up.Labels, up.Update); err != nil {
+			return fmt.Errorf("metadata append: %w", err)
+		}
+	}
+
+	for _, hash := range a.order {
+		tx := a.txs[hash]
+		if len(tx.ts) == 0 {
+			continue
+		}
+		hs, ok := s.buffer[hash]
+		if !ok {
+			hs = &headSeries{labels: tx.labels}
+			s.buffer[hash] = hs
+		}
+		hs.ts = append(hs.ts, tx.ts...)
+		hs.st = append(hs.st, tx.st...)
+		hs.v = append(hs.v, tx.v...)
+		hs.kind = append(hs.kind, tx.kind...)
+		hs.hist = append(hs.hist, tx.hist...)
+
+		s.bufferN += len(tx.ts)
+		for _, ts := range tx.ts {
+			s.bufferMin = min(s.bufferMin, ts)
+			s.bufferMax = max(s.bufferMax, ts)
+		}
+		last := &seriesState{
+			labels: tx.labels, t: tx.ts[len(tx.ts)-1],
+			st: tx.st[len(tx.st)-1],
+			count: func() int {
+				if previous, ok := s.last[hash]; ok {
+					return previous.count + len(tx.ts)
+				}
+				return len(tx.ts)
+			}(),
+		}
+		kind := tx.kind[len(tx.kind)-1]
+		if kind != SampleFloat && kind != SampleStale {
+			_, fh, err := decodeSampleHistogram(tx.hist[len(tx.hist)-1])
+			if err != nil {
+				return err
+			}
+			last.fh = fh
+		}
+		s.last[hash] = last
+	}
+
+	if s.bufferN >= s.opts.FlushSamples {
+		return s.flushLocked()
+	}
+	return nil
+}
+
+// Rollback discards the whole transaction without touching the head.
+func (a *appender) Rollback() error {
+	if a.done {
+		return errors.New("columnar: appender used after Commit or Rollback")
+	}
+	a.done = true
+	a.txs, a.order, a.meta = nil, nil, nil
+	return nil
+}
+
+// AppendHistogram adds a histogram through the same reduced-codec array path.
+func (a *appender) AppendHistogram(ref storage.SeriesRef, ls labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
+	return a.Append(ref, ls, 0, t, 0, h, fh, storage.AOptions{})
+}
+
+// AppendHistogramSTZeroSample stores a synthetic zero sample at st.
+func (a *appender) AppendHistogramSTZeroSample(ref storage.SeriesRef, ls labels.Labels, _, st int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
+	return a.Append(ref, ls, 0, st, 0, h, fh, storage.AOptions{})
+}
+
+// AppendSTZeroSample appends zero at st, as the TSDB adapter does.
+func (a *appender) AppendSTZeroSample(ref storage.SeriesRef, ls labels.Labels, _, st int64) (storage.SeriesRef, error) {
+	return a.Append(ref, ls, 0, st, 0, nil, nil, storage.AOptions{})
+}
+
+// AppendExemplar is accepted but not stored in this experimental version.
+func (*appender) AppendExemplar(ref storage.SeriesRef, ls labels.Labels, _ exemplar.Exemplar) (storage.SeriesRef, error) {
+	return refFor(ls), nil
+}
+
+// UpdateMetadata handles the v1 MetadataUpdater contract, resolved through the
+// same shared Metric owner rather than fake blobs on an unrelated series.
+func (*appender) UpdateMetadata(_ storage.SeriesRef, _ labels.Labels, _ metadata.Metadata) (storage.SeriesRef, error) {
+	return 0, errors.New("columnar: metadata appending needs a sample timestamp; use AppenderV2 or AppendBatch")
+}
+
+// SetOptions currently has no knobs; OOO is deliberately not enabled here.
+func (*appender) SetOptions(*storage.AppendOptions) {}
+
+// sampleHintState identifies the previous counter/gauge state and whether the
+// sample would begin a fresh TSDB chunk. Reproducing it preserves the semantics
+// of counter-reset warnings without exposing newly invented mid-series hints.
 type sampleHintState struct {
-	// first is set when the current sample starts the series or follows a real
-	// counter reset, which is where the TSDB would have started a new chunk.
 	first bool
-	// gauge is set when the previous histogram was a gauge, which keeps the rest of
-	// its chunk gauge too.
 	gauge bool
-	// reset is set when the current histogram contains a counter reset relative to
-	// the previous one.
 	reset bool
 }
 
-// withInferredResetHint fills in a counter reset hint when the caller did not
-// provide one, following what the TSDB iterator exposes.
-//
-// The TSDB derives the hint from the chunk header rather than from each sample:
-// the first sample of a chunk reads as unknown, the rest as not-reset, and a
-// chunk that starts with a reset also reads as unknown. Reproducing that matters
-// in both directions. Reporting NotCounterReset across a real reset makes
-// resets() and irate() skip work they must do, and reporting CounterReset where
-// the TSDB reports unknown makes aggregations emit a spurious "conflicting
-// counter resets" warning, because no TSDB query ever sees a mid-series reset
-// hint. See https://github.com/prometheus/prometheus/issues/15346.
 func withInferredResetHint(prev sampleHintState, h *histogram.Histogram, fh *histogram.FloatHistogram) (*histogram.Histogram, *histogram.FloatHistogram) {
 	var hint histogram.CounterResetHint
 	if fh != nil {
@@ -345,8 +475,6 @@ func withInferredResetHint(prev sampleHintState, h *histogram.Histogram, fh *his
 	if target == hint {
 		return h, fh
 	}
-
-	// Copy before mutating: the caller owns the histogram it passed in.
 	if fh != nil {
 		cp := fh.Copy()
 		cp.CounterResetHint = target
@@ -357,7 +485,8 @@ func withInferredResetHint(prev sampleHintState, h *histogram.Histogram, fh *his
 	return cp, nil
 }
 
-// detectsReset reports whether cur contains a counter reset relative to prev.
+// detectsReset compares histogram state as floats, which is sufficient because
+// counter reset detection works through relative bucket/count values.
 func detectsReset(prev seriesState, h *histogram.Histogram, fh *histogram.FloatHistogram) bool {
 	var prevFH *histogram.FloatHistogram
 	switch {
@@ -375,179 +504,37 @@ func detectsReset(prev seriesState, h *histogram.Histogram, fh *histogram.FloatH
 		curFH = h.ToFloat(nil)
 	}
 	if prevFH.Schema != curFH.Schema || prevFH.ZeroThreshold != curFH.ZeroThreshold {
-		// Not comparable, so treat it as a new chunk rather than guessing.
+		// Not comparable => new chunk/header semantics, not a false same-chunk reset.
 		return true
 	}
 	return curFH.DetectReset(prevFH)
 }
 
-// previousLocked returns the newest sample of ls, looking in the transaction first
-// and then in the committed state.
+// previousLocked finds the newest sample before the append, including samples
+// already staged in the same appender transaction.
 func (a *appender) previousLocked(ls labels.Labels, tx *headSeries) (seriesState, bool) {
-	priorCount := 0
-	if st, ok := a.s.last[ls.Hash()]; ok {
-		priorCount = st.count
-	}
-
-	if len(tx.samples) > 0 {
-		last := tx.samples[len(tx.samples)-1]
-		state := seriesState{labels: ls, t: last.t, st: last.st, count: priorCount + len(tx.samples) - 1}
-		if last.kind != SampleFloat {
-			h, fh, err := last.decode()
+	if len(tx.ts) > 0 {
+		last := tx.ts[len(tx.ts)-1]
+		state := seriesState{labels: ls, t: last, st: tx.st[len(tx.st)-1]}
+		if kind := tx.kind[len(tx.kind)-1]; kind != SampleFloat {
+			h, fh, err := decodeSampleHistogram(tx.hist[len(tx.hist)-1])
 			if err == nil {
 				state.h, state.fh = h, fh
 			}
 		}
 		return state, true
 	}
-	if st, ok := a.s.last[ls.Hash()]; ok {
-		return *st, true
+	if last, ok := a.s.last[stableSeriesHash(ls)]; ok {
+		return *last, true
 	}
 	return seriesState{}, false
 }
 
-// decode returns the histograms of the sample.
-func (s headSample) decode() (*histogram.Histogram, *histogram.FloatHistogram, error) {
-	var hp prompb.Histogram
-	if err := hp.Unmarshal(s.hist); err != nil {
-		return nil, nil, err
-	}
-	if hp.IsFloatHistogram() {
-		return nil, hp.ToFloatHistogram(), nil
-	}
-	return hp.ToIntHistogram(), nil, nil
-}
-
-// seriesFor returns the transaction-local series for ls, creating it if needed.
-func (a *appender) seriesFor(ls labels.Labels) (*headSeries, error) {
-	hash := ls.Hash()
-	if hs, ok := a.txs[hash]; ok {
-		return hs, nil
-	}
-	hs := &headSeries{labels: ls}
-	a.txs[hash] = hs
-	a.order = append(a.order, hash)
-	return hs, nil
-}
-
-// refFor derives a stable series reference from the labels.
+// refFor derives a stable series reference. Referenced series use the same hash
+// as metadata associations; callers must not treat zero as a valid ref.
 func refFor(ls labels.Labels) storage.SeriesRef {
-	// Zero means "unknown" to callers, so it must not be returned.
-	if ref := storage.SeriesRef(ls.Hash()); ref != 0 {
+	if ref := storage.SeriesRef(stableSeriesHash(ls)); ref != 0 {
 		return ref
 	}
 	return 1
-}
-
-// Commit applies the transaction to the buffer, flushing a block when the buffer
-// is large enough.
-func (a *appender) Commit() error {
-	if a.done {
-		return errors.New("columnar: appender used after Commit or Rollback")
-	}
-	a.done = true
-
-	s := a.s
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-
-	if s.closed {
-		return errors.New("columnar: storage is closed")
-	}
-
-	for _, hash := range a.order {
-		tx := a.txs[hash]
-		if len(tx.samples) == 0 {
-			continue
-		}
-		hs, ok := s.buffer[hash]
-		if !ok {
-			hs = &headSeries{labels: tx.labels}
-			s.buffer[hash] = hs
-		}
-		hs.samples = append(hs.samples, tx.samples...)
-		s.bufferN += len(tx.samples)
-		if last := tx.samples[len(tx.samples)-1]; true {
-			priorCount := 0
-			if previous, ok := s.last[hash]; ok {
-				priorCount = previous.count
-			}
-			state := &seriesState{labels: tx.labels, t: last.t, st: last.st, count: priorCount + len(tx.samples)}
-			if last.kind != SampleFloat {
-				if h, fh, err := last.decode(); err == nil {
-					state.h, state.fh = h, fh
-				}
-			}
-			s.last[hash] = state
-		}
-		for _, smpl := range tx.samples {
-			s.bufferMin = min(s.bufferMin, smpl.t)
-			s.bufferMax = max(s.bufferMax, smpl.t)
-		}
-	}
-
-	if s.bufferN >= s.opts.FlushSamples {
-		return s.flushLocked()
-	}
-	return nil
-}
-
-// Rollback discards the transaction.
-func (a *appender) Rollback() error {
-	if a.done {
-		return errors.New("columnar: appender used after Commit or Rollback")
-	}
-	a.done = true
-	a.txs = nil
-	a.order = nil
-	return nil
-}
-
-// AppendHistogram adds a histogram sample. It exists for the v1 appender
-// interface; AppenderV2 callers pass histograms to Append.
-func (a *appender) AppendHistogram(ref storage.SeriesRef, ls labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
-	return a.Append(ref, ls, 0, t, 0, h, fh, storage.AOptions{})
-}
-
-// AppendHistogramSTZeroSample appends the synthetic zero histogram sample of a
-// start timestamp.
-func (a *appender) AppendHistogramSTZeroSample(_ storage.SeriesRef, ls labels.Labels, _, st int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
-	return a.Append(0, ls, 0, st, 0, h, fh, storage.AOptions{})
-}
-
-// AppendSTZeroSample appends the synthetic zero sample of a start timestamp, as
-// the TSDB does: a zero value at st.
-func (a *appender) AppendSTZeroSample(_ storage.SeriesRef, ls labels.Labels, _, st int64) (storage.SeriesRef, error) {
-	return a.Append(0, ls, 0, st, 0, nil, nil, storage.AOptions{})
-}
-
-// AppendExemplar accepts and drops exemplars: the block format has no exemplar
-// column yet, and failing the append would fail every scrape that carries one.
-func (a *appender) AppendExemplar(_ storage.SeriesRef, ls labels.Labels, _ exemplar.Exemplar) (storage.SeriesRef, error) {
-	if a.done {
-		return 0, errors.New("columnar: appender used after Commit or Rollback")
-	}
-	return refFor(ls), nil
-}
-
-// UpdateMetadata accepts and drops metadata, for the same reason as exemplars.
-func (a *appender) UpdateMetadata(_ storage.SeriesRef, ls labels.Labels, _ metadata.Metadata) (storage.SeriesRef, error) {
-	if a.done {
-		return 0, errors.New("columnar: appender used after Commit or Rollback")
-	}
-	return refFor(ls), nil
-}
-
-// SetOptions is a no-op: this prototype has no out-of-order window.
-func (*appender) SetOptions(*storage.AppendOptions) {}
-
-// appenderV1 adapts the appender to the v1 interface, which storage.Storage still
-// requires. The v1 Append signature has no start timestamp and no histogram
-// parameters, so it forwards floats only.
-type appenderV1 struct {
-	*appender
-}
-
-func (a *appenderV1) Append(_ storage.SeriesRef, ls labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
-	return a.appender.Append(0, ls, 0, t, v, nil, nil, storage.AOptions{})
 }

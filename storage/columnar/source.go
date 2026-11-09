@@ -147,7 +147,7 @@ func mergeSeries(series []Series) []Series {
 	byLabels := map[uint64][]Series{}
 	var keys []uint64
 	for _, s := range series {
-		hash := s.Labels.Hash()
+		hash := stableSeriesHash(s.Labels)
 		if _, ok := byLabels[hash]; !ok {
 			keys = append(keys, hash)
 		}
