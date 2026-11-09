@@ -233,7 +233,7 @@ type appender struct {
 
 // Append implements the shared V2 appender, producing typed head arrays.
 // Prometheus metadata, where supplied, is staged alongside the transaction and
-// associated to the series metric-family owner, not converted into labels here.
+// associated to the series' own metric owner, not converted into labels here.
 func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, opts storage.AOptions) (storage.SeriesRef, error) {
 	if a.done {
 		return 0, errors.New("columnar: appender used after Commit or Rollback")
@@ -291,14 +291,10 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 	hs.v = append(hs.v, v)
 	hs.kind = append(hs.kind, kind)
 	if !opts.Metadata.IsEmpty() {
-		family := opts.MetricFamilyName
-		if family == "" {
-			family = ls.Get(labels.MetricName)
-		}
 		a.meta = append(a.meta, AssociationUpdate{
 			Labels: ls,
 			Update: Update{
-				Owner: MetricOwner(family),
+				Owner: MetricOwner(ls),
 				Content: Content{Attributes: map[string]string{
 					"type": string(opts.Metadata.Type), "unit": opts.Metadata.Unit, "help": opts.Metadata.Help,
 				}},
@@ -352,7 +348,7 @@ func (a *appender) Commit() error {
 	}
 
 	for _, up := range a.meta {
-		if err := s.metadata.associate(stableSeriesHash(up.Labels), up.Labels, up.Update); err != nil {
+		if err := s.metadata.associate(metadataSeriesKey(up.Labels), up.Labels, up.Update); err != nil {
 			return fmt.Errorf("metadata append: %w", err)
 		}
 	}

@@ -14,9 +14,9 @@
 package columnar
 
 import (
-	"cmp"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 
@@ -27,9 +27,9 @@ var (
 	// ErrConflictingMetadata describes two different contents at the same owner and
 	// effective timestamp. The store must not silently choose one by map order.
 	ErrConflictingMetadata = errors.New("columnar: conflicting metadata at the same owner and effective time")
-	// ErrConflictingMembership describes overlapping incomplete owner identities for
-	// one series and metadata kind. It's an association error, not data to join
-	// arbitrarily on read.
+	// ErrConflictingMembership describes different owners asserted for one
+	// series, metadata kind and effective timestamp. It is an association error,
+	// not data to join arbitrarily on read.
 	ErrConflictingMembership = errors.New("columnar: conflicting metadata ownership for series")
 	// ErrSeriesHashCollision prevents metadata for unrelated labels merging through
 	// an owner index keyed by compressed series references.
@@ -55,10 +55,8 @@ type seriesMembershipRow struct {
 }
 
 // metadataStore is the logical metadata catalog. It has no dependency on a
-// sample's physical codec.
-//
-// It owns its own lock. Unlike a side-file reader, the head must be able to
-// accept a new owner update while both Samples and Metadata are being ingested.
+// sample's physical codec. Storage serializes access with its transaction lock;
+// the catalog itself does not add another lock ordering requirement.
 type metadataStore struct {
 	byOwner  map[OwnerKey]*metadataOwnerHistory
 	bySeries map[uint64]map[MetadataKind][]seriesMembershipRow
@@ -80,41 +78,56 @@ func newMetadataStore(versionCap int) *metadataStore {
 }
 
 func (s *metadataStore) update(update Update) error {
+	if update.Owner.Kind > MetadataSource {
+		return fmt.Errorf("columnar: invalid metadata kind %d", update.Owner.Kind)
+	}
+
 	history, ok := s.byOwner[update.Owner]
 	if !ok {
 		history = &metadataOwnerHistory{index: map[string]struct{}{}}
 		s.byOwner[update.Owner] = history
 	}
 
-	newContent := update.Content.Clone()
-	// Latest version matching the content can simply extend observation. No actual
-	// change means no version write.
-	for i := len(history.versions) - 1; i >= 0; i-- {
-		existing := history.versions[i]
-		if existing.EffectiveFrom > update.EffectiveFrom {
-			continue
+	// An equal-time assertion must agree exactly. Do this before changing any
+	// observation bounds so a rejected update leaves the owner untouched.
+	i := sort.Search(len(history.versions), func(i int) bool {
+		return history.versions[i].EffectiveFrom >= update.EffectiveFrom
+	})
+	if i < len(history.versions) && history.versions[i].EffectiveFrom == update.EffectiveFrom {
+		existing := &history.versions[i]
+		if !contentsEqual(existing.Content, update.Content) {
+			return ErrConflictingMetadata
 		}
-		if existing.EffectiveFrom == update.EffectiveFrom {
-			if !contentsEqual(existing.Content, newContent) {
-				return ErrConflictingMetadata
-			}
-		}
-		if contentsEqual(existing.Content, newContent) {
-			history.versions[i].ObservedUntil = max(history.versions[i].ObservedUntil, update.EffectiveFrom)
-			history.versions[i].ObservedFrom = min(history.versions[i].ObservedFrom, update.EffectiveFrom)
-			return nil
-		}
-		break
+		existing.ObservedFrom = min(existing.ObservedFrom, update.EffectiveFrom)
+		existing.ObservedUntil = max(existing.ObservedUntil, update.EffectiveFrom)
+		return nil
+	}
+
+	// Re-observing the content already active at this instant is not a change
+	// point. This also handles a backfilled observation between two versions.
+	if i > 0 && contentsEqual(history.versions[i-1].Content, update.Content) {
+		existing := &history.versions[i-1]
+		existing.ObservedFrom = min(existing.ObservedFrom, update.EffectiveFrom)
+		existing.ObservedUntil = max(existing.ObservedUntil, update.EffectiveFrom)
+		return nil
 	}
 
 	version := Version{
-		Content:       newContent,
+		Content:       update.Content.Clone(),
 		EffectiveFrom: update.EffectiveFrom,
-		ObservedFrom:  newContentEffective(update.EffectiveFrom),
+		ObservedFrom:  update.EffectiveFrom,
 		ObservedUntil: update.EffectiveFrom,
 	}
-	history.versions = append(history.versions, version)
-	slices.SortStableFunc(history.versions, func(a, b Version) int { return cmp.Compare(a.EffectiveFrom, b.EffectiveFrom) })
+	history.versions = slices.Insert(history.versions, i, version)
+
+	// A backfilled change can make its successor redundant. Preserve both
+	// observation ranges while retaining only the actual change point.
+	if i+1 < len(history.versions) && contentsEqual(history.versions[i].Content, history.versions[i+1].Content) {
+		next := history.versions[i+1]
+		history.versions[i].ObservedFrom = min(history.versions[i].ObservedFrom, next.ObservedFrom)
+		history.versions[i].ObservedUntil = max(history.versions[i].ObservedUntil, next.ObservedUntil)
+		history.versions = slices.Delete(history.versions, i+1, i+2)
+	}
 	if s.versionCap > 0 && len(history.versions) > s.versionCap {
 		drop := len(history.versions) - s.versionCap
 		// Drop oldest only after marking the history as intentionally truncated.
@@ -123,15 +136,11 @@ func (s *metadataStore) update(update Update) error {
 		history.truncated = true
 	}
 
-	for key := range newContent.Attributes {
-		history.index[attributeCondition(key, newContent.Attributes[key])] = struct{}{}
+	for key, value := range version.Content.Attributes {
+		history.index[attributeCondition(key, value)] = struct{}{}
 	}
 	return nil
 }
-
-// newContentEffective keeps the observe-from value readable inline. Adding
-// metadata does not infer an authoritative timestamp other than its caller.
-func newContentEffective(t int64) int64 { return t }
 
 func contentsEqual(a, b Content) bool {
 	return a.Canonical() == b.Canonical()
@@ -147,45 +156,59 @@ func (s *metadataStore) associate(seriesHash uint64, ls labels.Labels, update Up
 	if err := s.validateLabels(update.Owner, ls); err != nil {
 		return err
 	}
+	if existing, ok := s.chains[seriesHash]; ok && !labels.Equal(existing, ls) {
+		return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
+	}
+
+	kinds := s.bySeries[seriesHash]
+	rows := kinds[update.Owner.Kind]
+	for _, row := range rows {
+		if row.effectiveFrom == update.EffectiveFrom && row.owner != update.Owner {
+			// Equal-time ownership is ambiguous. Reject it before writing the new
+			// owner version, so the failed association has no catalog side effect.
+			return fmt.Errorf("%w: %s and %s at effective time %d",
+				ErrConflictingMembership, row.owner.ID, update.Owner.ID, update.EffectiveFrom)
+		}
+	}
 	if err := s.update(update); err != nil {
 		return err
 	}
 
-	if existing, ok := s.chains[seriesHash]; ok {
-		if !labels.Equal(existing, ls) {
-			return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
-		}
-	} else {
+	if _, ok := s.chains[seriesHash]; !ok {
 		s.chains[seriesHash] = ls
 	}
-
-	kinds := s.bySeries[seriesHash]
 	if kinds == nil {
 		kinds = map[MetadataKind][]seriesMembershipRow{}
 		s.bySeries[seriesHash] = kinds
 	}
 
-	rows := kinds[update.Owner.Kind]
-	for _, row := range rows {
-		if row.owner != update.Owner {
-			// Any time-based lookahead can't use both candidate owners as if they
-			// were alternatives to reconcile inside an ordinary query.
-			return fmt.Errorf("%w: %s and %s at same effective epoch %d",
-				ErrConflictingMembership, row.owner.ID, update.Owner.ID, update.EffectiveFrom)
-		}
-	}
-	if len(rows) != 0 {
-		// Only the observation and earliest association bounds change. A Resource
-		// content change does not create another member/ownership declaration.
-		rows[0].effectiveFrom = min(rows[0].effectiveFrom, update.EffectiveFrom)
-		rows[0].observedUntil = max(rows[0].observedUntil, update.EffectiveFrom)
+	i := sort.Search(len(rows), func(i int) bool {
+		return rows[i].effectiveFrom >= update.EffectiveFrom
+	})
+	if i < len(rows) && rows[i].effectiveFrom == update.EffectiveFrom {
+		// The conflict check above proves this is the same owner.
+		rows[i].observedUntil = max(rows[i].observedUntil, update.EffectiveFrom)
 		kinds[update.Owner.Kind] = rows
 		return nil
 	}
-	kinds[update.Owner.Kind] = append(rows, seriesMembershipRow{
+	if i > 0 && rows[i-1].owner == update.Owner {
+		// Content updates and repeated observations of the active owner do not
+		// create memberships. Its successor still ends this membership.
+		rows[i-1].observedUntil = max(rows[i-1].observedUntil, update.EffectiveFrom)
+		kinds[update.Owner.Kind] = rows
+		return nil
+	}
+
+	rows = slices.Insert(rows, i, seriesMembershipRow{
 		owner: update.Owner, ls: ls,
 		effectiveFrom: update.EffectiveFrom, observedUntil: update.EffectiveFrom,
 	})
+	if i+1 < len(rows) && rows[i].owner == rows[i+1].owner {
+		// Backfilled ownership subsumes an equal successor membership.
+		rows[i].observedUntil = max(rows[i].observedUntil, rows[i+1].observedUntil)
+		rows = slices.Delete(rows, i+1, i+2)
+	}
+	kinds[update.Owner.Kind] = rows
 	return nil
 }
 
@@ -205,18 +228,17 @@ func (s *metadataStore) at(owner OwnerKey, t int64) (Content, bool, bool) {
 	return history.versions[i-1].Content.Clone(), true, history.truncated
 }
 
-// ownersAt returns the currently associated owner for one kind at t.
-// If no owner association is effective yet, it returns false.
+// ownersAt returns the associated owner for one kind at t. If no owner
+// association is effective yet, it returns false.
 func (s *metadataStore) ownersAt(seriesHash uint64, kind MetadataKind, t int64) (OwnerKey, bool) {
-	return s.ownersAtWithLabels(seriesHash, kind, t)
-}
-
-func (s *metadataStore) ownersAtWithLabels(seriesHash uint64, kind MetadataKind, t int64) (OwnerKey, bool) {
 	rows := s.bySeries[seriesHash][kind]
-	if len(rows) != 1 || t < rows[0].effectiveFrom {
+	i := sort.Search(len(rows), func(i int) bool {
+		return rows[i].effectiveFrom > t
+	})
+	if i == 0 {
 		return OwnerKey{}, false
 	}
-	return rows[0].owner, true
+	return rows[i-1].owner, true
 }
 
 // getAt resolves series→owner→version, with no label-name mutation.
@@ -246,6 +268,23 @@ func cloneVersions(in []Version) []Version {
 	return out
 }
 
+// resourceAttributeNames returns names from retained Resource versions only.
+// Other owner kinds are deliberately absent from Resource discovery.
+func (s *metadataStore) resourceAttributeNames() []string {
+	unique := map[string]struct{}{}
+	for owner, history := range s.byOwner {
+		if owner.Kind != MetadataResource {
+			continue
+		}
+		for _, version := range history.versions {
+			for name := range version.Content.Attributes {
+				unique[name] = struct{}{}
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(unique))
+}
+
 func attributeCondition(name, value string) string {
 	return name + "\x00" + value
 }
@@ -253,7 +292,7 @@ func attributeCondition(name, value string) string {
 // updateAndAssociate checks both side of a metadata update belongs to the same
 // real identity before recording any owner history.
 func (s *metadataStore) validateLabels(owner OwnerKey, ls labels.Labels) error {
-	if existing, ok := s.chains[stableSeriesHash(ls)]; ok && !labels.Equal(existing, ls) {
+	if existing, ok := s.chains[metadataSeriesKey(ls)]; ok && !labels.Equal(existing, ls) {
 		return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
 	}
 	if owner.Kind == MetadataResource {

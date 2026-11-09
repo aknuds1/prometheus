@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/seriesmetadata"
 	"github.com/prometheus/prometheus/util/annotations"
 )
 
@@ -50,13 +51,53 @@ func (s *Storage) Querier(mint, maxt int64) (storage.Querier, error) {
 		queriers = append(queriers, &blockQuerier{block: block, mint: mint, maxt: maxt})
 	}
 
-	if len(queriers) == 0 {
-		return storage.NoopQuerier(), nil
+	var q storage.Querier
+	switch len(queriers) {
+	case 0:
+		q = storage.NoopQuerier()
+	case 1:
+		q = queriers[0]
+	default:
+		q = storage.NewMergeQuerier(queriers, nil, storage.ChainedSeriesMerge)
 	}
-	if len(queriers) == 1 {
-		return queriers[0], nil
+	return &resourceQuerier{Querier: q, storage: s}, nil
+}
+
+// resourceQuerier adds the metadata catalog to ordinary sample selection. The
+// catalog belongs to Storage rather than an individual block or head buffer, so
+// wrapping after the merge keeps all sample layouts on the same identity path.
+type resourceQuerier struct {
+	storage.Querier
+	storage *Storage
+}
+
+// GetResourceAt implements storage.ResourceQuerier. The returned ResourceVersion
+// owns its attribute map, which the caller may modify or retain.
+func (q *resourceQuerier) GetResourceAt(seriesHash uint64, timestamp int64) (*seriesmetadata.ResourceVersion, bool) {
+	content, ok, _ := q.storage.MetadataAt(seriesHash, MetadataResource, timestamp)
+	if !ok {
+		return nil, false
 	}
-	return storage.NewMergeQuerier(queriers, nil, storage.ChainedSeriesMerge), nil
+	return &seriesmetadata.ResourceVersion{Descriptive: content.Attributes}, true
+}
+
+// HasResourceMembershipAt implements storage.ResourceMembershipQuerier.
+func (q *resourceQuerier) HasResourceMembershipAt(seriesHash uint64, timestamp int64) bool {
+	q.storage.mtx.Lock()
+	defer q.storage.mtx.Unlock()
+	_, ok := q.storage.metadata.ownersAt(seriesHash, MetadataResource, timestamp)
+	return ok
+}
+
+// IterUniqueAttributeNames implements storage.ResourceQuerier.
+func (q *resourceQuerier) IterUniqueAttributeNames(fn func(string)) error {
+	q.storage.mtx.Lock()
+	names := q.storage.metadata.resourceAttributeNames()
+	q.storage.mtx.Unlock()
+	for _, name := range names {
+		fn(name)
+	}
+	return nil
 }
 
 // ChunkQuerier returns a chunk querier over [mint, maxt].
@@ -479,13 +520,16 @@ func (c *chunkIterator) Seek(t int64) bool {
 func (c *chunkIterator) Err() error { return c.err }
 
 var (
-	_ storage.Querier        = (*memQuerier)(nil)
-	_ storage.Querier        = (*blockQuerier)(nil)
-	_ storage.ChunkQuerier   = chunkQuerier{}
-	_ storage.SeriesSet      = (*seriesSet)(nil)
-	_ storage.Series         = (*series)(nil)
-	_ chunkenc.Iterator      = (*sampleIterator)(nil)
-	_ storage.ChunkSeriesSet = chunkSeriesSet{}
-	_ storage.ChunkSeries    = chunkSeries{}
-	_ chunks.Iterator        = (*chunkIterator)(nil)
+	_ storage.Querier                   = (*resourceQuerier)(nil)
+	_ storage.ResourceQuerier           = (*resourceQuerier)(nil)
+	_ storage.ResourceMembershipQuerier = (*resourceQuerier)(nil)
+	_ storage.Querier                   = (*memQuerier)(nil)
+	_ storage.Querier                   = (*blockQuerier)(nil)
+	_ storage.ChunkQuerier              = chunkQuerier{}
+	_ storage.SeriesSet                 = (*seriesSet)(nil)
+	_ storage.Series                    = (*series)(nil)
+	_ chunkenc.Iterator                 = (*sampleIterator)(nil)
+	_ storage.ChunkSeriesSet            = chunkSeriesSet{}
+	_ storage.ChunkSeries               = chunkSeries{}
+	_ chunks.Iterator                   = (*chunkIterator)(nil)
 )

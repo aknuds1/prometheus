@@ -510,8 +510,22 @@ type EngineOpts struct {
 	// FeatureRegistry is the registry for tracking enabled/disabled features.
 	FeatureRegistry features.Collector
 
+	// LabelNamerConfig translates OTel Resource attribute names to Prometheus
+	// labels during native info() enrichment. Nil preserves the original names.
+	LabelNamerConfig *LabelNamerConfig
+
 	// Parser is the PromQL parser instance used for parsing expressions.
 	Parser parser.Parser
+}
+
+// LabelNamerConfig holds the OTLP label-name translation settings used by info().
+type LabelNamerConfig struct {
+	// UTF8Allowed preserves valid UTF-8 names instead of replacing characters.
+	UTF8Allowed bool
+	// UnderscoreLabelSanitization applies the legacy leading-underscore rule.
+	UnderscoreLabelSanitization bool
+	// PreserveMultipleUnderscores preserves consecutive underscores when escaping.
+	PreserveMultipleUnderscores bool
 }
 
 // Engine handles the lifetime of queries from beginning to end.
@@ -534,6 +548,7 @@ type Engine struct {
 	useStartTimestamps              bool
 	enableNativeHistogramsAsClassic bool
 	enableQueryCost                 bool
+	labelNamerConfig                *LabelNamerConfig
 	parser                          parser.Parser
 
 	// queryLimitsLock guards the reloadable query-cost limits below.
@@ -743,6 +758,7 @@ func NewEngine(opts EngineOpts) *Engine {
 		useStartTimestamps:              opts.UseStartTimestamps,
 		enableNativeHistogramsAsClassic: opts.EnableNativeHistogramsAsClassic,
 		enableQueryCost:                 opts.EnableQueryCost,
+		labelNamerConfig:                opts.LabelNamerConfig,
 		parser:                          opts.Parser,
 	}
 }
@@ -1308,6 +1324,7 @@ func (ng *Engine) execEvalStmt(ctx context.Context, query *query, s *parser.Eval
 			enableDelayedNameRemoval: ng.enableDelayedNameRemoval,
 			enableTypeAndUnitLabels:  ng.enableTypeAndUnitLabels,
 			useStartTimestamps:       query.useStartTimestamps,
+			labelNamerConfig:         ng.labelNamerConfig,
 			querier:                  querier,
 		}
 		query.sampleStats.InitStepTracking(start, start, 1)
@@ -1370,6 +1387,7 @@ func (ng *Engine) execEvalStmt(ctx context.Context, query *query, s *parser.Eval
 		enableDelayedNameRemoval: ng.enableDelayedNameRemoval,
 		enableTypeAndUnitLabels:  ng.enableTypeAndUnitLabels,
 		useStartTimestamps:       query.useStartTimestamps,
+		labelNamerConfig:         ng.labelNamerConfig,
 		querier:                  querier,
 	}
 	query.sampleStats.InitStepTracking(evaluator.startTimestamp, evaluator.endTimestamp, evaluator.interval)
@@ -1738,6 +1756,7 @@ type evaluator struct {
 	enableDelayedNameRemoval bool
 	enableTypeAndUnitLabels  bool
 	useStartTimestamps       bool
+	labelNamerConfig         *LabelNamerConfig
 	querier                  storage.Querier
 }
 
@@ -2576,6 +2595,7 @@ func (ev *evaluator) runSubquery(ctx context.Context, e *parser.SubqueryExpr) (p
 		enableDelayedNameRemoval: ev.enableDelayedNameRemoval,
 		enableTypeAndUnitLabels:  ev.enableTypeAndUnitLabels,
 		useStartTimestamps:       ev.useStartTimestamps,
+		labelNamerConfig:         ev.labelNamerConfig,
 		querier:                  ev.querier,
 	}
 
@@ -3211,6 +3231,7 @@ func (ev *evaluator) eval(ctx context.Context, expr parser.Expr) (parser.Value, 
 			enableDelayedNameRemoval: ev.enableDelayedNameRemoval,
 			enableTypeAndUnitLabels:  ev.enableTypeAndUnitLabels,
 			useStartTimestamps:       ev.useStartTimestamps,
+			labelNamerConfig:         ev.labelNamerConfig,
 			querier:                  ev.querier,
 		}
 		res, ws := newEv.eval(ctx, e.Expr)

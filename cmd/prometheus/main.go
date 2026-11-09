@@ -1088,7 +1088,12 @@ func main() {
 			EnableNativeHistogramsAsClassic: slices.Contains(cfg.convertClassicHistogramsFrom, "nhcb"),
 			EnableQueryCost:                 cfg.enableQueryCost,
 			FeatureRegistry:                 features.DefaultRegistry,
-			Parser:                          promqlParser,
+			LabelNamerConfig: &promql.LabelNamerConfig{
+				UTF8Allowed:                 !cfgFile.OTLPConfig.TranslationStrategy.ShouldEscape(),
+				UnderscoreLabelSanitization: cfgFile.OTLPConfig.LabelNameUnderscoreSanitization,
+				PreserveMultipleUnderscores: cfgFile.OTLPConfig.LabelNamePreserveMultipleUnderscores,
+			},
+			Parser: promqlParser,
 		}
 
 		queryEngine = promql.NewEngine(opts)

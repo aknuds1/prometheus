@@ -246,7 +246,131 @@ func TestMetadataBatchSemantics(t *testing.T) {
 	require.NoError(t, ss.Err())
 }
 
-func TestMetricKindIsSharedThroughRealSeries(t *testing.T) {
+func TestMetadataMembershipChanges(t *testing.T) {
+	s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+
+	ls := labels.FromStrings("__name__", "source_owned")
+	first := columnar.SourceOwner("first")
+	second := columnar.SourceOwner("second")
+	associate := func(owner columnar.OwnerKey, t int64, value string) error {
+		_, err := s.MetadataAssociate(ls, columnar.Update{
+			Owner: owner, EffectiveFrom: t,
+			Content: columnar.Content{Attributes: map[string]string{"value": value}},
+		})
+		return err
+	}
+
+	require.NoError(t, associate(first, 100, "first-100"))
+	require.NoError(t, associate(second, 200, "second-200"))
+	// An equal-time change of owner is rejected without adding its owner version.
+	require.ErrorIs(t, associate(first, 200, "must-not-be-written"), columnar.ErrConflictingMembership)
+	history, ok := s.MetadataHistory(first)
+	require.True(t, ok)
+	require.Len(t, history.Versions, 1)
+	require.NoError(t, associate(first, 300, "first-300"))
+
+	for _, tc := range []struct {
+		t     int64
+		owner columnar.OwnerKey
+		value string
+		ok    bool
+	}{
+		{t: 99, ok: false},
+		{t: 100, owner: first, value: "first-100", ok: true},
+		{t: 199, owner: first, value: "first-100", ok: true},
+		{t: 200, owner: second, value: "second-200", ok: true},
+		{t: 299, owner: second, value: "second-200", ok: true},
+		{t: 300, owner: first, value: "first-300", ok: true},
+		{t: 400, owner: first, value: "first-300", ok: true},
+	} {
+		content, ok, truncated := s.MetadataAtLabels(ls, columnar.MetadataSource, tc.t)
+		require.Equal(t, tc.ok, ok, "at %d", tc.t)
+		require.False(t, truncated)
+		require.Equal(t, tc.value, content.Attributes["value"], "at %d", tc.t)
+		owner, ok := s.SeriesMetadataAssociation(labels.StableHash(ls), columnar.MetadataSource, tc.t)
+		require.Equal(t, tc.ok, ok, "at %d", tc.t)
+		if tc.ok {
+			require.Equal(t, tc.owner, owner, "at %d", tc.t)
+		}
+	}
+}
+
+func TestMetadataBackfillCoalescesChangePoints(t *testing.T) {
+	s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+
+	ls := labels.FromStrings("__name__", "backfilled")
+	owner := columnar.ScrapeOwner("job-a")
+	observe := func(timestamp int64, interval string) {
+		_, err := s.MetadataAssociate(ls, columnar.Update{
+			Owner: owner, EffectiveFrom: timestamp,
+			Content: columnar.Content{Attributes: map[string]string{"interval": interval}},
+		})
+		require.NoError(t, err)
+	}
+
+	observe(100, "15s")
+	observe(200, "30s")
+	// This backfill advances the actual 30s change from 200 to 150. Keeping
+	// another identical change point at 200 would fabricate an extra version.
+	observe(150, "30s")
+	history, ok := s.MetadataHistory(owner)
+	require.True(t, ok)
+	require.Len(t, history.Versions, 2)
+	require.Equal(t, int64(100), history.Versions[0].EffectiveFrom)
+	require.Equal(t, int64(150), history.Versions[1].EffectiveFrom)
+	require.Equal(t, int64(200), history.Versions[1].ObservedUntil)
+
+	for _, tc := range []struct {
+		t        int64
+		interval string
+	}{
+		{t: 149, interval: "15s"},
+		{t: 150, interval: "30s"},
+		{t: 250, interval: "30s"},
+	} {
+		content, ok, _ := s.MetadataAtLabels(ls, columnar.MetadataScrape, tc.t)
+		require.True(t, ok)
+		require.Equal(t, tc.interval, content.Attributes["interval"])
+	}
+}
+
+func TestMetadataResourceSchemaIsScoped(t *testing.T) {
+	s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+
+	ls := resourceLabels(0)
+	resource := resourceLabelForTest()
+	schema := columnar.ResourceSchemaOwner(resource)
+	require.Equal(t, columnar.MetadataResourceSchema, schema.Kind)
+	require.NotEqual(t, resource, schema)
+
+	_, err = s.MetadataAssociate(ls, columnar.Update{
+		Owner: resource, EffectiveFrom: 100,
+		Content: columnar.Content{Attributes: map[string]string{"host": "a"}},
+	})
+	require.NoError(t, err)
+	_, err = s.MetadataAssociate(ls, columnar.Update{
+		Owner: schema, EffectiveFrom: 100,
+		Content: columnar.Content{Attributes: map[string]string{"schema_url": "resource-v1"}},
+	})
+	require.NoError(t, err)
+
+	resourceContent, ok, _ := s.MetadataAtLabels(ls, columnar.MetadataResource, 100)
+	require.True(t, ok)
+	require.NotContains(t, resourceContent.Attributes, "schema_url")
+	schemaContent, ok, _ := s.MetadataAtLabels(ls, columnar.MetadataResourceSchema, 100)
+	require.True(t, ok)
+	require.Equal(t, "resource-v1", schemaContent.Attributes["schema_url"])
+	_, ok, _ = s.MetadataAtLabels(ls, columnar.MetadataScope, 100)
+	require.False(t, ok)
+}
+
+func TestMetricKindUsesPerSeriesLifecycle(t *testing.T) {
 	s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{})
 	require.NoError(t, err)
 	defer s.Close()
@@ -267,8 +391,33 @@ func TestMetricKindIsSharedThroughRealSeries(t *testing.T) {
 	require.Equal(t, "1", content.Attributes["unit"])
 	require.Equal(t, "counter", content.Attributes["type"])
 
-	// No semantic projection into Resource metadata just because this is a metric-field
-	// kind. The association is explicitly scoped to the Metric owner.
+	// A sibling generated from the same metric family has an independent owner
+	// history even if producers sometimes give it identical content.
+	otherLabels := labels.FromStrings("__name__", "request_total", "route", "/other")
+	app = s.AppenderV2(t.Context())
+	_, err = app.Append(0, otherLabels, 0, 1, 3, nil, nil, storage.AOptions{
+		MetricFamilyName: "request",
+		Metadata:         metadata.Metadata{Type: model.MetricTypeCounter, Unit: "1", Help: "other help"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, app.Commit())
+	require.NotEqual(t, columnar.MetricOwner(ls), columnar.MetricOwner(otherLabels))
+	firstHistory, ok := s.MetadataHistory(columnar.MetricOwner(ls))
+	require.True(t, ok)
+	require.Len(t, firstHistory.Versions, 1)
+	require.Equal(t, "the counter", firstHistory.Versions[0].Content.Attributes["help"])
+	otherHistory, ok := s.MetadataHistory(columnar.MetricOwner(otherLabels))
+	require.True(t, ok)
+	require.Len(t, otherHistory.Versions, 1)
+	require.Equal(t, "other help", otherHistory.Versions[0].Content.Attributes["help"])
+
+	content, ok, truncated = s.MetadataAtLabels(otherLabels, columnar.MetadataMetric, 1000)
+	require.True(t, ok)
+	require.False(t, truncated)
+	require.Equal(t, "other help", content.Attributes["help"])
+
+	// No semantic projection into Resource metadata just because this is a
+	// metric-field kind. The association is scoped to its own Metric owner.
 	_, ok, _ = s.MetadataAtLabels(ls, columnar.MetadataResource, 1000)
 	require.False(t, ok)
 }

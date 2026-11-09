@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+
+	"github.com/prometheus/prometheus/model/labels"
 )
 
 // Synchronisation of samples and their metadata is intentional here: this store
@@ -35,6 +37,7 @@ type MetadataKind uint8
 
 const (
 	MetadataResource MetadataKind = iota
+	MetadataResourceSchema
 	MetadataMetric
 	MetadataScope
 	MetadataScrape
@@ -42,7 +45,7 @@ const (
 )
 
 // KindNames is the stable list of names used at API/index boundaries.
-var KindNames = [...]string{"resource", "metric", "scope", "scrape", "source"}
+var KindNames = [...]string{"resource", "resource_schema", "metric", "scope", "scrape", "source"}
 
 // String returns the kind's category name.
 func (k MetadataKind) String() string {
@@ -84,6 +87,13 @@ func ResourceOwner(attributes map[string]string) OwnerKey {
 	return OwnerKey{Kind: MetadataResource, ID: canonicalAttributes(attributes, "service.name", "service.namespace", "service.instance.id")}
 }
 
+// ResourceSchemaOwner returns the owner of schema metadata for resource.
+// Schema changes are versions of this owner; they do not become Resource
+// attributes or alter resource's series memberships.
+func ResourceSchemaOwner(resource OwnerKey) OwnerKey {
+	return OwnerKey{Kind: MetadataResourceSchema, ID: resource.String()}
+}
+
 // ScopeOwner returns a scoped/schema owner key. A full instrumentation-scope
 // attributes model is deferred; schema URL semantics are captured here.
 func ScopeOwner(name, version string) OwnerKey {
@@ -96,10 +106,11 @@ func ScopeOwner(name, version string) OwnerKey {
 	return OwnerKey{Kind: MetadataScope, ID: string(scopeID)}
 }
 
-// MetricOwner returns the per-metric-family metadata owner. Metric-family
-// metadata is semantically separate from Resource attributes.
-func MetricOwner(familyName string) OwnerKey {
-	return OwnerKey{Kind: MetadataMetric, ID: familyName}
+// MetricOwner returns the metadata owner for one exact Prometheus series.
+// Family name alone is insufficient: related series may share content, but their
+// version lifecycles remain independent. Resource metadata stays a separate kind.
+func MetricOwner(series labels.Labels) OwnerKey {
+	return OwnerKey{Kind: MetadataMetric, ID: series.String()}
 }
 
 // SourceOwner identifies the ingestion source. Unlike metric identity, this
@@ -143,7 +154,9 @@ type Update struct {
 }
 
 // Version is a metadata version with an inclusive begin time. The next version
-// ends it exclusively when read. Versions are not expanded into per-sample rows.
+// ends it exclusively when read; without a successor, validity is open-ended.
+// ObservedFrom and ObservedUntil record actual observations, not validity bounds.
+// Versions are not expanded into per-sample rows.
 type Version struct {
 	Content       Content
 	EffectiveFrom int64
@@ -152,6 +165,9 @@ type Version struct {
 }
 
 // Association is the time-valid membership of one series in one owner.
+// EffectiveFrom is inclusive. The next association of the same series and kind
+// ends this membership exclusively; without one, membership is open-ended.
+// ObservedUntil is an observation bound, not an expiry time.
 type Association struct {
 	Owner         OwnerKey
 	EffectiveFrom int64

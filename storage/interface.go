@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
+	"github.com/prometheus/prometheus/tsdb/seriesmetadata"
 	"github.com/prometheus/prometheus/util/annotations"
 )
 
@@ -215,6 +216,31 @@ type ExemplarQuerier interface {
 	// Select all the exemplars that match the matchers.
 	// Within a single slice of matchers, it is an intersection. Between the slices, it is a union.
 	Select(start, end int64, matchers ...[]*labels.Matcher) ([]exemplar.QueryResult, error)
+}
+
+// ResourceQuerier provides optional access to Resource-owned native metadata.
+// Implementations resolve the series membership and Resource version at the
+// supplied timestamp; they must not substitute the latest observed version.
+type ResourceQuerier interface {
+	// GetResourceAt returns the Resource metadata active at timestamp for the
+	// series identified by labels.StableHash. It returns false before the first
+	// effective association/version or when the series has no Resource owner.
+	// Implementations must document ownership of the returned maps.
+	GetResourceAt(labelsHash uint64, timestamp int64) (*seriesmetadata.ResourceVersion, bool)
+
+	// IterUniqueAttributeNames calls fn once for each retained Resource attribute
+	// name. The iteration order is deterministic.
+	IterUniqueAttributeNames(fn func(name string)) error
+}
+
+// ResourceMembershipQuerier is an optional companion to ResourceQuerier. It
+// distinguishes an absent association from an association whose applicable
+// version is absent or no longer retained. Callers can keep the latter inert
+// instead of incorrectly falling back to another metadata source.
+type ResourceMembershipQuerier interface {
+	// HasResourceMembershipAt reports whether the series identified by
+	// labels.StableHash has an effective Resource membership at timestamp.
+	HasResourceMembershipAt(labelsHash uint64, timestamp int64) bool
 }
 
 // SelectHints specifies hints passed for data selections.

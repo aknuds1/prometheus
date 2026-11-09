@@ -19,7 +19,6 @@ import (
 	"fmt"
 
 	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/model/metadata"
 )
 
 const (
@@ -28,21 +27,6 @@ const (
 	// Metadata descriptive context doesn't alter this label across Resource versions.
 	OTELResourceLabel = "__otel_resource__"
 )
-
-// MetricMetadataOwner is the owner for a metric family. This shares real scaling
-// metadata across related series without requiring a Resource attribution.
-func (s *Storage) updateMetricMetadata(ls labels.Labels, md metadata.Metadata, family string, t int64) error {
-	if md.IsEmpty() {
-		return nil
-	}
-	if family == "" {
-		family = ls.Get(labels.MetricName)
-	}
-	attrs := map[string]string{"type": string(md.Type), "unit": md.Unit, "help": md.Help}
-	return s.metadata.associate(stableSeriesHash(ls), ls, Update{
-		Owner: MetricOwner(family), Content: Content{Attributes: attrs}, EffectiveFrom: t,
-	})
-}
 
 // MetadataAssociate registers a synchronous metadata observation and series
 // association. The main purpose is native metadata that is received with samples,
@@ -57,13 +41,14 @@ func (s *Storage) MetadataAssociate(ls labels.Labels, update Update) (string, er
 	if s.closed {
 		return "", errors.New("columnar: storage is closed")
 	}
-	if err := s.metadata.associate(stableSeriesHash(ls), ls, update); err != nil {
+	if err := s.metadata.associate(metadataSeriesKey(ls), ls, update); err != nil {
 		return "", err
 	}
 	return update.Owner.Ref(), nil
 }
 
-// MetadataAt resolves series→owner→version at timestamp t.
+// MetadataAt resolves series→owner→version at timestamp t. seriesHash must be
+// the series' labels.StableHash, matching storage.ResourceQuerier.
 //
 // The boolean flags mean "has value" and "history was intentionally truncated",
 // respectively. The returned content is copied and can be kept by the caller.
@@ -75,7 +60,7 @@ func (s *Storage) MetadataAt(seriesHash uint64, kind MetadataKind, t int64) (Con
 
 // MetadataAtLabels is the label-keyed equivalent of MetadataAt.
 func (s *Storage) MetadataAtLabels(ls labels.Labels, kind MetadataKind, t int64) (Content, bool, bool) {
-	return s.MetadataAt(stableSeriesHash(ls), kind, t)
+	return s.MetadataAt(metadataSeriesKey(ls), kind, t)
 }
 
 // MetadataHistory returns the owner's variable history with its Truncated bit.
@@ -85,8 +70,9 @@ func (s *Storage) MetadataHistory(owner OwnerKey) (OwnerHistory, bool) {
 	return s.metadata.history(owner)
 }
 
-// SeriesMetadataAssociation reports the known owner for a series and kind.
-// It does not enumerate all current samples; it's a metadata membership query.
+// SeriesMetadataAssociation reports the owner for a series, kind and timestamp.
+// seriesHash is the labels.StableHash of the series' labels. It does not
+// enumerate samples; it is a membership query.
 func (s *Storage) SeriesMetadataAssociation(seriesHash uint64, kind MetadataKind, at int64) (OwnerKey, bool) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -187,7 +173,7 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 	}
 
 	for i, update := range batch.Updates {
-		if err := s.metadata.associate(stableSeriesHash(update.Labels), update.Labels, update.Update); err != nil {
+		if err := s.metadata.associate(metadataSeriesKey(update.Labels), update.Labels, update.Update); err != nil {
 			return fmt.Errorf("metadata update %d: %w", i, err)
 		}
 	}

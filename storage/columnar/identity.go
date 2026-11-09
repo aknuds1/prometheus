@@ -45,5 +45,5 @@ func resourceLabel(owner OwnerKey) labels.Label {
 	return labels.Label{Name: OTELResourceLabel, Value: owner.Ref()}
 }
 
-// metadataSeriesKey is the store's stable metadata key.
-func metadataSeriesKey(ls labels.Labels) uint64 { return stableSeriesHash(ls) }
+// metadataSeriesKey is the series identity shared with storage.ResourceQuerier.
+func metadataSeriesKey(ls labels.Labels) uint64 { return labels.StableHash(ls) }
