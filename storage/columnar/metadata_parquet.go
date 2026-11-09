@@ -50,11 +50,13 @@ func writeMetadataRelations(dir string, relations *metadataRelations, opts Write
 			kinds := builder.Field(1).(*array.Uint8Builder)
 			keys := builder.Field(2).(*array.StringBuilder)
 			truncated := builder.Field(3).(*array.BooleanBuilder)
+			replace := builder.Field(4).(*array.BooleanBuilder)
 			for _, row := range relations.owners {
 				ids.Append(row.id)
 				kinds.Append(uint8(row.key.Kind))
 				keys.Append(row.key.ID)
 				truncated.Append(row.truncated)
+				replace.Append(row.replace)
 			}
 		}},
 		{name: metadataContentsFile, schema: metadataContentsSchema(), build: func(builder *array.RecordBuilder) {
@@ -87,12 +89,14 @@ func writeMetadataRelations(dir string, relations *metadataRelations, opts Write
 			effective := builder.Field(2).(*array.Int64Builder)
 			observedUntil := builder.Field(3).(*array.Int64Builder)
 			labelSets := builder.Field(4).(*array.ListBuilder)
+			replace := builder.Field(5).(*array.BooleanBuilder)
 			for _, row := range relations.memberships {
 				series.Append(row.seriesHash)
 				owners.Append(row.ownerID)
 				effective.Append(row.effectiveFrom)
 				observedUntil.Append(row.observedUntil)
 				appendMetadataLabels(labelSets, row.labels)
+				replace.Append(row.replace)
 			}
 		}},
 	}
@@ -248,13 +252,15 @@ func appendMetadataOwnerRows(out *[]metadataOwnerRow, record arrow.RecordBatch) 
 	kinds := record.Column(1).(*array.Uint8)
 	keys := record.Column(2).(*array.String)
 	truncated := record.Column(3).(*array.Boolean)
+	replace := record.Column(4).(*array.Boolean)
 	for row := range int(record.NumRows()) {
 		kind := MetadataKind(kinds.Value(row))
 		if kind > MetadataSource {
 			return fmt.Errorf("unknown metadata kind %d", kind)
 		}
 		*out = append(*out, metadataOwnerRow{
-			id: ids.Value(row), key: OwnerKey{Kind: kind, ID: keys.Value(row)}, truncated: truncated.Value(row),
+			id: ids.Value(row), key: OwnerKey{Kind: kind, ID: keys.Value(row)},
+			truncated: truncated.Value(row), replace: replace.Value(row),
 		})
 	}
 	return nil
@@ -308,6 +314,7 @@ func appendMetadataMembershipRows(out *[]metadataMembershipRow, record arrow.Rec
 	pairs := labelSets.ListValues().(*array.Struct)
 	names := pairs.Field(0).(*array.String)
 	values := pairs.Field(1).(*array.String)
+	replace := record.Column(5).(*array.Boolean)
 	for row := range int(record.NumRows()) {
 		start, end := labelSets.ValueOffsets(row)
 		labelSlice := make([]labels.Label, 0, end-start)
@@ -323,7 +330,7 @@ func appendMetadataMembershipRows(out *[]metadataMembershipRow, record arrow.Rec
 		*out = append(*out, metadataMembershipRow{
 			seriesHash: series.Value(row), ownerID: owners.Value(row),
 			effectiveFrom: effective.Value(row), observedUntil: observedUntil.Value(row),
-			labels: labels.New(labelSlice...),
+			labels: labels.New(labelSlice...), replace: replace.Value(row),
 		})
 	}
 	return nil

@@ -24,6 +24,9 @@ import (
 )
 
 var (
+	// ErrMetadataDisabled is returned when a batch asks an explicitly
+	// metadata-disabled store to initialize or update the native catalog.
+	ErrMetadataDisabled = errors.New("columnar: native metadata is disabled")
 	// ErrConflictingMetadata describes two different contents at the same owner and
 	// effective timestamp. The store must not silently choose one by map order.
 	ErrConflictingMetadata = errors.New("columnar: conflicting metadata at the same owner and effective time")
@@ -132,8 +135,16 @@ func (s *metadataStore) update(update Update) error {
 		drop := len(history.versions) - s.versionCap
 		// Drop oldest only after marking the history as intentionally truncated.
 		// This remains observable rather than becoming a silent current-value lookup.
-		history.versions = history.versions[drop:]
+		// Clone drops references to evicted content in the old backing array.
+		history.versions = slices.Clone(history.versions[drop:])
 		history.truncated = true
+		// The provisional inverted index must not retain evicted values either.
+		clear(history.index)
+		for _, version := range history.versions {
+			for key, value := range version.Content.Attributes {
+				history.index[attributeCondition(key, value)] = struct{}{}
+			}
+		}
 	}
 
 	for key, value := range version.Content.Attributes {
@@ -150,22 +161,16 @@ func contentsEqual(a, b Content) bool {
 // Owner history and membership are deliberately separate. A new member never
 // duplicates the Resource owner's descriptive attributes.
 func (s *metadataStore) associate(seriesHash uint64, ls labels.Labels, update Update) error {
-	// Reject an impoverished or inconsistent identity before contaminating owner
-	// history. For Resource-associated series this is exactly what keeps the sample
-	// series and Resource owner from silently being two different entities.
+	// Reject all identity conflicts before mutating the owner's history.
 	if err := s.validateLabels(update.Owner, ls); err != nil {
 		return err
 	}
 	if existing, ok := s.chains[seriesHash]; ok && !labels.Equal(existing, ls) {
 		return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
 	}
-
-	kinds := s.bySeries[seriesHash]
-	rows := kinds[update.Owner.Kind]
+	rows := s.bySeries[seriesHash][update.Owner.Kind]
 	for _, row := range rows {
 		if row.effectiveFrom == update.EffectiveFrom && row.owner != update.Owner {
-			// Equal-time ownership is ambiguous. Reject it before writing the new
-			// owner version, so the failed association has no catalog side effect.
 			return fmt.Errorf("%w: %s and %s at effective time %d",
 				ErrConflictingMembership, row.owner.ID, update.Owner.ID, update.EffectiveFrom)
 		}
@@ -173,42 +178,57 @@ func (s *metadataStore) associate(seriesHash uint64, ls labels.Labels, update Up
 	if err := s.update(update); err != nil {
 		return err
 	}
+	return s.attachMembership(seriesHash, ls, update.Owner, update.EffectiveFrom, update.EffectiveFrom)
+}
 
-	if _, ok := s.chains[seriesHash]; !ok {
-		s.chains[seriesHash] = ls
+// attachMembership records only an owner relationship. Unlike associate, it
+// never creates an owner version. Restoring rows retains their observation bound.
+func (s *metadataStore) attachMembership(seriesHash uint64, ls labels.Labels, owner OwnerKey, effectiveFrom, observedUntil int64) error {
+	if err := s.validateLabels(owner, ls); err != nil {
+		return err
 	}
+	if existing, ok := s.chains[seriesHash]; ok && !labels.Equal(existing, ls) {
+		return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
+	}
+	kinds := s.bySeries[seriesHash]
 	if kinds == nil {
 		kinds = map[MetadataKind][]seriesMembershipRow{}
 		s.bySeries[seriesHash] = kinds
 	}
+	rows := kinds[owner.Kind]
 
 	i := sort.Search(len(rows), func(i int) bool {
-		return rows[i].effectiveFrom >= update.EffectiveFrom
+		return rows[i].effectiveFrom >= effectiveFrom
 	})
-	if i < len(rows) && rows[i].effectiveFrom == update.EffectiveFrom {
-		// The conflict check above proves this is the same owner.
-		rows[i].observedUntil = max(rows[i].observedUntil, update.EffectiveFrom)
-		kinds[update.Owner.Kind] = rows
+	if i < len(rows) && rows[i].effectiveFrom == effectiveFrom {
+		if rows[i].owner != owner {
+			return fmt.Errorf("%w: %s and %s at effective time %d", ErrConflictingMembership,
+				rows[i].owner.ID, owner.ID, effectiveFrom)
+		}
+		rows[i].observedUntil = max(rows[i].observedUntil, observedUntil)
+		kinds[owner.Kind] = rows
 		return nil
 	}
-	if i > 0 && rows[i-1].owner == update.Owner {
+	if i > 0 && rows[i-1].owner == owner {
 		// Content updates and repeated observations of the active owner do not
 		// create memberships. Its successor still ends this membership.
-		rows[i-1].observedUntil = max(rows[i-1].observedUntil, update.EffectiveFrom)
-		kinds[update.Owner.Kind] = rows
+		rows[i-1].observedUntil = max(rows[i-1].observedUntil, observedUntil)
+		kinds[owner.Kind] = rows
 		return nil
 	}
 
+	if _, ok := s.chains[seriesHash]; !ok {
+		s.chains[seriesHash] = ls
+	}
 	rows = slices.Insert(rows, i, seriesMembershipRow{
-		owner: update.Owner, ls: ls,
-		effectiveFrom: update.EffectiveFrom, observedUntil: update.EffectiveFrom,
+		owner: owner, ls: ls, effectiveFrom: effectiveFrom, observedUntil: observedUntil,
 	})
 	if i+1 < len(rows) && rows[i].owner == rows[i+1].owner {
 		// Backfilled ownership subsumes an equal successor membership.
 		rows[i].observedUntil = max(rows[i].observedUntil, rows[i+1].observedUntil)
 		rows = slices.Delete(rows, i+1, i+2)
 	}
-	kinds[update.Owner.Kind] = rows
+	kinds[owner.Kind] = rows
 	return nil
 }
 

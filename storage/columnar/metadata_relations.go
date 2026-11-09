@@ -36,6 +36,8 @@ type metadataOwnerRow struct {
 	id        uint64
 	key       OwnerKey
 	truncated bool
+	// replace means the exported versions replace the owner's prior history.
+	replace bool
 }
 
 // metadataContentRow holds full content by block-local ID. Digest is generated
@@ -60,6 +62,8 @@ type metadataMembershipRow struct {
 	effectiveFrom int64
 	observedUntil int64
 	labels        labels.Labels
+	// replace means all memberships for this series/kind are in this snapshot.
+	replace bool
 }
 
 // metadataRelations is an immutable snapshot for block publication. A snapshot
@@ -239,6 +243,7 @@ func metadataOwnersSchema() *arrow.Schema {
 		{Name: "kind", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
 		{Name: "owner_key", Type: arrow.BinaryTypes.String, Nullable: false},
 		{Name: "truncated", Type: arrow.FixedWidthTypes.Boolean, Nullable: false},
+		{Name: "replace", Type: arrow.FixedWidthTypes.Boolean, Nullable: false},
 	}, nil)
 }
 
@@ -267,6 +272,7 @@ func metadataMembershipsSchema() *arrow.Schema {
 		{Name: "effective_from", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
 		{Name: "observed_until", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
 		{Name: "labels", Type: metadataStringPairsType(), Nullable: false},
+		{Name: "replace", Type: arrow.FixedWidthTypes.Boolean, Nullable: false},
 	}, nil)
 }
 

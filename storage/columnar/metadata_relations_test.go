@@ -81,17 +81,18 @@ func TestMetadataTenThousandMembersShareOwnerVersions(t *testing.T) {
 
 	owner := ResourceOwner(map[string]string{"service.name": "payments", "service.instance.id": "pay01"})
 	labelSets := make([]labels.Labels, memberCount)
+	updates := make([]AssociationUpdate, 0, memberCount)
 	for i := range memberCount {
 		labelSets[i] = labels.FromStrings(
 			labels.MetricName, fmt.Sprintf("payments_%d", i),
 			OTELResourceLabel, owner.Ref(),
 		)
-		_, err := s.MetadataAssociate(labelSets[i], Update{
+		updates = append(updates, AssociationUpdate{Labels: labelSets[i], Update: Update{
 			Owner: owner, EffectiveFrom: 100,
 			Content: Content{Attributes: map[string]string{"host": "a", "version": "1"}},
-		})
-		require.NoError(t, err)
+		}})
 	}
+	require.NoError(t, s.AppendBatch(t.Context(), Batch{Updates: updates}))
 
 	// One actual Resource change creates one version, irrespective of membership
 	// count. No content or version row is copied into each member relation.

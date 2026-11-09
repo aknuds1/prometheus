@@ -35,16 +35,10 @@ const (
 // The returned string is suitable for __otel_resource__. Other metadata kinds
 // must remain their own category, not be promoted into labels as a side effect.
 func (s *Storage) MetadataAssociate(ls labels.Labels, update Update) (string, error) {
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-
-	if s.closed {
-		return "", errors.New("columnar: storage is closed")
-	}
-	if err := s.metadata.associate(metadataSeriesKey(ls), ls, update); err != nil {
+	err := s.AppendBatch(context.Background(), Batch{Updates: []AssociationUpdate{{Labels: ls, Update: update}}})
+	if err != nil {
 		return "", err
 	}
-	s.metadataDirty = true
 	return update.Owner.Ref(), nil
 }
 
@@ -52,16 +46,7 @@ func (s *Storage) MetadataAssociate(ls labels.Labels, update Update) (string, er
 // series and without requiring a sample. This is useful for explicit owner
 // metadata inspection; it does not claim asynchronous transport delivery.
 func (s *Storage) MetadataUpdate(update Update) error {
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	if s.closed {
-		return errors.New("columnar: storage is closed")
-	}
-	if err := s.metadata.update(update); err != nil {
-		return err
-	}
-	s.metadataDirty = true
-	return nil
+	return s.AppendBatch(context.Background(), Batch{OwnerUpdates: []Update{update}})
 }
 
 // MetadataAtOwner returns the owner version effective at t without traversing a
@@ -69,6 +54,9 @@ func (s *Storage) MetadataUpdate(update Update) error {
 func (s *Storage) MetadataAtOwner(owner OwnerKey, t int64) (Content, bool, bool) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+	if s.metadata == nil {
+		return Content{}, false, false
+	}
 	return s.metadata.at(owner, t)
 }
 
@@ -80,6 +68,9 @@ func (s *Storage) MetadataAtOwner(owner OwnerKey, t int64) (Content, bool, bool)
 func (s *Storage) MetadataAt(seriesHash uint64, kind MetadataKind, t int64) (Content, bool, bool) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+	if s.metadata == nil {
+		return Content{}, false, false
+	}
 	return s.metadata.getAt(seriesHash, kind, t)
 }
 
@@ -92,6 +83,9 @@ func (s *Storage) MetadataAtLabels(ls labels.Labels, kind MetadataKind, t int64)
 func (s *Storage) MetadataHistory(owner OwnerKey) (OwnerHistory, bool) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+	if s.metadata == nil {
+		return OwnerHistory{}, false
+	}
 	return s.metadata.history(owner)
 }
 
@@ -101,6 +95,9 @@ func (s *Storage) MetadataHistory(owner OwnerKey) (OwnerHistory, bool) {
 func (s *Storage) SeriesMetadataAssociation(seriesHash uint64, kind MetadataKind, at int64) (OwnerKey, bool) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+	if s.metadata == nil {
+		return OwnerKey{}, false
+	}
 	return s.metadata.ownersAt(seriesHash, kind, at)
 }
 
@@ -113,6 +110,9 @@ func (s *Storage) SeriesMetadataAssociation(seriesHash uint64, kind MetadataKind
 type Batch struct {
 	Series  []BatchSeries
 	Updates []AssociationUpdate
+	// OwnerUpdates carry owner versions without series memberships. They are
+	// logged and replayed independently of samples and associations.
+	OwnerUpdates []Update
 }
 
 // BatchSeries is one series and its sample columns.
@@ -191,19 +191,40 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 			hs = newHeadSeries(series.Labels)
 			txs[hash] = hs
 			order = append(order, hash)
+		} else if !labels.Equal(hs.labels, series.Labels) {
+			return ErrSeriesHashCollision
 		}
 		// Nothing new series is merged by StableHash without checking the actual
 		// labels, preventing association collapse even in compressed ID maps.
 		appendTypedSeries(hs, series)
 	}
 
-	metadataChanged := false
-	for i, update := range batch.Updates {
-		if err := s.metadata.associate(metadataSeriesKey(update.Labels), update.Labels, update.Update); err != nil {
-			return fmt.Errorf("metadata update %d: %w", i, err)
+	metadataChanged := len(batch.Updates)+len(batch.OwnerUpdates) > 0
+	nextMetadata := s.metadata
+	if metadataChanged {
+		if s.metadata == nil {
+			return ErrMetadataDisabled
 		}
-		metadataChanged = true
+		var err error
+		nextMetadata, err = s.metadata.clone()
+		if err != nil {
+			return fmt.Errorf("preparing metadata transaction: %w", err)
+		}
+		for i, update := range batch.Updates {
+			if err := nextMetadata.associate(metadataSeriesKey(update.Labels), update.Labels, update.Update); err != nil {
+				return fmt.Errorf("metadata update %d: %w", i, err)
+			}
+		}
+		for i, update := range batch.OwnerUpdates {
+			if err := nextMetadata.update(update); err != nil {
+				return fmt.Errorf("owner metadata update %d: %w", i, err)
+			}
+		}
 	}
+	if err := s.appendWALBatch(batch); err != nil {
+		return err
+	}
+	s.metadata = nextMetadata
 	s.metadataDirty = s.metadataDirty || metadataChanged
 	return s.commitHead(txs, order)
 }
@@ -252,6 +273,9 @@ func validateSeriesColumns(series BatchSeries) error {
 		case SampleHistogram, SampleFloatHistogram:
 			if len(series.Histograms[i]) == 0 {
 				return fmt.Errorf("columnar: histogram sample at index %d has no payload", i)
+			}
+			if _, _, err := decodeSampleHistogram(series.Histograms[i]); err != nil {
+				return fmt.Errorf("columnar: invalid histogram at index %d: %w", i, err)
 			}
 		default:
 			return fmt.Errorf("columnar: invalid kind %d at index %d", kind, i)

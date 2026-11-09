@@ -85,6 +85,9 @@ func (q *resourceQuerier) GetResourceAt(seriesHash uint64, timestamp int64) (*se
 func (q *resourceQuerier) HasResourceMembershipAt(seriesHash uint64, timestamp int64) bool {
 	q.storage.mtx.Lock()
 	defer q.storage.mtx.Unlock()
+	if q.storage.metadata == nil {
+		return false
+	}
 	_, ok := q.storage.metadata.ownersAt(seriesHash, MetadataResource, timestamp)
 	return ok
 }
@@ -92,7 +95,10 @@ func (q *resourceQuerier) HasResourceMembershipAt(seriesHash uint64, timestamp i
 // IterUniqueAttributeNames implements storage.ResourceQuerier.
 func (q *resourceQuerier) IterUniqueAttributeNames(fn func(string)) error {
 	q.storage.mtx.Lock()
-	names := q.storage.metadata.resourceAttributeNames()
+	var names []string
+	if q.storage.metadata != nil {
+		names = q.storage.metadata.resourceAttributeNames()
+	}
 	q.storage.mtx.Unlock()
 	for _, name := range names {
 		fn(name)

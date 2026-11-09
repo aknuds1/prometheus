@@ -50,13 +50,15 @@ type MetadataSummary struct {
 // Times are in milliseconds and follow Prometheus block conventions: MinTime is
 // inclusive, MaxTime exclusive.
 type Meta struct {
-	ULID          string           `json:"ulid"`
-	MinTime       int64            `json:"min_time"`
-	MaxTime       int64            `json:"max_time"`
-	NumSeries     int              `json:"num_series"`
-	NumSamples    int              `json:"num_samples"`
-	FormatVersion int              `json:"format_version"`
-	Metadata      *MetadataSummary `json:"metadata,omitempty"`
+	ULID          string `json:"ulid"`
+	MinTime       int64  `json:"min_time"`
+	MaxTime       int64  `json:"max_time"`
+	NumSeries     int    `json:"num_series"`
+	NumSamples    int    `json:"num_samples"`
+	FormatVersion int    `json:"format_version"`
+	// WALSequence is the highest append-log batch included in this block.
+	WALSequence uint64           `json:"wal_sequence,omitempty"`
+	Metadata    *MetadataSummary `json:"metadata,omitempty"`
 	// SeriesPerRowGroup is the row group size the block was written with. A select
 	// needs it to map a matching row to the row group that contains it, so that it
 	// reads only those groups.
@@ -74,12 +76,12 @@ type Meta struct {
 // maxt are not passed in, because a block that disagrees with its samples is
 // worse than one whose range is derived.
 func WriteBlock(dir string, series []Series, opts WriteOptions) (Meta, error) {
-	return writeBlock(dir, series, nil, opts)
+	return writeBlock(dir, series, nil, opts, 0)
 }
 
 // writeBlock writes samples and an optional metadata snapshot. All relations
 // and their catalog summary enter the temporary block before its atomic rename.
-func writeBlock(dir string, series []Series, metadata *metadataRelations, opts WriteOptions) (Meta, error) {
+func writeBlock(dir string, series []Series, metadata *metadataRelations, opts WriteOptions, walSequence uint64) (Meta, error) {
 	opts = opts.withDefaults()
 
 	series = slices.Clone(series)
@@ -94,6 +96,7 @@ func writeBlock(dir string, series []Series, metadata *metadataRelations, opts W
 		ULID:              ulid.Make().String(),
 		FormatVersion:     FormatVersion,
 		NumSeries:         len(series),
+		WALSequence:       walSequence,
 		Metadata:          metadata.summary(),
 		SeriesPerRowGroup: opts.MaxSeriesPerRowGroup,
 	}
@@ -265,7 +268,7 @@ func ListBlocks(dir string) ([]*Block, error) {
 
 	blocks := make([]*Block, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() || filepath.Ext(entry.Name()) == tmpDirSuffix {
+		if !entry.IsDir() || entry.Name() == walDirName || filepath.Ext(entry.Name()) == tmpDirSuffix {
 			continue
 		}
 		block, err := OpenBlock(filepath.Join(dir, entry.Name()))
@@ -278,6 +281,12 @@ func ListBlocks(dir string) ([]*Block, error) {
 		return nil, ErrNoBlocks
 	}
 	slices.SortFunc(blocks, func(a, b *Block) int {
+		if a.meta.WALSequence != 0 && b.meta.WALSequence != 0 && a.meta.WALSequence != b.meta.WALSequence {
+			if a.meta.WALSequence < b.meta.WALSequence {
+				return -1
+			}
+			return 1
+		}
 		switch {
 		case a.meta.ULID < b.meta.ULID:
 			return -1

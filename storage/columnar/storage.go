@@ -32,7 +32,11 @@ import (
 
 // DefaultFlushSamples is the default number of buffered samples triggering a
 // block flush.
-const DefaultFlushSamples = 1000
+const (
+	DefaultFlushSamples = 1000
+	// DefaultMetadataVersionCap bounds immutable and replayed owner histories.
+	DefaultMetadataVersionCap = 5
+)
 
 // StorageOptions configures a Storage.
 type StorageOptions struct {
@@ -40,9 +44,17 @@ type StorageOptions struct {
 	// written as a block. Zero selects DefaultFlushSamples.
 	FlushSamples int
 
-	// MetadataVersionCap bounds history per owner. Zero means unbounded; it is a
-	// deliberate knob for observing churn, not a hidden current-state truncation.
+	// MetadataVersionCap bounds history per owner. Zero selects
+	// DefaultMetadataVersionCap. A negative value deliberately removes the cap
+	// for churn experiments and must not be used as a durable default.
 	MetadataVersionCap int
+
+	// DisableWAL leaves unflushed batches without a segment log and creates no
+	// WAL directory. It is intended for explicit experiments, not safe defaults.
+	DisableWAL bool
+	// DisableNativeMetadata leaves the metadata catalog uninitialized. Sample-only
+	// batches still work; metadata associations and owner updates return an error.
+	DisableNativeMetadata bool
 
 	// WriteOptions are passed to the block writer.
 	WriteOptions WriteOptions
@@ -51,9 +63,9 @@ type StorageOptions struct {
 // Storage is an experimental columnar storage.
 //
 // Samples enter in typed per-series arrays, and metadata enters the shared
-// owner/version/membership store. There is no WAL, compaction, retention or OOO
-// sample mutation yet. This is deliberately a research tool for measuring these
-// semantics, not a production database.
+// owner/version/membership store. WAL segments replay unflushed batches and
+// immutable blocks restore committed state. Compaction, retention and OOO sample
+// mutation remain experiments, not production promises.
 type Storage struct {
 	dir  string
 	opts StorageOptions
@@ -67,8 +79,12 @@ type Storage struct {
 	last      map[uint64]*seriesState
 	closed    bool
 
-	metadata      *metadataStore
-	metadataDirty bool
+	metadata          *metadataStore
+	metadataPublished *metadataRelations
+	metadataDirty     bool
+
+	walSequence uint64
+	replaying   bool
 }
 
 // headSeries holds samples as typed columns. Histograms must be encoded before
@@ -98,6 +114,11 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 	if opts.FlushSamples <= 0 {
 		opts.FlushSamples = DefaultFlushSamples
 	}
+	if opts.MetadataVersionCap == 0 {
+		opts.MetadataVersionCap = DefaultMetadataVersionCap
+	} else if opts.MetadataVersionCap < 0 {
+		opts.MetadataVersionCap = 0
+	}
 	s := &Storage{
 		dir:       dir,
 		opts:      opts,
@@ -105,7 +126,9 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 		last:      map[uint64]*seriesState{},
 		bufferMin: math.MaxInt64,
 		bufferMax: math.MinInt64,
-		metadata:  newMetadataStore(opts.MetadataVersionCap),
+	}
+	if !opts.DisableNativeMetadata {
+		s.metadata = newMetadataStore(opts.MetadataVersionCap)
 	}
 
 	blocks, err := ListBlocks(dir)
@@ -115,6 +138,33 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 	case errors.Is(err, ErrNoBlocks):
 	default:
 		return nil, err
+	}
+	for _, block := range s.blocks {
+		if err := s.restoreSeriesTail(block); err != nil {
+			return nil, fmt.Errorf("recovering samples from block %s: %w", block.meta.ULID, err)
+		}
+		if s.metadata != nil && block.meta.Metadata != nil {
+			relations, err := block.readMetadataRelations(context.Background())
+			if err != nil {
+				return nil, fmt.Errorf("recovering metadata from block %s: %w", block.meta.ULID, err)
+			}
+			if err := s.metadata.restoreRelations(relations); err != nil {
+				return nil, fmt.Errorf("reconciling metadata from block %s: %w", block.meta.ULID, err)
+			}
+		}
+		s.walSequence = max(s.walSequence, block.meta.WALSequence)
+	}
+	if s.metadata != nil {
+		published := s.metadata.snapshot()
+		s.metadataPublished = &published
+	}
+	if !opts.DisableWAL {
+		s.replaying = true
+		err = s.replayWAL(context.Background())
+		s.replaying = false
+		if err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -139,10 +189,12 @@ func (s *Storage) StartTime() (int64, error) {
 	if s.bufferN > 0 {
 		return s.bufferMin, nil
 	}
-	if len(s.blocks) == 0 {
-		return math.MinInt64, nil
+	for _, block := range s.blocks {
+		if block.meta.NumSamples > 0 {
+			return block.Meta().MinTime, nil
+		}
 	}
-	return s.blocks[0].Meta().MinTime, nil
+	return math.MinInt64, nil
 }
 
 // Close marks storage closed. Blocks are read on demand; no block state needs
@@ -196,11 +248,19 @@ func (s *Storage) flushLocked() error {
 	}
 
 	var metadata *metadataRelations
-	if s.metadataDirty {
+	var currentMetadata *metadataRelations
+	if s.metadataDirty && s.metadata != nil {
 		snapshot := s.metadata.snapshot()
-		metadata = &snapshot
+		currentMetadata = &snapshot
+		pending := snapshot.pendingSince(s.metadataPublished)
+		if pending.hasChanges() {
+			metadata = &pending
+		}
 	}
-	meta, err := writeBlock(s.dir, series, metadata, s.opts.WriteOptions)
+	if len(s.buffer) == 0 && metadata == nil {
+		return nil
+	}
+	meta, err := writeBlock(s.dir, series, metadata, s.opts.WriteOptions, s.walSequence)
 	if err != nil {
 		return err
 	}
@@ -214,7 +274,10 @@ func (s *Storage) flushLocked() error {
 	s.bufferMin = math.MaxInt64
 	s.bufferMax = math.MinInt64
 	s.metadataDirty = false
-	return nil
+	if currentMetadata != nil {
+		s.metadataPublished = currentMetadata
+	}
+	return s.discardWALThrough(s.walSequence)
 }
 
 // appenderV1 adapts the typed series appender to the legacy interface.

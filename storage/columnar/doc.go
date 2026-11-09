@@ -19,11 +19,11 @@
 // row-oriented one, and whether a columnar store can serve PromQL
 // competitively.
 //
-// Blocks are written once and never modified. Sample blocks can be reopened and
-// native metadata is exported into immutable relations, but there is no WAL,
-// metadata reconstruction on startup, compaction or deletion. Nothing here is
-// safe to run in production. Format versioning exists so that prototypes are
-// discarded rather than migrated.
+// Blocks are written once and never modified. Sample blocks and native metadata
+// are restored from blocks; unflushed batches replay through Arrow IPC WAL
+// segments. CompactTo writes merged blocks to a separate directory, but no live
+// compaction publication or retention is provided. Nothing here is safe to run in
+// production. Format versions are discarded rather than migrated.
 //
 // The data model is series-major: one row per series, with its labels and its
 // samples as nested lists. That matches PromQL's unit of computation and keeps
@@ -33,4 +33,4 @@ package columnar
 // FormatVersion is the version of the block format written by this package.
 //
 // It is bumped whenever the on-disk schema changes; blocks are not migrated.
-const FormatVersion = 5
+const FormatVersion = 6
