@@ -1351,6 +1351,10 @@ func main() {
 		}
 
 		mux := http.NewServeMux()
+		metadataHandler := columnar.NewMetadataHandler(columnarStorage, logger.With("component", "columnar-metadata"))
+		mux.Handle("/resources", metadataHandler)
+		mux.Handle("/resources/series", metadataHandler)
+		mux.Handle("/resources/diff", metadataHandler)
 		mux.Handle("/arrow", columnar.NewArrowHandler(columnarStorage, logger.With("component", "columnar"), columnar.ArrowOptions{}))
 		mux.Handle("/query_range", columnar.NewQueryHandler(queryEngine, columnarStorage, logger.With("component", "columnar")))
 
