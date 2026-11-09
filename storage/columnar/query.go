@@ -42,7 +42,7 @@ func (s *Storage) Querier(mint, maxt int64) (storage.Querier, error) {
 		for _, hs := range s.buffer {
 			series = append(series, headToSeries(hs))
 		}
-		queriers = append(queriers, &memQuerier{series: series, mint: mint, maxt: maxt})
+		queriers = append(queriers, &memQuerier{series: series, mint: mint, maxt: maxt, reads: s.reads})
 	}
 	for _, block := range s.blocks {
 		if !block.Overlaps(mint, maxt) {
@@ -74,11 +74,22 @@ type resourceQuerier struct {
 // GetResourceAt implements storage.ResourceQuerier. The returned ResourceVersion
 // owns its attribute map, which the caller may modify or retain.
 func (q *resourceQuerier) GetResourceAt(seriesHash uint64, timestamp int64) (*seriesmetadata.ResourceVersion, bool) {
-	content, ok, _ := q.storage.MetadataAt(seriesHash, MetadataResource, timestamp)
+	q.storage.mtx.Lock()
+	defer q.storage.mtx.Unlock()
+	if q.storage.metadata == nil {
+		return nil, false
+	}
+	owner, ok := q.storage.metadata.ownersAt(seriesHash, MetadataResource, timestamp)
 	if !ok {
 		return nil, false
 	}
-	return &seriesmetadata.ResourceVersion{Descriptive: content.Attributes}, true
+	version, ok, _ := q.storage.metadata.atVersion(owner, timestamp)
+	if !ok {
+		return nil, false
+	}
+	return &seriesmetadata.ResourceVersion{
+		Descriptive: version.Content.Attributes, OwnerID: owner.String(), EffectiveFrom: version.EffectiveFrom,
+	}, true
 }
 
 // HasResourceMembershipAt implements storage.ResourceMembershipQuerier.
@@ -124,14 +135,7 @@ type memQuerier struct {
 	series []Series
 	mint   int64
 	maxt   int64
-}
-
-func (*memQuerier) LabelValues(context.Context, string, *storage.LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
-	return nil, nil, nil
-}
-
-func (*memQuerier) LabelNames(context.Context, *storage.LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
-	return nil, nil, nil
+	reads  *readStats
 }
 
 func (*memQuerier) Close() error { return nil }
@@ -145,14 +149,6 @@ type blockQuerier struct {
 	block *Block
 	mint  int64
 	maxt  int64
-}
-
-func (*blockQuerier) LabelValues(context.Context, string, *storage.LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
-	return nil, nil, nil
-}
-
-func (*blockQuerier) LabelNames(context.Context, *storage.LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
-	return nil, nil, nil
 }
 
 func (*blockQuerier) Close() error { return nil }

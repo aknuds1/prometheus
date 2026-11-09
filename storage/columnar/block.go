@@ -207,6 +207,11 @@ type WriteOptions struct {
 	// Compression is the Parquet compression codec. The zero value selects
 	// DefaultCompression.
 	Compression compress.Compression
+
+	// IndexedResourceAttributes is the selected descriptive Resource attribute
+	// set recorded with a metadata block. It affects only the in-memory/global query
+	// index; no Parquet payload index is written for unselected attributes.
+	IndexedResourceAttributes []string
 }
 
 // DefaultMaxSeriesPerRowGroup is the default number of series per row group.

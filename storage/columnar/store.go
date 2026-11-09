@@ -42,7 +42,10 @@ type MetadataSummary struct {
 	MaxEffectiveFrom int64    `json:"max_effective_from"`
 	Kinds            []string `json:"kinds,omitempty"`
 	AttributeNames   []string `json:"attribute_names,omitempty"`
-	HistoryTruncated bool     `json:"history_truncated,omitempty"`
+	// IndexedAttributes records selected descriptive attributes, not an
+	// index-everything default. Identifying attributes are always implicit.
+	IndexedAttributes []string `json:"indexed_attributes"`
+	HistoryTruncated  bool     `json:"history_truncated,omitempty"`
 }
 
 // Meta is the manifest of a block.
@@ -113,6 +116,9 @@ func writeBlock(dir string, series []Series, metadata *metadataRelations, opts W
 		meta.MinTime = min(meta.MinTime, s.Timestamps[0])
 		meta.MaxTime = max(meta.MaxTime, s.Timestamps[len(s.Timestamps)-1]+1)
 	}
+	if meta.Metadata != nil {
+		meta.Metadata.IndexedAttributes = normalizeIndexedResourceAttributes(opts.IndexedResourceAttributes)
+	}
 
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return Meta{}, err
@@ -155,7 +161,8 @@ type Block struct {
 	dir  string
 	meta Meta
 
-	mem memory.Allocator
+	mem   memory.Allocator
+	reads *readStats
 	// rowGroups is the number of row groups in the data file, used to expose
 	// scan granularity.
 	rowGroups int
@@ -210,7 +217,12 @@ func (b *Block) NumRowGroups() int { return b.rowGroups }
 // path must not use it, because the only way Parquet lets a selector avoid work
 // is by skipping row groups, and this reads all of them.
 func (b *Block) Series(ctx context.Context) ([]Series, error) {
-	return readAllSeries(ctx, blockDataPath(b.dir))
+	series, err := readAllSeries(ctx, blockDataPath(b.dir))
+	if b.reads != nil {
+		b.reads.samples.Inc()
+		b.reads.sampleRows.Add(uint64(len(series)))
+	}
+	return series, err
 }
 
 // Overlaps reports whether the block may contain samples in the inclusive range
@@ -231,6 +243,13 @@ var ErrNoBlocks = errors.New("no columnar blocks")
 // columns. A nil rowGroups selects all of them, and a nil columns selects all
 // columns.
 func (b *Block) newRecordReader(ctx context.Context, rowGroups, columns []int) (pqarrow.RecordReader, *file.Reader, *os.File, error) {
+	if b.reads != nil {
+		if len(columns) == len(labelLeaves) && columns[0] == leafLabelName && columns[1] == leafLabelValue {
+			b.reads.labels.Inc()
+		} else {
+			b.reads.samples.Inc()
+		}
+	}
 	f, err := os.Open(blockDataPath(b.dir))
 	if err != nil {
 		return nil, nil, nil, err

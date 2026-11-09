@@ -28,6 +28,10 @@ import (
 	"github.com/prometheus/prometheus/util/annotations"
 )
 
+// ResourceIdentityLabel retains the original OTLP Resource identity on a series.
+// It is an internal/native association key, not a descriptive Resource attribute.
+const ResourceIdentityLabel = "__otel_resource__"
+
 // The errors exposed.
 var (
 	ErrNotFound = errors.New("not found")

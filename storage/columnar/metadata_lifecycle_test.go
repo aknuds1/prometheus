@@ -25,7 +25,8 @@ import (
 
 func TestMetadataChangeOnlyPublishingAndBoundedRestart(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewStorage(dir, StorageOptions{MetadataVersionCap: 2})
+	opts := StorageOptions{MetadataVersionCap: 2, IndexedResourceAttributes: []string{"host"}}
+	s, err := NewStorage(dir, opts)
 	require.NoError(t, err)
 	owner := ResourceOwner(map[string]string{"service.name": "changes", "service.instance.id": "one"})
 	ls1 := labels.FromStrings(labels.MetricName, "change_one", OTELResourceLabel, owner.Ref())
@@ -92,7 +93,7 @@ func TestMetadataChangeOnlyPublishingAndBoundedRestart(t *testing.T) {
 	require.Len(t, history.index, 2, "evicted attribute values are not retained in the inverted-index candidate set")
 	require.NoError(t, s.Close())
 
-	s, err = NewStorage(dir, StorageOptions{MetadataVersionCap: 2})
+	s, err = NewStorage(dir, opts)
 	require.NoError(t, err)
 	defer s.Close()
 	recovered, ok := s.MetadataHistory(owner)

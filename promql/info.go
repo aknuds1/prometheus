@@ -88,12 +88,18 @@ func (ev *evaluator) evalInfo(ctx context.Context, args parser.Expressions) (par
 		}
 	}
 
-	selectHints := ev.infoSelectHints(nodeTimestamp, offset)
-	infoSeries, ws, err := ev.fetchInfoSeries(ctx, mat, ignoreSeries, dataLabelMatchers, selectHints, nodeTimestamp, offset)
-	if err != nil {
-		ev.error(err)
+	var infoSeries Matrix
+	var warnings annotations.Annotations
+	if !resourceInfo.nativeOnlyInput(mat, ignoreSeries) {
+		selectHints := ev.infoSelectHints(nodeTimestamp, offset)
+		series, ws, err := ev.fetchInfoSeries(ctx, mat, ignoreSeries, dataLabelMatchers, selectHints, nodeTimestamp, offset)
+		if err != nil {
+			ev.error(err)
+		}
+		warnings.Merge(ws)
+		infoSeries = series
 	}
-	annots.Merge(ws)
+	annots.Merge(warnings)
 
 	res, ws := ev.combineWithInfoSeries(ctx, mat, infoSeries, ignoreSeries, dataLabelMatchers, resourceInfo, nodeTimestamp, offset)
 	annots.Merge(ws)

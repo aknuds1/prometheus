@@ -190,7 +190,7 @@ func (b *Block) readMetadataRelations(ctx context.Context) (metadataRelations, e
 		}},
 	}
 	for _, table := range tables {
-		if err := readMetadataTable(ctx, filepath.Join(b.dir, table.name), table.schema, table.append); err != nil {
+		if err := readMetadataTable(ctx, b, filepath.Join(b.dir, table.name), table.schema, table.append); err != nil {
 			return metadataRelations{}, fmt.Errorf("reading %s: %w", table.name, err)
 		}
 	}
@@ -200,7 +200,10 @@ func (b *Block) readMetadataRelations(ctx context.Context) (metadataRelations, e
 	return out, nil
 }
 
-func readMetadataTable(ctx context.Context, path string, schema *arrow.Schema, appendRecords func(arrow.RecordBatch) error) error {
+func readMetadataTable(ctx context.Context, block *Block, path string, schema *arrow.Schema, appendRecords func(arrow.RecordBatch) error) error {
+	if block.reads != nil {
+		block.reads.metadata.Inc()
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -370,7 +373,9 @@ func validateMetadataRelations(relations metadataRelations, summary *MetadataSum
 			return fmt.Errorf("metadata membership hash %d does not match labels.StableHash %d", membership.seriesHash, hash)
 		}
 	}
-	if actual := relations.summary(); !reflect.DeepEqual(summary, actual) {
+	actual := relations.summary()
+	actual.IndexedAttributes = summary.IndexedAttributes
+	if !reflect.DeepEqual(summary, actual) {
 		return fmt.Errorf("metadata catalog mismatch: got %+v, decoded %+v", summary, actual)
 	}
 	return nil

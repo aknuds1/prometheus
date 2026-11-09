@@ -56,6 +56,12 @@ type StorageOptions struct {
 	// batches still work; metadata associations and owner updates return an error.
 	DisableNativeMetadata bool
 
+	// IndexedResourceAttributes selects descriptive Resource attributes for the
+	// inverted index. Nil adopts configured attributes from existing blocks;
+	// otherwise only this set plus identifying attributes are indexed. An explicit
+	// empty slice disables inherited descriptive indexes.
+	IndexedResourceAttributes []string
+
 	// WriteOptions are passed to the block writer.
 	WriteOptions WriteOptions
 }
@@ -85,6 +91,7 @@ type Storage struct {
 
 	walSequence uint64
 	replaying   bool
+	reads       *readStats
 }
 
 // headSeries holds samples as typed columns. Histograms must be encoded before
@@ -126,9 +133,11 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 		last:      map[uint64]*seriesState{},
 		bufferMin: math.MaxInt64,
 		bufferMax: math.MinInt64,
+		reads:     &readStats{},
 	}
 	if !opts.DisableNativeMetadata {
 		s.metadata = newMetadataStore(opts.MetadataVersionCap)
+		s.metadata.reads = s.reads
 	}
 
 	blocks, err := ListBlocks(dir)
@@ -139,7 +148,10 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 	default:
 		return nil, err
 	}
+	inheritedAttributes := []string(nil)
+	hasExplicitIndexConfig := false
 	for _, block := range s.blocks {
+		block.reads = s.reads
 		if err := s.restoreSeriesTail(block); err != nil {
 			return nil, fmt.Errorf("recovering samples from block %s: %w", block.meta.ULID, err)
 		}
@@ -153,8 +165,17 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 			}
 		}
 		s.walSequence = max(s.walSequence, block.meta.WALSequence)
+		if opts.IndexedResourceAttributes == nil && block.meta.Metadata != nil && block.meta.Metadata.IndexedAttributes != nil {
+			inheritedAttributes = slices.Clone(block.meta.Metadata.IndexedAttributes)
+			hasExplicitIndexConfig = true
+		}
 	}
 	if s.metadata != nil {
+		attributes := opts.IndexedResourceAttributes
+		if hasExplicitIndexConfig {
+			attributes = inheritedAttributes
+		}
+		s.setIndexedResourceAttrsLocked(attributes)
 		published := s.metadata.snapshot()
 		s.metadataPublished = &published
 	}
@@ -268,6 +289,7 @@ func (s *Storage) flushLocked() error {
 	if err != nil {
 		return err
 	}
+	block.reads = s.reads
 	s.blocks = append(s.blocks, block)
 	s.buffer = map[uint64]*headSeries{}
 	s.bufferN = 0

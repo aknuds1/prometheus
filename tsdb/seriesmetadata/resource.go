@@ -26,4 +26,9 @@ package seriesmetadata
 type ResourceVersion struct {
 	Identifying map[string]string
 	Descriptive map[string]string
+	// OwnerID is the full canonical owner identity, not a collision-prone hash.
+	// It lets distributed readers avoid merging different ownership contexts.
+	OwnerID string
+	// EffectiveFrom selects the newest matching owner version across shards.
+	EffectiveFrom int64
 }

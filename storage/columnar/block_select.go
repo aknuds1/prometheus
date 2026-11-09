@@ -135,6 +135,9 @@ func (b *Block) readRows(ctx context.Context, rowGroups []int) ([]Series, error)
 	if len(rowGroups) == 0 {
 		return nil, nil
 	}
+	if b.reads != nil {
+		b.reads.rowGroups.Add(uint64(len(rowGroups)))
+	}
 	rr, pf, f, err := b.newRecordReader(ctx, rowGroups, nil)
 	if err != nil {
 		return nil, err
@@ -150,6 +153,9 @@ func (b *Block) readRows(ctx context.Context, rowGroups []int) ([]Series, error)
 		series, err := DecodeRecord(rr.RecordBatch())
 		if err != nil {
 			return nil, err
+		}
+		if b.reads != nil {
+			b.reads.sampleRows.Add(uint64(len(series)))
 		}
 		out = append(out, series...)
 	}

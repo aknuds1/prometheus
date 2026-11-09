@@ -65,7 +65,11 @@ type metadataStore struct {
 	bySeries map[uint64]map[MetadataKind][]seriesMembershipRow
 	chains   map[uint64]labels.Labels
 
-	versionCap int
+	indexedResourceAttrs map[string]struct{}
+	attributeIndex       map[string]map[OwnerKey]metadataIndexedRange
+	ownerIndex           map[OwnerKey]map[string]metadataIndexedRange
+	versionCap           int
+	reads                *readStats
 }
 
 // newMetadataStore returns an operational metadata catalog with an optional
@@ -73,10 +77,13 @@ type metadataStore struct {
 // version cardinality before assuming bounded memory.
 func newMetadataStore(versionCap int) *metadataStore {
 	return &metadataStore{
-		byOwner:    make(map[OwnerKey]*metadataOwnerHistory),
-		bySeries:   make(map[uint64]map[MetadataKind][]seriesMembershipRow),
-		chains:     make(map[uint64]labels.Labels),
-		versionCap: versionCap,
+		byOwner:              make(map[OwnerKey]*metadataOwnerHistory),
+		bySeries:             make(map[uint64]map[MetadataKind][]seriesMembershipRow),
+		chains:               make(map[uint64]labels.Labels),
+		indexedResourceAttrs: map[string]struct{}{},
+		attributeIndex:       map[string]map[OwnerKey]metadataIndexedRange{},
+		ownerIndex:           map[OwnerKey]map[string]metadataIndexedRange{},
+		versionCap:           versionCap,
 	}
 }
 
@@ -147,8 +154,8 @@ func (s *metadataStore) update(update Update) error {
 		}
 	}
 
-	for key, value := range version.Content.Attributes {
-		history.index[attributeCondition(key, value)] = struct{}{}
+	if update.Owner.Kind == MetadataResource {
+		s.indexResourceOwner(update.Owner, history)
 	}
 	return nil
 }
@@ -235,17 +242,24 @@ func (s *metadataStore) attachMembership(seriesHash uint64, ls labels.Labels, ow
 // at resolves the owner's current value at timestamp t using
 // latest-effectiveFrom <= t. There is no lookahead into a future version.
 func (s *metadataStore) at(owner OwnerKey, t int64) (Content, bool, bool) {
+	version, ok, truncated := s.atVersion(owner, t)
+	return version.Content, ok, truncated
+}
+
+func (s *metadataStore) atVersion(owner OwnerKey, t int64) (Version, bool, bool) {
 	history, ok := s.byOwner[owner]
 	if !ok {
-		return Content{}, false, false
+		return Version{}, false, false
 	}
 	i := sort.Search(len(history.versions), func(i int) bool {
 		return history.versions[i].EffectiveFrom > t
 	})
 	if i == 0 {
-		return Content{}, false, history.truncated
+		return Version{}, false, history.truncated
 	}
-	return history.versions[i-1].Content.Clone(), true, history.truncated
+	version := history.versions[i-1]
+	version.Content = version.Content.Clone()
+	return version, true, history.truncated
 }
 
 // ownersAt returns the associated owner for one kind at t. If no owner

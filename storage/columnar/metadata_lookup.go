@@ -62,20 +62,46 @@ func (s *Storage) QueryMetadataSeries(ctx context.Context, query MetadataSeriesQ
 	if query.Start > query.End {
 		return MetadataSeriesPage{}, fmt.Errorf("metadata query start %d is after end %d", query.Start, query.End)
 	}
-	owners, err := s.metadata.ownersMatchingAttributes(query.Kind, query.Attributes, query.Start, query.End)
-	if err != nil {
-		return MetadataSeriesPage{}, err
-	}
 	projection := projectionSet(query.Projection)
 
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+	owners, err := s.metadata.ownersMatchingAttributes(query.Kind, query.Attributes, query.Start, query.End)
+	if err != nil {
+		return MetadataSeriesPage{}, err
+	}
+	type seriesReference struct {
+		hash uint64
+		ls   labels.Labels
+	}
+	refs := make([]seriesReference, 0, len(s.metadata.bySeries))
+	for hash, kinds := range s.metadata.bySeries {
+		for _, rows := range kinds {
+			if len(rows) > 0 {
+				refs = append(refs, seriesReference{hash: hash, ls: rows[0].ls})
+				break
+			}
+		}
+	}
+	slices.SortFunc(refs, func(a, b seriesReference) int {
+		if byLabels := labels.Compare(a.ls, b.ls); byLabels != 0 {
+			return byLabels
+		}
+		if a.hash < b.hash {
+			return -1
+		}
+		if a.hash > b.hash {
+			return 1
+		}
+		return 0
+	})
+
 	var out MetadataSeriesPage
-	for _, kinds := range s.metadata.bySeries {
+	for _, ref := range refs {
 		if err := ctx.Err(); err != nil {
 			return MetadataSeriesPage{}, err
 		}
-		rows := kinds[query.Kind]
+		rows := s.metadata.bySeries[ref.hash][query.Kind]
 		for i, row := range rows {
 			if _, matchesOwner := owners[row.owner]; !matchesOwner {
 				continue
@@ -83,10 +109,16 @@ func (s *Storage) QueryMetadataSeries(ctx context.Context, query MetadataSeriesQ
 			if len(query.Matchers) > 0 && !matchesAny(row.ls, query.Matchers) {
 				continue
 			}
+			if query.After != "" && metadataMembershipCursor(row) <= query.After {
+				continue
+			}
 			nextMembership := nextMembershipFrom(rows, i)
 			versions := s.metadata.byOwner[row.owner].versions
 			var matching []MetadataValueView
 			for j, version := range versions {
+				if !metadataContentMatches(metadataOwnerIdentity(row.owner), version.Content.Attributes, query.Attributes) {
+					continue
+				}
 				nextVersion := nextEffectiveFrom(versions, j)
 				if !metadataMembershipAndVersionOverlap(row, nextMembership, version, nextVersion, query.Start, query.End) {
 					continue
@@ -96,24 +128,18 @@ func (s *Storage) QueryMetadataSeries(ctx context.Context, query MetadataSeriesQ
 			if len(matching) == 0 {
 				continue
 			}
-			result := MetadataSeriesResult{
+			out.Series = append(out.Series, MetadataSeriesResult{
 				Labels: row.ls.Copy(), Owner: row.owner.Ref(), Kind: row.owner.Kind.String(),
 				OwnerIdentifying: metadataOwnerIdentity(row.owner),
 				MembershipStart:  row.effectiveFrom, MembershipUntil: nextMembership,
 				MembershipObservedTo: row.observedUntil, Versions: matching,
+			})
+			if query.Limit > 0 && len(out.Series) > query.Limit {
+				out.NextToken = metadataSeriesCursor(out.Series[query.Limit-1])
+				out.Series = out.Series[:query.Limit]
+				return out, nil
 			}
-			if query.After != "" && metadataSeriesCursor(result) <= query.After {
-				continue
-			}
-			out.Series = append(out.Series, result)
 		}
-	}
-	slices.SortFunc(out.Series, func(a, b MetadataSeriesResult) int {
-		return labels.Compare(a.Labels, b.Labels)
-	})
-	if query.Limit > 0 && len(out.Series) > query.Limit {
-		out.NextToken = metadataSeriesCursor(out.Series[query.Limit-1])
-		out.Series = out.Series[:query.Limit]
 	}
 	if out.Series == nil {
 		out.Series = []MetadataSeriesResult{}
@@ -123,6 +149,14 @@ func (s *Storage) QueryMetadataSeries(ctx context.Context, query MetadataSeriesQ
 
 func metadataSeriesCursor(result MetadataSeriesResult) string {
 	return result.Labels.String() + "\x00" + result.Owner + "\x00" + strconv.FormatInt(result.MembershipStart, 10)
+}
+
+func metadataMembershipCursor(row seriesMembershipRow, ownerRef ...string) string {
+	owner := row.owner.Ref()
+	if len(ownerRef) > 0 {
+		owner = ownerRef[0]
+	}
+	return row.ls.String() + "\x00" + owner + "\x00" + strconv.FormatInt(row.effectiveFrom, 10)
 }
 
 func nextMembershipFrom(rows []seriesMembershipRow, i int) *int64 {
@@ -160,25 +194,44 @@ func metadataIntervalsOverlap(startA int64, endAExclusive *int64, startB int64, 
 }
 
 func (s *metadataStore) ownersMatchingAttributes(kind MetadataKind, conditions []MetadataAttributeCondition, start, end int64) (map[OwnerKey]struct{}, error) {
-	out := map[OwnerKey]struct{}{}
-	for owner, history := range s.byOwner {
-		if owner.Kind != kind {
-			continue
+	if len(conditions) > 0 && kind == MetadataResource {
+		candidates, indexed := s.indexedOwners(conditions, start, end)
+		if indexed {
+			out := make(map[OwnerKey]struct{}, len(candidates))
+			for owner := range candidates {
+				if s.ownerMatchesAttributes(owner, conditions, start, end) {
+					out[owner] = struct{}{}
+				}
+			}
+			return out, nil
 		}
-		identity := metadataOwnerIdentity(owner)
-		for i := range history.versions {
-			version := history.versions[i]
-			next := nextEffectiveFrom(history.versions, i)
-			if !metadataPeriodOverlaps(version.EffectiveFrom, next, start, end) {
-				continue
-			}
-			if metadataContentMatches(identity, version.Content.Attributes, conditions) {
-				out[owner] = struct{}{}
-				break
-			}
+		if s.reads != nil {
+			s.reads.metadataFallbacks.Inc()
+		}
+	}
+	out := map[OwnerKey]struct{}{}
+	for owner := range s.byOwner {
+		if owner.Kind == kind && s.ownerMatchesAttributes(owner, conditions, start, end) {
+			out[owner] = struct{}{}
 		}
 	}
 	return out, nil
+}
+
+func (s *metadataStore) ownerMatchesAttributes(owner OwnerKey, conditions []MetadataAttributeCondition, start, end int64) bool {
+	history := s.byOwner[owner]
+	identity := metadataOwnerIdentity(owner)
+	for i := range history.versions {
+		version := history.versions[i]
+		next := nextEffectiveFrom(history.versions, i)
+		if !metadataPeriodOverlaps(version.EffectiveFrom, next, start, end) {
+			continue
+		}
+		if metadataContentMatches(identity, version.Content.Attributes, conditions) {
+			return true
+		}
+	}
+	return false
 }
 
 func metadataContentMatches(identity, attributes map[string]string, conditions []MetadataAttributeCondition) bool {

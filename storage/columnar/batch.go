@@ -19,13 +19,14 @@ import (
 	"fmt"
 
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/storage"
 )
 
 const (
 	// OTELResourceLabel is the identity-bearing label for Resource-associated
 	// metric series ingested over OTLP.
 	// Metadata descriptive context doesn't alter this label across Resource versions.
-	OTELResourceLabel = "__otel_resource__"
+	OTELResourceLabel = storage.ResourceIdentityLabel
 )
 
 // MetadataAssociate registers a synchronous metadata observation and series

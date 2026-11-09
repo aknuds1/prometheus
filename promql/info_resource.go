@@ -34,6 +34,43 @@ type resourceInfoQuery struct {
 	toOutput   map[string]string
 }
 
+// nativeOnlyInput allows native metadata inputs to avoid fetching target_info.
+// A series that loses the native identity label, including through aggregation,
+// must not cause a speculative metric join or a label-based owner repair.
+func (q *resourceInfoQuery) nativeOnlyInput(mat Matrix, ignoreSeries map[uint64]struct{}) bool {
+	if q == nil || q.membership == nil {
+		return false
+	}
+	used := 0
+	for _, series := range mat {
+		if _, ignored := ignoreSeries[series.Metric.Hash()]; ignored {
+			continue
+		}
+		if series.Metric.Get(storage.ResourceIdentityLabel) == "" {
+			return false
+		}
+
+		// The identity can exist on a point before the first effective
+		// association. Such history keeps metric-join support instead of silently
+		// discarding the earlier fallback interval.
+		var earliest int64
+		hasPoint := false
+		if len(series.Floats) > 0 {
+			earliest = series.Floats[0].T
+			hasPoint = true
+		}
+		if len(series.Histograms) > 0 && (!hasPoint || series.Histograms[0].T < earliest) {
+			earliest = series.Histograms[0].T
+			hasPoint = true
+		}
+		if hasPoint && !q.membership.HasResourceMembershipAt(labels.StableHash(series.Metric), earliest) {
+			return false
+		}
+		used++
+	}
+	return used > 0
+}
+
 // selectsNativeResourceInfo reports whether the info selector is exclusively
 // target_info. Selectors that also name conventional info metrics keep the
 // metric-join path until native/metric hybrid selection is specified.

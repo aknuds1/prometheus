@@ -13,6 +13,8 @@
 
 package columnar
 
+import "maps"
+
 // restoreRelations merges one published block or full snapshot into s. Call in
 // block order. Replacement histories/lists apply at whole-owner or
 // series/kind granularity; append-only rows extend only their own observations.
@@ -76,6 +78,8 @@ func (s *metadataStore) restoreRelations(relations metadataRelations) error {
 // before publishing it. Content and label backing arrays are copied by snapshot.
 func (s *metadataStore) clone() (*metadataStore, error) {
 	clone := newMetadataStore(s.versionCap)
+	clone.indexedResourceAttrs = maps.Clone(s.indexedResourceAttrs)
+	clone.reads = s.reads
 	if err := clone.restoreRelations(s.snapshot()); err != nil {
 		return nil, err
 	}
