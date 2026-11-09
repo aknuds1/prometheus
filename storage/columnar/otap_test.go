@@ -91,10 +91,20 @@ func TestOTAPSinkAppendsGaugeAndSum(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(1700000000000), gaugeSeries.Timestamps[0], "timestamps must be milliseconds")
 	require.Equal(t, []float64{21.5}, gaugeSeries.Values)
-	// Resource and data point attributes both become labels.
-	require.Equal(t, "svc", gaugeSeries.Labels.Get("service.name"))
-	require.Equal(t, "host-1", gaugeSeries.Labels.Get("host.name"))
+	require.Equal(t, "svc", gaugeSeries.Labels.Get("job"))
+	require.Empty(t, gaugeSeries.Labels.Get("service.name"))
+	require.Empty(t, gaugeSeries.Labels.Get("host.name"))
 	require.Equal(t, "/x", gaugeSeries.Labels.Get("path"))
+	owner := columnar.ResourceOwner(map[string]string{"service.name": "svc"})
+	require.Equal(t, owner.Ref(), gaugeSeries.Labels.Get("__otel_resource__"))
+	resource, ok, truncated := s.MetadataAtLabels(gaugeSeries.Labels, columnar.MetadataResource, 1700000000000)
+	require.True(t, ok)
+	require.False(t, truncated)
+	require.Equal(t, "host-1", resource.Attributes["host.name"])
+	require.NotContains(t, resource.Attributes, "service.name")
+	history, ok := s.MetadataHistory(owner)
+	require.True(t, ok)
+	require.Len(t, history.Versions, 1)
 
 	sumSeries, ok := byName["columnar_requests_total"]
 	require.True(t, ok)

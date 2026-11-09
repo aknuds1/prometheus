@@ -78,6 +78,7 @@ import (
 	"github.com/prometheus/prometheus/storage/columnar"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/storage/remote/otap"
+	otlpprw "github.com/prometheus/prometheus/storage/remote/otlptranslator/prometheusremotewrite"
 	"github.com/prometheus/prometheus/template"
 	"github.com/prometheus/prometheus/tracing"
 	"github.com/prometheus/prometheus/tsdb"
@@ -1409,7 +1410,7 @@ func main() {
 					// When the columnar prototype is on, the same decode feeds it as
 					// well, so the row-oriented path and the columnar path can be
 					// compared on identical input.
-					RecordSink: columnarRecordSink(columnarStorage, logger),
+					RecordSink: columnarRecordSink(columnarStorage, logger, liveConfig, time.Duration(cfg.lookbackDelta), cfg.scrape.EnableTypeAndUnitLabels),
 				},
 			},
 		)
@@ -1864,11 +1865,26 @@ func main() {
 
 // columnarRecordSink returns the OTAP record sink for the columnar prototype, or
 // nil when the prototype is disabled.
-func columnarRecordSink(storage *columnar.Storage, logger *slog.Logger) otap.RecordSink {
+func columnarRecordSink(storage *columnar.Storage, logger *slog.Logger, liveConfig *atomic.Pointer[config.Config], lookbackDelta time.Duration, enableTypeAndUnitLabels bool) otap.RecordSink {
 	if storage == nil {
 		return nil
 	}
-	return columnar.NewOTAPSink(storage, logger.With("component", "columnar"))
+	return columnar.NewOTAPSink(storage, logger.With("component", "columnar"), func() otlpprw.Settings {
+		otlpConfig := liveConfig.Load().OTLPConfig
+		return otlpprw.Settings{
+			AddMetricSuffixes:                    otlpConfig.TranslationStrategy.ShouldAddSuffixes(),
+			AllowUTF8:                            !otlpConfig.TranslationStrategy.ShouldEscape(),
+			PromoteResourceAttributes:            otlpprw.NewPromoteResourceAttributes(otlpConfig),
+			KeepIdentifyingResourceAttributes:    otlpConfig.KeepIdentifyingResourceAttributes,
+			ConvertHistogramsToNHCB:              otlpConfig.ConvertHistogramsToNHCB,
+			PromoteScopeMetadata:                 otlpConfig.PromoteScopeMetadata,
+			AllowDeltaTemporality:                true,
+			LookbackDelta:                        lookbackDelta,
+			EnableTypeAndUnitLabels:              enableTypeAndUnitLabels,
+			LabelNameUnderscoreSanitization:      otlpConfig.LabelNameUnderscoreSanitization,
+			LabelNamePreserveMultipleUnderscores: otlpConfig.LabelNamePreserveMultipleUnderscores,
+		}
+	})
 }
 
 func openDBWithMetrics(dir string, logger *slog.Logger, reg prometheus.Registerer, opts *tsdb.Options, stats *tsdb.DBStats) (*tsdb.DB, error) {
