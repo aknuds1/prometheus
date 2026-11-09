@@ -44,7 +44,32 @@ func (s *Storage) MetadataAssociate(ls labels.Labels, update Update) (string, er
 	if err := s.metadata.associate(metadataSeriesKey(ls), ls, update); err != nil {
 		return "", err
 	}
+	s.metadataDirty = true
 	return update.Owner.Ref(), nil
+}
+
+// MetadataUpdate records an owner-scoped version without associating it with a
+// series and without requiring a sample. This is useful for explicit owner
+// metadata inspection; it does not claim asynchronous transport delivery.
+func (s *Storage) MetadataUpdate(update Update) error {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	if s.closed {
+		return errors.New("columnar: storage is closed")
+	}
+	if err := s.metadata.update(update); err != nil {
+		return err
+	}
+	s.metadataDirty = true
+	return nil
+}
+
+// MetadataAtOwner returns the owner version effective at t without traversing a
+// series membership. The booleans report value presence and history truncation.
+func (s *Storage) MetadataAtOwner(owner OwnerKey, t int64) (Content, bool, bool) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return s.metadata.at(owner, t)
 }
 
 // MetadataAt resolves series→owner→version at timestamp t. seriesHash must be
@@ -172,11 +197,14 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		appendTypedSeries(hs, series)
 	}
 
+	metadataChanged := false
 	for i, update := range batch.Updates {
 		if err := s.metadata.associate(metadataSeriesKey(update.Labels), update.Labels, update.Update); err != nil {
 			return fmt.Errorf("metadata update %d: %w", i, err)
 		}
+		metadataChanged = true
 	}
+	s.metadataDirty = s.metadataDirty || metadataChanged
 	return s.commitHead(txs, order)
 }
 

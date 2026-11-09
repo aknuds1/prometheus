@@ -67,7 +67,8 @@ type Storage struct {
 	last      map[uint64]*seriesState
 	closed    bool
 
-	metadata *metadataStore
+	metadata      *metadataStore
+	metadataDirty bool
 }
 
 // headSeries holds samples as typed columns. Histograms must be encoded before
@@ -172,7 +173,7 @@ func (s *Storage) NumBlocks() int {
 
 // flushLocked converts columns into block rows only at seal time.
 func (s *Storage) flushLocked() error {
-	if len(s.buffer) == 0 {
+	if len(s.buffer) == 0 && !s.metadataDirty {
 		return nil
 	}
 	keys := make([]labels.Labels, 0, len(s.buffer))
@@ -194,7 +195,12 @@ func (s *Storage) flushLocked() error {
 		})
 	}
 
-	meta, err := WriteBlock(s.dir, series, s.opts.WriteOptions)
+	var metadata *metadataRelations
+	if s.metadataDirty {
+		snapshot := s.metadata.snapshot()
+		metadata = &snapshot
+	}
+	meta, err := writeBlock(s.dir, series, metadata, s.opts.WriteOptions)
 	if err != nil {
 		return err
 	}
@@ -207,6 +213,7 @@ func (s *Storage) flushLocked() error {
 	s.bufferN = 0
 	s.bufferMin = math.MaxInt64
 	s.bufferMax = math.MinInt64
+	s.metadataDirty = false
 	return nil
 }
 
@@ -352,6 +359,7 @@ func (a *appender) Commit() error {
 			return fmt.Errorf("metadata append: %w", err)
 		}
 	}
+	s.metadataDirty = s.metadataDirty || len(a.meta) > 0
 
 	for _, hash := range a.order {
 		tx := a.txs[hash]

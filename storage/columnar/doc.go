@@ -19,10 +19,11 @@
 // row-oriented one, and whether a columnar store can serve PromQL
 // competitively.
 //
-// Nothing here is durable, compacted, or safe to run in production. A block is
-// written once and never modified; there is no WAL, no crash recovery, and no
-// deletion. Format versioning exists so that prototypes are discarded rather
-// than migrated.
+// Blocks are written once and never modified. Sample blocks can be reopened and
+// native metadata is exported into immutable relations, but there is no WAL,
+// metadata reconstruction on startup, compaction or deletion. Nothing here is
+// safe to run in production. Format versioning exists so that prototypes are
+// discarded rather than migrated.
 //
 // The data model is series-major: one row per series, with its labels and its
 // samples as nested lists. That matches PromQL's unit of computation and keeps
@@ -32,4 +33,4 @@ package columnar
 // FormatVersion is the version of the block format written by this package.
 //
 // It is bumped whenever the on-disk schema changes; blocks are not migrated.
-const FormatVersion = 4
+const FormatVersion = 5

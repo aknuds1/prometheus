@@ -30,17 +30,33 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 )
 
+// MetadataSummary is the block catalog entry for native metadata. Effective
+// timestamps are milliseconds and inclusive. AttributeNames contains retained
+// Resource attribute names only; it does not promote other metadata kinds.
+type MetadataSummary struct {
+	NumOwners        int      `json:"num_owners"`
+	NumContents      int      `json:"num_contents"`
+	NumVersions      int      `json:"num_versions"`
+	NumMemberships   int      `json:"num_memberships"`
+	MinEffectiveFrom int64    `json:"min_effective_from"`
+	MaxEffectiveFrom int64    `json:"max_effective_from"`
+	Kinds            []string `json:"kinds,omitempty"`
+	AttributeNames   []string `json:"attribute_names,omitempty"`
+	HistoryTruncated bool     `json:"history_truncated,omitempty"`
+}
+
 // Meta is the manifest of a block.
 //
 // Times are in milliseconds and follow Prometheus block conventions: MinTime is
 // inclusive, MaxTime exclusive.
 type Meta struct {
-	ULID          string `json:"ulid"`
-	MinTime       int64  `json:"min_time"`
-	MaxTime       int64  `json:"max_time"`
-	NumSeries     int    `json:"num_series"`
-	NumSamples    int    `json:"num_samples"`
-	FormatVersion int    `json:"format_version"`
+	ULID          string           `json:"ulid"`
+	MinTime       int64            `json:"min_time"`
+	MaxTime       int64            `json:"max_time"`
+	NumSeries     int              `json:"num_series"`
+	NumSamples    int              `json:"num_samples"`
+	FormatVersion int              `json:"format_version"`
+	Metadata      *MetadataSummary `json:"metadata,omitempty"`
 	// SeriesPerRowGroup is the row group size the block was written with. A select
 	// needs it to map a matching row to the row group that contains it, so that it
 	// reads only those groups.
@@ -58,6 +74,12 @@ type Meta struct {
 // maxt are not passed in, because a block that disagrees with its samples is
 // worse than one whose range is derived.
 func WriteBlock(dir string, series []Series, opts WriteOptions) (Meta, error) {
+	return writeBlock(dir, series, nil, opts)
+}
+
+// writeBlock writes samples and an optional metadata snapshot. All relations
+// and their catalog summary enter the temporary block before its atomic rename.
+func writeBlock(dir string, series []Series, metadata *metadataRelations, opts WriteOptions) (Meta, error) {
 	opts = opts.withDefaults()
 
 	series = slices.Clone(series)
@@ -72,6 +94,7 @@ func WriteBlock(dir string, series []Series, opts WriteOptions) (Meta, error) {
 		ULID:              ulid.Make().String(),
 		FormatVersion:     FormatVersion,
 		NumSeries:         len(series),
+		Metadata:          metadata.summary(),
 		SeriesPerRowGroup: opts.MaxSeriesPerRowGroup,
 	}
 	if len(series) > 0 {
@@ -104,6 +127,9 @@ func WriteBlock(dir string, series []Series, opts WriteOptions) (Meta, error) {
 
 	if err := writeBlockFile(blockDataPath(tmpDir), series, opts); err != nil {
 		return Meta{}, fmt.Errorf("writing block data: %w", err)
+	}
+	if err := writeMetadataRelations(tmpDir, metadata, opts); err != nil {
+		return Meta{}, fmt.Errorf("writing block metadata: %w", err)
 	}
 
 	raw, err := json.Marshal(meta)
