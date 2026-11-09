@@ -327,86 +327,26 @@ func (a *appender) seriesFor(ls labels.Labels) (*headSeries, error) {
 	return hs, nil
 }
 
-// Commit applies the buffered series in one transaction.
+// Commit applies the buffered series and metadata through the same batched
+// transaction as direct OTAP ingestion and replay.
 func (a *appender) Commit() error {
 	if a.done {
 		return errors.New("columnar: appender used after Commit or Rollback")
 	}
 	a.done = true
 
-	s := a.s
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	if s.closed {
-		return errors.New("columnar: storage is closed")
-	}
-
-	for _, hash := range a.order {
-		tx := a.txs[hash]
-		if last, ok := s.last[hash]; ok && len(tx.ts) > 0 {
-			if !labels.Equal(last.labels, tx.labels) {
-				return ErrSeriesHashCollision
-			}
-			if tx.ts[0] <= last.t {
-				return fmt.Errorf("%w: series %s first buffered timestamp %d is not after committed %d",
-					storage.ErrOutOfOrderSample, tx.labels, tx.ts[0], last.t)
-			}
-		}
-	}
-
-	for _, up := range a.meta {
-		if err := s.metadata.associate(metadataSeriesKey(up.Labels), up.Labels, up.Update); err != nil {
-			return fmt.Errorf("metadata append: %w", err)
-		}
-	}
-	s.metadataDirty = s.metadataDirty || len(a.meta) > 0
-
+	batch := Batch{Updates: a.meta, Series: make([]BatchSeries, 0, len(a.order))}
 	for _, hash := range a.order {
 		tx := a.txs[hash]
 		if len(tx.ts) == 0 {
 			continue
 		}
-		hs, ok := s.buffer[hash]
-		if !ok {
-			hs = &headSeries{labels: tx.labels}
-			s.buffer[hash] = hs
-		}
-		hs.ts = append(hs.ts, tx.ts...)
-		hs.st = append(hs.st, tx.st...)
-		hs.v = append(hs.v, tx.v...)
-		hs.kind = append(hs.kind, tx.kind...)
-		hs.hist = append(hs.hist, tx.hist...)
-
-		s.bufferN += len(tx.ts)
-		for _, ts := range tx.ts {
-			s.bufferMin = min(s.bufferMin, ts)
-			s.bufferMax = max(s.bufferMax, ts)
-		}
-		last := &seriesState{
-			labels: tx.labels, t: tx.ts[len(tx.ts)-1],
-			st: tx.st[len(tx.st)-1],
-			count: func() int {
-				if previous, ok := s.last[hash]; ok {
-					return previous.count + len(tx.ts)
-				}
-				return len(tx.ts)
-			}(),
-		}
-		kind := tx.kind[len(tx.kind)-1]
-		if kind != SampleFloat && kind != SampleStale {
-			_, fh, err := decodeSampleHistogram(tx.hist[len(tx.hist)-1])
-			if err != nil {
-				return err
-			}
-			last.fh = fh
-		}
-		s.last[hash] = last
+		batch.Series = append(batch.Series, BatchSeries{
+			Labels: tx.labels, Timestamps: tx.ts, StartTimestamps: tx.st,
+			Kinds: tx.kind, Values: tx.v, Histograms: tx.hist,
+		})
 	}
-
-	if s.bufferN >= s.opts.FlushSamples {
-		return s.flushLocked()
-	}
-	return nil
+	return a.s.AppendBatch(context.Background(), batch)
 }
 
 // Rollback discards the whole transaction without touching the head.
