@@ -39,7 +39,10 @@ func (s *Storage) restoreSeriesTail(block *Block) error {
 		lastSample := item.Len() - 1
 		state := &seriesState{
 			labels: item.Labels.Copy(), t: item.Timestamps[lastSample],
-			st: item.StartTimestamps[lastSample], count: item.Len(),
+			count: item.Len(),
+		}
+		if len(item.StartTimestamps) > 0 {
+			state.st = item.StartTimestamps[lastSample]
 		}
 		if kind := item.Kinds[lastSample]; kind == SampleHistogram || kind == SampleFloatHistogram {
 			state.h, state.fh, err = decodeSampleHistogram(item.Histograms[lastSample])

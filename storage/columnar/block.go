@@ -21,7 +21,6 @@ import (
 	"path/filepath"
 
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/compress"
@@ -36,6 +35,7 @@ import (
 const (
 	metaFileName    = "meta.json"
 	dataFileName    = "data.parquet"
+	segmentsColumn  = "segments"
 	tmpDirSuffix    = ".tmp"
 	seriesIDColumn  = "series_id"
 	labelsColumn    = "labels"
@@ -68,39 +68,39 @@ const (
 	SampleStale SampleKind = 3
 )
 
-// BlockSchema is the Arrow schema of a block file.
-//
-// One row is one series: a block-local series ID, the full label set, and the
-// series' samples as parallel lists. Timestamps are int64 milliseconds, matching
-// Prometheus.
-//
-// Samples of different types share the row rather than getting a row each,
-// because a PromQL range over a series must see one interleaved sequence. The
-// per-sample kind column says which of the value columns is populated, so a
-// float-only series pays for the histogram column only as a run of nulls, which
-// Parquet encodes almost for free.
+// BlockSchema is the Arrow schema of a block file. Each row contains one
+// series and its sealed segments. Each segment has independent typed columns
+// for time, float value, kind, start time and histogram payloads, plus bounds and
+// codec IDs. DecodeRecord and PageIterator hide those physical choices.
 func BlockSchema() *arrow.Schema {
-	labelsType := arrow.ListOf(arrow.StructOf(
-		arrow.Field{Name: labelNameColumn, Type: arrow.BinaryTypes.String, Nullable: false},
-		arrow.Field{Name: labelValueCol, Type: arrow.BinaryTypes.String, Nullable: false},
-	))
+	segmentType := arrow.StructOf(
+		arrow.Field{Name: "count", Type: arrow.PrimitiveTypes.Uint64, Nullable: false},
+		arrow.Field{Name: "min_time", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		arrow.Field{Name: "max_time", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		arrow.Field{Name: "min_value", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+		arrow.Field{Name: "max_value", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+		arrow.Field{Name: "timestamp_codec", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
+		arrow.Field{Name: "timestamps", Type: arrow.BinaryTypes.Binary, Nullable: false},
+		arrow.Field{Name: "value_codec", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
+		arrow.Field{Name: "values", Type: arrow.BinaryTypes.Binary, Nullable: false},
+		arrow.Field{Name: "kind_codec", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
+		arrow.Field{Name: "kinds", Type: arrow.BinaryTypes.Binary, Nullable: false},
+		arrow.Field{Name: "start_timestamp_codec", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
+		arrow.Field{Name: "start_timestamps", Type: arrow.BinaryTypes.Binary, Nullable: false},
+		arrow.Field{Name: "histograms", Type: arrow.ListOf(arrow.BinaryTypes.Binary), Nullable: false},
+	)
 	return arrow.NewSchema([]arrow.Field{
 		{Name: seriesIDColumn, Type: arrow.PrimitiveTypes.Uint64, Nullable: false},
-		{Name: labelsColumn, Type: labelsType, Nullable: false},
-		{Name: timestampsCol, Type: arrow.ListOf(arrow.PrimitiveTypes.Int64), Nullable: false},
-		{Name: kindsColumn, Type: arrow.ListOf(arrow.PrimitiveTypes.Int8), Nullable: false},
-		{Name: valuesColumn, Type: arrow.ListOf(arrow.PrimitiveTypes.Float64), Nullable: false},
-		{Name: histogramsCol, Type: arrow.ListOf(arrow.BinaryTypes.Binary), Nullable: false},
-		// Start timestamps are sample data, not metadata: PromQL uses them for rate()
-		// over delta series. Zero means unknown, which is how the TSDB models it too.
-		{Name: startTimesCol, Type: arrow.ListOf(arrow.PrimitiveTypes.Int64), Nullable: false},
+		{Name: labelsColumn, Type: metadataStringPairsType(), Nullable: false},
+		{Name: segmentsColumn, Type: arrow.ListOf(segmentType), Nullable: false},
 	}, nil)
 }
 
 // Series is one series of a block: its identity and its samples.
 //
-// Timestamps, Kinds, Values and Histograms are parallel and must have the same
-// length. Timestamps must be strictly increasing; a block is a sorted, immutable
+// Timestamps, Kinds and Values are parallel and must have the same length.
+// StartTimestamps and Histograms may be nil when the entire optional column is
+// respectively unknown/empty. Timestamps are strictly increasing; blocks are immutable
 // unit. For a SampleFloat entry the value in Values is used and Histograms holds
 // nil; for a histogram entry the reverse.
 type Series struct {
@@ -168,12 +168,15 @@ func (s Series) Validate() error {
 		return errors.New("series without labels")
 	}
 	n := len(s.Timestamps)
-	if len(s.StartTimestamps) != n {
+	if len(s.StartTimestamps) != 0 && len(s.StartTimestamps) != n {
 		return fmt.Errorf("series %s: %d timestamps but %d start timestamps", s.Labels, n, len(s.StartTimestamps))
 	}
-	if len(s.Kinds) != n || len(s.Values) != n || len(s.Histograms) != n {
-		return fmt.Errorf("series %s: %d timestamps, %d kinds, %d values, %d histograms",
-			s.Labels, n, len(s.Kinds), len(s.Values), len(s.Histograms))
+	if len(s.Kinds) != n || len(s.Values) != n {
+		return fmt.Errorf("series %s: %d timestamps, %d kinds, %d values",
+			s.Labels, n, len(s.Kinds), len(s.Values))
+	}
+	if len(s.Histograms) != 0 && len(s.Histograms) != n {
+		return fmt.Errorf("series %s: %d timestamps, %d histograms", s.Labels, n, len(s.Histograms))
 	}
 	for i := range n {
 		if i > 0 && s.Timestamps[i] <= s.Timestamps[i-1] {
@@ -182,11 +185,11 @@ func (s Series) Validate() error {
 		}
 		switch s.Kinds[i] {
 		case SampleFloat, SampleStale:
-			if s.Histograms[i] != nil {
+			if len(s.Histograms) > 0 && s.Histograms[i] != nil {
 				return fmt.Errorf("series %s: float sample at index %d carries a histogram", s.Labels, i)
 			}
 		case SampleHistogram, SampleFloatHistogram:
-			if len(s.Histograms[i]) == 0 {
+			if len(s.Histograms) == 0 || len(s.Histograms[i]) == 0 {
 				return fmt.Errorf("series %s: histogram sample at index %d has no payload", s.Labels, i)
 			}
 		default:
@@ -291,67 +294,7 @@ func writeBlockFile(path string, series []Series, opts WriteOptions) (err error)
 
 // buildRecord converts series into one Arrow record batch.
 func buildRecord(mem memory.Allocator, series []Series) (arrow.RecordBatch, error) {
-	rb := array.NewRecordBuilder(mem, BlockSchema())
-	defer rb.Release()
-
-	idBuilder := rb.Field(0).(*array.Uint64Builder)
-	listBuilder := rb.Field(1).(*array.ListBuilder)
-	labelsBuilder := listBuilder.ValueBuilder().(*array.StructBuilder)
-	nameBuilder := labelsBuilder.FieldBuilder(0).(*array.StringBuilder)
-	valueBuilder := labelsBuilder.FieldBuilder(1).(*array.StringBuilder)
-	tsBuilder := rb.Field(2).(*array.ListBuilder)
-	tsValueBuilder := tsBuilder.ValueBuilder().(*array.Int64Builder)
-	kindBuilder := rb.Field(3).(*array.ListBuilder)
-	kindValueBuilder := kindBuilder.ValueBuilder().(*array.Int8Builder)
-	valBuilder := rb.Field(4).(*array.ListBuilder)
-	valValueBuilder := valBuilder.ValueBuilder().(*array.Float64Builder)
-	histBuilder := rb.Field(5).(*array.ListBuilder)
-	histValueBuilder := histBuilder.ValueBuilder().(*array.BinaryBuilder)
-	stBuilder := rb.Field(6).(*array.ListBuilder)
-	stValueBuilder := stBuilder.ValueBuilder().(*array.Int64Builder)
-
-	for i, s := range series {
-		idBuilder.Append(uint64(i))
-
-		// One list element per series, one struct element per label pair.
-		listBuilder.Append(true)
-		s.Labels.Range(func(l labels.Label) {
-			labelsBuilder.Append(true)
-			nameBuilder.Append(l.Name)
-			valueBuilder.Append(l.Value)
-		})
-
-		tsBuilder.Append(true)
-		tsValueBuilder.AppendValues(s.Timestamps, nil)
-
-		kindBuilder.Append(true)
-		for _, kind := range s.Kinds {
-			kindValueBuilder.Append(int8(kind))
-		}
-
-		valBuilder.Append(true)
-		for j, kind := range s.Kinds {
-			if kind == SampleFloat || kind == SampleStale {
-				valValueBuilder.Append(s.Values[j])
-				continue
-			}
-			valValueBuilder.AppendNull()
-		}
-
-		stBuilder.Append(true)
-		stValueBuilder.AppendValues(s.StartTimestamps, nil)
-
-		histBuilder.Append(true)
-		for _, hb := range s.Histograms {
-			if hb == nil {
-				histValueBuilder.AppendNull()
-				continue
-			}
-			histValueBuilder.Append(hb)
-		}
-	}
-
-	return rb.NewRecordBatch(), nil
+	return buildSegmentRecord(mem, series)
 }
 
 // readAllSeries reads every series of the block file at path.
@@ -405,78 +348,6 @@ func DecodeRecord(record arrow.RecordBatch) ([]Series, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-func appendRecordSeries(out *[]Series, record arrow.RecordBatch) error {
-	labelsCol := record.Column(1).(*array.List)
-	labelsStruct := labelsCol.ListValues().(*array.Struct)
-	names := labelsStruct.Field(0).(*array.String)
-	values := labelsStruct.Field(1).(*array.String)
-	tsCol := record.Column(2).(*array.List)
-	tsValues := tsCol.ListValues().(*array.Int64)
-	kindCol := record.Column(3).(*array.List)
-	kindValues := kindCol.ListValues().(*array.Int8)
-	valCol := record.Column(4).(*array.List)
-	valValues := valCol.ListValues().(*array.Float64)
-	histCol := record.Column(5).(*array.List)
-	histValues := histCol.ListValues().(*array.Binary)
-	stCol := record.Column(6).(*array.List)
-	stValues := stCol.ListValues().(*array.Int64)
-
-	for row := range int(record.NumRows()) {
-		start, end := labelsCol.ValueOffsets(row)
-		ls := make([]labels.Label, 0, end-start)
-		for i := start; i < end; i++ {
-			ls = append(ls, labels.Label{Name: names.Value(int(i)), Value: values.Value(int(i))})
-		}
-
-		tsStart, tsEnd := tsCol.ValueOffsets(row)
-		n := int(tsEnd - tsStart)
-		timestamps := make([]int64, n)
-		for i := range timestamps {
-			timestamps[i] = tsValues.Value(int(tsStart) + i)
-		}
-
-		stStart, _ := stCol.ValueOffsets(row)
-		startTimestamps := make([]int64, n)
-		for i := range startTimestamps {
-			startTimestamps[i] = stValues.Value(int(stStart) + i)
-		}
-
-		kindStart, _ := kindCol.ValueOffsets(row)
-		kinds := make([]SampleKind, n)
-		for i := range kinds {
-			kinds[i] = SampleKind(kindValues.Value(int(kindStart) + i))
-		}
-
-		valStart, _ := valCol.ValueOffsets(row)
-		vals := make([]float64, n)
-		for i := range vals {
-			if valValues.IsNull(int(valStart) + i) {
-				continue
-			}
-			vals[i] = valValues.Value(int(valStart) + i)
-		}
-
-		histStart, _ := histCol.ValueOffsets(row)
-		hists := make([][]byte, n)
-		for i := range hists {
-			if histValues.IsNull(int(histStart) + i) {
-				continue
-			}
-			hists[i] = append([]byte(nil), histValues.Value(int(histStart)+i)...)
-		}
-
-		*out = append(*out, Series{
-			Labels:          labels.New(ls...),
-			Timestamps:      timestamps,
-			StartTimestamps: startTimestamps,
-			Kinds:           kinds,
-			Values:          vals,
-			Histograms:      hists,
-		})
-	}
-	return nil
 }
 
 // blockDataPath returns the path of the Parquet file inside a block directory.

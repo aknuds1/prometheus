@@ -229,13 +229,21 @@ func trimSeries(s Series, mint, maxt int64) Series {
 	if from == 0 && to == s.Len() {
 		return s
 	}
+	var starts []int64
+	if len(s.StartTimestamps) > 0 {
+		starts = s.StartTimestamps[from:to]
+	}
+	var histograms [][]byte
+	if len(s.Histograms) > 0 {
+		histograms = s.Histograms[from:to]
+	}
 	return Series{
 		Labels:          s.Labels,
 		Timestamps:      s.Timestamps[from:to],
-		StartTimestamps: s.StartTimestamps[from:to],
+		StartTimestamps: starts,
 		Kinds:           s.Kinds[from:to],
 		Values:          s.Values[from:to],
-		Histograms:      s.Histograms[from:to],
+		Histograms:      histograms,
 	}
 }
 

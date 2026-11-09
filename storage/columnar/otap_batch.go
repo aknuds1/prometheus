@@ -300,10 +300,14 @@ func (b *otapBatchBuilder) sortSamples() {
 		sortedHistograms := make([][]byte, len(order))
 		for j, old := range order {
 			sortedTimestamps[j] = series.Timestamps[old]
-			sortedStart[j] = series.StartTimestamps[old]
+			if len(series.StartTimestamps) > 0 {
+				sortedStart[j] = series.StartTimestamps[old]
+			}
 			sortedKinds[j] = series.Kinds[old]
 			sortedValues[j] = series.Values[old]
-			sortedHistograms[j] = series.Histograms[old]
+			if len(series.Histograms) > 0 {
+				sortedHistograms[j] = series.Histograms[old]
+			}
 		}
 		series.Timestamps = sortedTimestamps
 		series.StartTimestamps = sortedStart

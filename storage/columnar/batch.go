@@ -242,6 +242,14 @@ type BSERIES_DO_NOT_USE struct {
 }
 
 func appendTypedSeries(dst *headSeries, src BatchSeries) {
+	previousCount := len(dst.ts)
+	// Fill absent older columns only when this batch first supplies them.
+	if len(src.StartTimestamps) > 0 && len(dst.st) == 0 && previousCount > 0 {
+		dst.st = make([]int64, previousCount)
+	}
+	if len(src.Histograms) > 0 && len(dst.hist) == 0 && previousCount > 0 {
+		dst.hist = make([][]byte, previousCount)
+	}
 	dst.ts = append(dst.ts, src.Timestamps...)
 	if len(src.StartTimestamps) > 0 {
 		dst.st = append(dst.st, src.StartTimestamps...)
@@ -250,7 +258,11 @@ func appendTypedSeries(dst *headSeries, src BatchSeries) {
 	}
 	dst.v = append(dst.v, src.Values...)
 	dst.kind = append(dst.kind, src.Kinds...)
-	dst.hist = append(dst.hist, src.Histograms...)
+	if len(src.Histograms) == 0 && len(dst.hist) > 0 {
+		dst.hist = append(dst.hist, make([][]byte, len(src.Timestamps))...)
+	} else {
+		dst.hist = append(dst.hist, src.Histograms...)
+	}
 }
 
 func validateSeriesColumns(series BatchSeries) error {
@@ -258,8 +270,11 @@ func validateSeriesColumns(series BatchSeries) error {
 		return errors.New("columnar: series without labels")
 	}
 	n := len(series.Timestamps)
-	if len(series.Values) != n || len(series.Kinds) != n || len(series.Histograms) != n {
-		return fmt.Errorf("columnar: %d samples need values/kinds/histograms columns, got %d/%d/%d", n, len(series.Values), len(series.Kinds), len(series.Histograms))
+	if len(series.Values) != n || len(series.Kinds) != n {
+		return fmt.Errorf("columnar: %d samples need values/kinds columns, got %d/%d", n, len(series.Values), len(series.Kinds))
+	}
+	if len(series.Histograms) != 0 && len(series.Histograms) != n {
+		return fmt.Errorf("columnar: %d samples have %d histogram entries", n, len(series.Histograms))
 	}
 	if len(series.StartTimestamps) != 0 && len(series.StartTimestamps) != n {
 		return fmt.Errorf("columnar: %d samples but %d start timestamps", n, len(series.StartTimestamps))
@@ -268,11 +283,11 @@ func validateSeriesColumns(series BatchSeries) error {
 		kind := series.Kinds[i]
 		switch kind {
 		case SampleFloat, SampleStale:
-			if len(series.Histograms[i]) != 0 {
-				return fmt.Errorf("columnar: non-histogram kind %d at index %d carries a histogram payload", kind, i)
+			if len(series.Histograms) > 0 && len(series.Histograms[i]) > 0 {
+				return fmt.Errorf("columnar: non-histogram kind %d at index %d carries a histogram blob", kind, i)
 			}
 		case SampleHistogram, SampleFloatHistogram:
-			if len(series.Histograms[i]) == 0 {
+			if len(series.Histograms) == 0 || len(series.Histograms[i]) == 0 {
 				return fmt.Errorf("columnar: histogram sample at index %d has no payload", i)
 			}
 			if _, _, err := decodeSampleHistogram(series.Histograms[i]); err != nil {

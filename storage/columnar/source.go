@@ -177,9 +177,19 @@ func mergeOne(group []Series) Series {
 		hist []byte
 	}
 	var entries []entry
+	hasStart, hasHistograms := false, false
 	for _, s := range group {
+		hasStart = hasStart || len(s.StartTimestamps) > 0
+		hasHistograms = hasHistograms || len(s.Histograms) > 0
 		for i := range s.Len() {
-			entries = append(entries, entry{t: s.Timestamps[i], st: s.StartTimestamps[i], kind: s.Kinds[i], v: s.Values[i], hist: s.Histograms[i]})
+			entry := entry{t: s.Timestamps[i], kind: s.Kinds[i], v: s.Values[i]}
+			if len(s.StartTimestamps) > 0 {
+				entry.st = s.StartTimestamps[i]
+			}
+			if len(s.Histograms) > 0 {
+				entry.hist = s.Histograms[i]
+			}
+			entries = append(entries, entry)
 		}
 	}
 	slices.SortStableFunc(entries, func(a, b entry) int {
@@ -194,22 +204,30 @@ func mergeOne(group []Series) Series {
 	})
 
 	merged := Series{
-		Labels:          group[0].Labels,
-		Timestamps:      make([]int64, 0, len(entries)),
-		StartTimestamps: make([]int64, 0, len(entries)),
-		Kinds:           make([]SampleKind, 0, len(entries)),
-		Values:          make([]float64, 0, len(entries)),
-		Histograms:      make([][]byte, 0, len(entries)),
+		Labels:     group[0].Labels,
+		Timestamps: make([]int64, 0, len(entries)),
+		Kinds:      make([]SampleKind, 0, len(entries)),
+		Values:     make([]float64, 0, len(entries)),
+	}
+	if hasStart {
+		merged.StartTimestamps = make([]int64, 0, len(entries))
+	}
+	if hasHistograms {
+		merged.Histograms = make([][]byte, 0, len(entries))
 	}
 	for i, e := range entries {
 		if i > 0 && e.t == entries[i-1].t {
 			continue
 		}
 		merged.Timestamps = append(merged.Timestamps, e.t)
-		merged.StartTimestamps = append(merged.StartTimestamps, e.st)
 		merged.Kinds = append(merged.Kinds, e.kind)
 		merged.Values = append(merged.Values, e.v)
-		merged.Histograms = append(merged.Histograms, e.hist)
+		if hasStart {
+			merged.StartTimestamps = append(merged.StartTimestamps, e.st)
+		}
+		if hasHistograms {
+			merged.Histograms = append(merged.Histograms, e.hist)
+		}
 	}
 	return merged
 }
