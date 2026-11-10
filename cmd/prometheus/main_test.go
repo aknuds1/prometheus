@@ -53,9 +53,42 @@ import (
 	"github.com/prometheus/prometheus/promql/promqltest"
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/storage/columnar"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/util/testutil"
 )
+
+func TestSelectQueryStorage(t *testing.T) {
+	primary := &readyStorage{}
+	candidate, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{DisableWAL: true, DisableNativeMetadata: true})
+	require.NoError(t, err)
+	defer candidate.Close()
+	ls := labels.FromStrings(labels.MetricName, "columnar_query_selection")
+	require.NoError(t, candidate.AppendBatch(t.Context(), columnar.Batch{Series: []columnar.BatchSeries{{
+		Labels: ls, Timestamps: []int64{1000}, Kinds: []columnar.SampleKind{columnar.SampleFloat}, Values: []float64{1},
+	}}}))
+	for _, tc := range []struct {
+		name      string
+		candidate *columnar.Storage
+		disabled  bool
+		expected  storage.Storage
+	}{
+		{name: "prototype disabled", expected: primary},
+		{name: "direct columnar", candidate: candidate, expected: candidate},
+		{name: "explicit TSDB opt-out", candidate: candidate, disabled: true, expected: primary},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selected := selectQueryStorage(primary, tc.candidate, tc.disabled)
+			require.Equal(t, tc.expected, selected)
+		})
+	}
+	q, err := selectQueryStorage(primary, candidate, false).Querier(0, 1000)
+	require.NoError(t, err)
+	defer q.Close()
+	names, _, err := q.LabelNames(t.Context(), nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{labels.MetricName}, names)
+}
 
 func TestReadyStorageCostSamplingQueryable(t *testing.T) {
 	db := promqltest.LoadedStorage(t, `

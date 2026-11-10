@@ -231,6 +231,7 @@ type Handler struct {
 	lookbackDelta   time.Duration
 	context         context.Context
 	storage         storage.Storage
+	queryStorage    storage.Storage
 	localStorage    LocalStorage
 	exemplarStorage storage.ExemplarQueryable
 	notifier        *notifier.Manager
@@ -278,17 +279,20 @@ type Options struct {
 	TSDBMaxPercentage     float64
 	LocalStorage          LocalStorage
 	Storage               storage.Storage
-	ExemplarStorage       storage.ExemplarQueryable
-	QueryEngine           *promql.Engine
-	LookbackDelta         time.Duration
-	QueryTimeout          time.Duration
-	ScrapeManager         *scrape.Manager
-	RuleManager           *rules.Manager
-	Notifier              *notifier.Manager
-	Version               *PrometheusVersion
-	NotificationsGetter   func() []notifications.Notification
-	NotificationsSub      func() (<-chan notifications.Notification, func(), bool)
-	Flags                 map[string]string
+	// QueryStorage selects Prometheus read/query paths independently of the
+	// ingestion fanout when non-nil. Storage remains responsible for ingestion.
+	QueryStorage        storage.Storage
+	ExemplarStorage     storage.ExemplarQueryable
+	QueryEngine         *promql.Engine
+	LookbackDelta       time.Duration
+	QueryTimeout        time.Duration
+	ScrapeManager       *scrape.Manager
+	RuleManager         *rules.Manager
+	Notifier            *notifier.Manager
+	Version             *PrometheusVersion
+	NotificationsGetter func() []notifications.Notification
+	NotificationsSub    func() (<-chan notifications.Notification, func(), bool)
+	Flags               map[string]string
 
 	ListenAddresses            []string
 	CORSOrigin                 *regexp.Regexp
@@ -370,6 +374,7 @@ func New(logger *slog.Logger, o *Options) *Handler {
 		queryEngine:     o.QueryEngine,
 		lookbackDelta:   o.LookbackDelta,
 		storage:         o.Storage,
+		queryStorage:    o.Storage,
 		localStorage:    o.LocalStorage,
 		exemplarStorage: o.ExemplarStorage,
 		notifier:        o.Notifier,
@@ -388,12 +393,16 @@ func New(logger *slog.Logger, o *Options) *Handler {
 		appV2 = h.storage
 	}
 
+	if o.QueryStorage != nil {
+		h.queryStorage = o.QueryStorage
+	}
+
 	version := ""
 	if o.Version != nil {
 		version = o.Version.Version
 	}
 
-	h.apiV1 = api_v1.NewAPI(h.queryEngine, h.storage, appV2, h.exemplarStorage, factorySPr, factoryTr, factoryAr,
+	h.apiV1 = api_v1.NewAPI(h.queryEngine, h.queryStorage, appV2, h.exemplarStorage, factorySPr, factoryTr, factoryAr,
 		func() config.Config {
 			h.mtx.RLock()
 			defer h.mtx.RUnlock()
@@ -859,7 +868,7 @@ func (h *Handler) consoles(w http.ResponseWriter, r *http.Request) {
 		"__console_"+name,
 		data,
 		h.now(),
-		template.QueryFunc(rules.EngineQueryFunc(h.queryEngine, h.storage)),
+		template.QueryFunc(rules.EngineQueryFunc(h.queryEngine, h.queryStorage)),
 		h.options.ExternalURL,
 		nil,
 	)

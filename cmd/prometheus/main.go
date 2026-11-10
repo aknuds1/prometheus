@@ -214,6 +214,7 @@ type flagConfig struct {
 
 	enableColumnarPrototype bool
 	columnarAddress         string
+	disableColumnarQuery    bool
 
 	maxprocsEnable          bool
 	memlimitEnable          bool
@@ -508,6 +509,8 @@ func main() {
 
 	serverOnlyFlag(a, "web.columnar-address", "Address on which the experimental columnar prototype serves its Arrow endpoint (--enable-feature=columnar-prototype).").
 		Default("localhost:9091").StringVar(&cfg.columnarAddress)
+	serverOnlyFlag(a, "web.disable-columnar-query", "Keep standard Prometheus queries and rule evaluation on TSDB when the columnar prototype is enabled.").
+		Default("false").BoolVar(&cfg.disableColumnarQuery)
 
 	a.Flag("web.enable-otap-receiver", fmt.Sprintf("Enable the experimental gRPC endpoint accepting OTAP write requests, listening on the address configured by otap.listen_address (default %q). OTAP support is experimental: the wire format is a draft, and the receiver accepts metrics only, without TLS or authentication.", config.DefaultOTAPConfig.ListenAddress)).
 		Default("false").BoolVar(&cfg.web.EnableOTAPReceiver)
@@ -1021,6 +1024,10 @@ func main() {
 		secondaries = append(secondaries, columnarStorage)
 	}
 	fanoutStorage = storage.NewFanout(logger, localStorage, secondaries...)
+	queryStorage := selectQueryStorage(fanoutStorage, columnarStorage, cfg.disableColumnarQuery)
+	if columnarStorage != nil && !cfg.disableColumnarQuery {
+		logger.Warn("Standard Prometheus reads and rule evaluation use the experimental columnar store; TSDB remains the primary write store. Use --web.disable-columnar-query to read TSDB instead")
+	}
 
 	var (
 		ctxWeb, cancelWeb = context.WithCancel(context.Background())
@@ -1121,8 +1128,8 @@ func main() {
 		ruleManager = rules.NewManager(&rules.ManagerOptions{
 			NameValidationScheme:   cfgFile.GlobalConfig.MetricNameValidationScheme,
 			AppendableV2:           fanoutStorage,
-			Queryable:              localStorage,
-			QueryFunc:              rules.EngineQueryFunc(queryEngine, fanoutStorage),
+			Queryable:              queryStorage,
+			QueryFunc:              rules.EngineQueryFunc(queryEngine, queryStorage),
 			NotifyFunc:             rules.SendAlerts(notifierManager, cfg.web.ExternalURL.String()),
 			Context:                ctxRule,
 			ExternalURL:            cfg.web.ExternalURL,
@@ -1152,6 +1159,7 @@ func main() {
 	cfg.web.TSDBDir = localStoragePath
 	cfg.web.LocalStorage = localStorage
 	cfg.web.Storage = fanoutStorage
+	cfg.web.QueryStorage = queryStorage
 	cfg.web.ExemplarStorage = localStorage
 	cfg.web.QueryEngine = queryEngine
 	cfg.web.ScrapeManager = scrapeManager
@@ -1876,6 +1884,15 @@ func main() {
 		}
 	}()
 	logger.Info("See you next time!")
+}
+
+// selectQueryStorage selects the direct prototype store unless explicitly
+// disabled or absent. It never changes the primary ingestion fanout.
+func selectQueryStorage(primary storage.Storage, candidate *columnar.Storage, disabled bool) storage.Storage {
+	if candidate != nil && !disabled {
+		return candidate
+	}
+	return primary
 }
 
 // columnarRecordSink returns the OTAP record sink for the columnar prototype, or
