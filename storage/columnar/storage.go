@@ -32,8 +32,15 @@ import (
 
 // DefaultFlushSamples is the default number of buffered samples triggering a
 // block flush.
+//
+// The flush unit is the entire head, so the threshold must comfortably exceed
+// the samples ingested by one scrape round. A single scrape of a few thousand
+// targets produces thousands of samples; a smaller threshold would emit one
+// block per scrape, fragmenting storage into hundreds of tiny blocks and forcing
+// every query to open all of them. 200k samples is roughly a few minutes of
+// ingestion at that scale and keeps blocks meaningfully sized.
 const (
-	DefaultFlushSamples = 1000
+	DefaultFlushSamples = 200_000
 	// DefaultMetadataVersionCap bounds immutable and replayed owner histories.
 	DefaultMetadataVersionCap = 5
 )
