@@ -55,6 +55,11 @@ var walSchema = arrow.NewSchema([]arrow.Field{
 // appendWALBatch durably publishes a completed Arrow IPC segment before the
 // batch enters the head. Calls hold Storage.mtx, so sequence and filenames are
 // allocated in commit order. Replay and explicitly WAL-disabled mode create none.
+//
+// Records are appended to an open segment rather than one file per batch: a
+// per-batch open/write/fsync/rename dominated WAL cost for small scrape batches.
+// Each record is still fsynced before the batch is acknowledged, so durability is
+// unchanged; only file creation overhead is removed.
 func (s *Storage) appendWALBatch(batch Batch) error {
 	if s.opts.DisableWAL || s.replaying || len(batch.Series)+len(batch.Updates)+len(batch.OwnerUpdates) == 0 {
 		return nil
@@ -65,54 +70,107 @@ func (s *Storage) appendWALBatch(batch Batch) error {
 		return err
 	}
 	defer record.Release()
-	if err := writeWALSegment(s.dir, sequence, record); err != nil {
-		return fmt.Errorf("writing columnar WAL segment %d: %w", sequence, err)
+
+	if err := s.ensureWALSegment(sequence); err != nil {
+		return fmt.Errorf("opening columnar WAL segment: %w", err)
 	}
+	if err := s.walSeg.write(record); err != nil {
+		return fmt.Errorf("writing columnar WAL record %d: %w", sequence, err)
+	}
+	s.walSeg.maxSequence = sequence
 	s.walSequence = sequence
+	if s.walSeg.size >= walSegmentRotateBytes {
+		if err := s.rotateWALSegment(); err != nil {
+			return fmt.Errorf("rotating columnar WAL segment: %w", err)
+		}
+	}
+	return nil
+}
+
+// walClosedSegment is a rotated segment awaiting deletion once a block covers
+// every sequence it holds.
+type walClosedSegment struct {
+	path        string
+	maxSequence uint64
+}
+
+// walSegmentRotateBytes bounds a segment's size before rotation.
+const walSegmentRotateBytes = 4 << 20
+
+// walSegment is one open Arrow IPC stream holding consecutive batch records.
+type walSegment struct {
+	file        *os.File
+	writer      *ipc.Writer
+	path        string
+	firstSeq    uint64
+	maxSequence uint64
+	size        int64
+}
+
+// countingWriter tracks how much has been written so rotation is size-based
+// without knowing a record's encoded size up front.
+type countingWriter struct {
+	w *os.File
+	n *int64
+}
+
+func (c countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	*c.n += int64(n)
+	return n, err
+}
+
+func (seg *walSegment) write(record arrow.RecordBatch) error {
+	if err := seg.writer.Write(record); err != nil {
+		return err
+	}
+	// Durability contract: a batch is acknowledged only after its record is on
+	// disk, exactly as with the previous per-batch segment files.
+	return seg.file.Sync()
+}
+
+// ensureWALSegment opens a segment starting at sequence when none is open.
+func (s *Storage) ensureWALSegment(sequence uint64) error {
+	if s.walSeg != nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Join(s.dir, walDirName), 0o750); err != nil {
+		return err
+	}
+	path := walSegmentPath(s.dir, sequence)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	seg := &walSegment{file: file, path: path, firstSeq: sequence, maxSequence: sequence}
+	seg.writer = ipc.NewWriter(countingWriter{w: file, n: &seg.size})
+	s.walSeg = seg
+	return nil
+}
+
+// rotateWALSegment closes the open segment and remembers its last sequence so
+// discardWALThrough can retire it once a block covers it.
+func (s *Storage) rotateWALSegment() error {
+	if s.walSeg == nil {
+		return nil
+	}
+	seg := s.walSeg
+	s.walSeg = nil
+	if err := seg.writer.Close(); err != nil {
+		return err
+	}
+	if err := seg.file.Sync(); err != nil {
+		return err
+	}
+	if err := seg.file.Close(); err != nil {
+		return err
+	}
+	s.walClosedSegments = append(s.walClosedSegments, walClosedSegment{path: seg.path, maxSequence: seg.maxSequence})
 	return nil
 }
 
 func walSegmentPath(dir string, sequence uint64) string {
 	return filepath.Join(dir, walDirName, fmt.Sprintf("%020d.arrow", sequence))
-}
-
-func writeWALSegment(dir string, sequence uint64, record arrow.RecordBatch) (err error) {
-	walDir := filepath.Join(dir, walDirName)
-	if err := os.MkdirAll(walDir, 0o750); err != nil {
-		return err
-	}
-	path := walSegmentPath(dir, sequence)
-	temporary := path + ".tmp"
-	defer os.Remove(temporary)
-	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			if closeErr := file.Close(); err == nil {
-				err = closeErr
-			}
-		}
-	}()
-	writer := ipc.NewWriter(file)
-	if err = writer.Write(record); err != nil {
-		return err
-	}
-	if err = writer.Close(); err != nil {
-		return err
-	}
-	if err = file.Sync(); err != nil {
-		return err
-	}
-	// The deferred Close runs before the return, so publish only once the data and
-	// stream footer have landed in the complete segment.
-	if err = file.Close(); err != nil {
-		return err
-	}
-	closed = true
-	return os.Rename(temporary, path)
 }
 
 func buildWALRecord(batch Batch, sequence uint64) (arrow.RecordBatch, error) {
@@ -222,50 +280,55 @@ func (s *Storage) replayWAL(ctx context.Context) error {
 	})
 	publishedThrough := s.walSequence
 	for _, segment := range segments {
-		if segment.sequence <= publishedThrough {
-			continue
-		}
-		batch, err := readWALSegment(segment.path, segment.sequence)
+		batches, sequences, err := readWALRecords(segment.path)
 		if err != nil {
 			return fmt.Errorf("replaying columnar WAL segment %d: %w", segment.sequence, err)
 		}
-		// Auto-flush during replay uses this sequence for its manifest. appendWALBatch
-		// itself remains disabled while replaying: the source segment is the log.
-		s.walSequence = segment.sequence
-		if err := s.AppendBatch(ctx, batch); err != nil {
-			return fmt.Errorf("replaying columnar WAL segment %d: %w", segment.sequence, err)
+		var maxSequence uint64
+		for i := range batches {
+			sequence := sequences[i]
+			maxSequence = max(maxSequence, sequence)
+			if sequence <= publishedThrough {
+				// Already durable in a published block; replaying it would look
+				// like a duplicate append.
+				continue
+			}
+			// Auto-flush during replay uses this sequence for its manifest.
+			// appendWALBatch itself remains disabled while replaying: the source
+			// segment is the log.
+			s.walSequence = sequence
+			if err := s.AppendBatch(ctx, batches[i]); err != nil {
+				return fmt.Errorf("replaying columnar WAL record %d: %w", sequence, err)
+			}
+		}
+		if maxSequence > 0 {
+			s.walClosedSegments = append(s.walClosedSegments, walClosedSegment{path: segment.path, maxSequence: maxSequence})
+			s.walSequence = max(s.walSequence, maxSequence)
 		}
 	}
 	return nil
 }
 
-// discardWALThrough removes only records included in a published block. It is
-// safe to remove any remaining accepted replay segment after its auto-flush.
+// discardWALThrough removes only records a published block already covers. The
+// open segment is rotated first so every remaining segment has a known maximum
+// sequence; a segment that straddles the boundary is retained whole.
 func (s *Storage) discardWALThrough(sequence uint64) error {
 	if s.opts.DisableWAL {
 		return nil
 	}
-	dir := filepath.Join(s.dir, walDirName)
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
+	if err := s.rotateWALSegment(); err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".arrow") {
+	kept := s.walClosedSegments[:0]
+	for _, seg := range s.walClosedSegments {
+		if seg.maxSequence > sequence {
+			kept = append(kept, seg)
 			continue
 		}
-		value, err := strconv.ParseUint(strings.TrimSuffix(entry.Name(), ".arrow"), 10, 64)
-		if err != nil {
+		if err := os.Remove(seg.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if value <= sequence {
-			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-		}
 	}
+	s.walClosedSegments = kept
 	return nil
 }

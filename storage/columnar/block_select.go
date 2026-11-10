@@ -154,12 +154,10 @@ func (b *Block) positiveMatcherIDs(matcher *labels.Matcher) ([]uint64, error) {
 	return matching, nil
 }
 
+// allSeriesIDs returns the catalog's precomputed ID list. Callers must treat it
+// as read-only.
 func (b *Block) allSeriesIDs() []uint64 {
-	ids := make([]uint64, len(b.catalog.Series))
-	for i, entry := range b.catalog.Series {
-		ids[i] = entry.ID
-	}
-	return ids
+	return b.catalog.SeriesIDs
 }
 
 func postingLookupKey(name, value string) string { return name + "\x00" + value }

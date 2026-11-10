@@ -158,7 +158,15 @@ func TestWALReplaysSamplesAndOwnerOnlyMetadata(t *testing.T) {
 	require.Zero(t, s.NumBlocks())
 	entries, err := os.ReadDir(walDirForTest(dir))
 	require.NoError(t, err)
-	require.Len(t, entries, 2)
+	require.NotEmpty(t, entries, "batches must be logged")
+	// Consecutive batches share a segment, so assert on records rather than files.
+	var records int
+	for _, entry := range entries {
+		batches, _, err := readWALRecords(walDirForTest(dir) + "/" + entry.Name())
+		require.NoError(t, err)
+		records += len(batches)
+	}
+	require.Equal(t, 2, records, "one record per ingested batch")
 	require.NoError(t, s.Close())
 
 	s, err = NewStorage(dir, opts)

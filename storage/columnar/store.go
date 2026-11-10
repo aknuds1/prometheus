@@ -83,12 +83,12 @@ type Meta struct {
 // maxt are not passed in, because a block that disagrees with its samples is
 // worse than one whose range is derived.
 func WriteBlock(dir string, series []Series, opts WriteOptions) (Meta, error) {
-	return writeBlock(dir, series, nil, opts, 0, nil)
+	return writeBlock(dir, series, nil, opts, 0, nil, nil)
 }
 
 // writeBlock writes samples and an optional metadata snapshot. All relations
 // and their catalog summary enter the temporary block before its atomic rename.
-func writeBlock(dir string, series []Series, metadata *metadataRelations, opts WriteOptions, walSequence uint64, catalogOut *blockCatalog) (Meta, error) {
+func writeBlock(dir string, series []Series, metadata *metadataRelations, opts WriteOptions, walSequence uint64, catalogOut *blockCatalog, intern func(labels.Labels) (labels.Labels, error)) (Meta, error) {
 	opts = opts.withDefaults()
 
 	series = slices.Clone(series)
@@ -138,7 +138,7 @@ func writeBlock(dir string, series []Series, metadata *metadataRelations, opts W
 		}
 	}()
 
-	catalog, err := buildBlockCatalog(series, opts)
+	catalog, err := buildBlockCatalog(series, opts, intern)
 	if err != nil {
 		return Meta{}, err
 	}

@@ -216,6 +216,17 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		if s.metadata == nil {
 			return ErrMetadataDisabled
 		}
+		// Repeated observations of unchanged content must not clone the whole
+		// catalog build a transaction. This is the common steady-state case.
+		if !s.metadata.batchChanges(batch) {
+			metadataChanged = false
+			nextMetadata = s.metadata
+		}
+	}
+	if metadataChanged {
+		if s.metadata == nil {
+			return ErrMetadataDisabled
+		}
 		var err error
 		nextMetadata, err = s.metadata.clone()
 		if err != nil {

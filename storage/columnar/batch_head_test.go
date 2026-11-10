@@ -52,7 +52,11 @@ func TestAppendBatchSortedHeadAndDuplicateValidation(t *testing.T) {
 	}}
 	require.NoError(t, s.AppendBatch(t.Context(), batch))
 	require.Len(t, s.buffer, 2)
-	require.Less(t, s.buffer[0].hash, s.buffer[1].hash)
+	for _, want := range []labels.Labels{first, second} {
+		hs, ok := s.buffer[stableSeriesHash(want)]
+		require.True(t, ok, "series %s must be buffered by stable hash", want)
+		require.True(t, labels.Equal(want, hs.labels))
+	}
 	series, err := s.SelectSeries(t.Context(), 0, 500, nil, 0)
 	require.NoError(t, err)
 	require.Len(t, series, 2)
@@ -159,8 +163,10 @@ func TestAppendBatchStaleAndUnknownColumnsRoundTrip(t *testing.T) {
 		Values: []float64{1, math.Float64frombits(value.StaleNaN)},
 	}}}
 	require.NoError(t, s.AppendBatch(t.Context(), batch))
-	require.Nil(t, s.buffer[0].st)
-	require.Nil(t, s.buffer[0].hist)
+	hs, ok := s.buffer[stableSeriesHash(ls)]
+	require.True(t, ok)
+	require.Nil(t, hs.st)
+	require.Nil(t, hs.hist)
 	require.NoError(t, s.Close())
 
 	reopened, err := NewStorage(dir, opts)

@@ -26,34 +26,53 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 )
 
-func readWALSegment(path string, sequence uint64) (Batch, error) {
+// readWALRecords reads every batch record in one Arrow IPC segment. A segment
+// carries consecutive commit records, one per ingested batch.
+//
+// A truncated trailing record is tolerated: the segment may have been cut short
+// by a crash, and every complete record before it is still valid. Complete
+// records are always fsynced before their batch is acknowledged, so nothing
+// acknowledged is lost.
+func readWALRecords(path string) ([]Batch, []uint64, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return Batch{}, err
+		return nil, nil, err
 	}
 	defer file.Close()
 	reader, err := ipc.NewReader(file, ipc.WithAllocator(memory.NewGoAllocator()))
 	if err != nil {
-		return Batch{}, err
+		return nil, nil, err
 	}
 	defer reader.Release()
-	if !reader.Next() {
-		if err := reader.Err(); err != nil {
-			return Batch{}, err
+
+	var batches []Batch
+	var sequences []uint64
+	for reader.Next() {
+		record := reader.RecordBatch()
+		sequence, err := walRecordSequence(record)
+		if err != nil {
+			// Truncated or corrupt tail: keep what was decoded.
+			break
 		}
-		return Batch{}, errors.New("empty Arrow IPC segment")
+		batch, err := decodeWALRecord(record, sequence)
+		if err != nil {
+			break
+		}
+		batches = append(batches, batch)
+		sequences = append(sequences, sequence)
 	}
-	batch, err := decodeWALRecord(reader.RecordBatch(), sequence)
-	if err != nil {
-		return Batch{}, err
+	return batches, sequences, nil
+}
+
+// walRecordSequence returns the sequence carried by every row of record.
+func walRecordSequence(record arrow.RecordBatch) (uint64, error) {
+	if !metadataSchemaMatches(record.Schema(), walSchema) {
+		return 0, fmt.Errorf("unexpected WAL schema %s", record.Schema())
 	}
-	if reader.Next() {
-		return Batch{}, errors.New("WAL segment contains more than one batch")
+	if record.NumRows() == 0 {
+		return 0, errors.New("empty WAL record")
 	}
-	if err := reader.Err(); err != nil {
-		return Batch{}, err
-	}
-	return batch, nil
+	return record.Column(0).(*array.Uint64).Value(0), nil
 }
 
 func decodeWALRecord(record arrow.RecordBatch, sequence uint64) (Batch, error) {

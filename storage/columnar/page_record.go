@@ -26,6 +26,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
@@ -40,11 +41,36 @@ const (
 	pageSeriesPayloadsColumn
 )
 
+// pageSchema is built once: constructing the Arrow schema for every cohort and
+// every block was measurable overhead.
+var (
+	pageSchema           = buildPageSchema()
+	pageWriterPropsCache sync.Map // compress.Compression -> *parquet.WriterProperties
+	pageArrowWriterProps = pqarrow.NewArrowWriterProperties(pqarrow.WithStoreSchema())
+)
+
+// pageWriterProperties returns cached writer properties for codec. They are
+// immutable configuration, so rebuilding them per block was pure overhead.
+func pageWriterProperties(codec compress.Compression) *parquet.WriterProperties {
+	if cached, ok := pageWriterPropsCache.Load(codec); ok {
+		return cached.(*parquet.WriterProperties)
+	}
+	props := parquet.NewWriterProperties(
+		parquet.WithCompression(codec),
+		// Each Write starts a new row group. Do not split a long cohort's
+		// segment rows merely because MaxSeriesPerRowGroup bounds membership.
+		parquet.WithMaxRowGroupLength(math.MaxInt64),
+		parquet.WithDictionaryPath(parquet.ColumnPath{"series_payloads", "list", "element", valuesColumn}, false),
+	)
+	pageWriterPropsCache.Store(codec, props)
+	return props
+}
+
 // PageSchema is the physical sample schema. One row is one time window of one
 // cohort slice. Its timestamp column is shared by every series payload, while
 // each payload retains independent value, kind, start-time and histogram
 // columns. Rows of one cohort form one Parquet row group.
-func PageSchema() *arrow.Schema {
+func buildPageSchema() *arrow.Schema {
 	seriesPayload := arrow.StructOf(
 		arrow.Field{Name: seriesIDColumn, Type: arrow.PrimitiveTypes.Uint64, Nullable: false},
 		arrow.Field{Name: "min_value", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
@@ -74,7 +100,7 @@ func PageSchema() *arrow.Schema {
 // the series dictionary and all row/cohort offsets.
 // pageBuilderPool reuses Arrow RecordBuilders across cohorts and flushes.
 // NewRecordBatch resets the builder, so a returned builder is clean for reuse.
-var pageBuilderPool = sync.Pool{New: func() any { return array.NewRecordBuilder(memory.NewGoAllocator(), PageSchema()) }}
+var pageBuilderPool = sync.Pool{New: func() any { return array.NewRecordBuilder(memory.NewGoAllocator(), pageSchema) }}
 
 func writePageFile(path string, series []Series, catalog blockCatalog, opts WriteOptions) (err error) {
 	f, err := os.Create(path)
@@ -82,15 +108,9 @@ func writePageFile(path string, series []Series, catalog blockCatalog, opts Writ
 		return err
 	}
 	writer, err := pqarrow.NewFileWriter(
-		PageSchema(), f,
-		parquet.NewWriterProperties(
-			parquet.WithCompression(opts.Compression),
-			// Each Write starts a new row group. Do not split a long cohort's
-			// segment rows merely because MaxSeriesPerRowGroup bounds membership.
-			parquet.WithMaxRowGroupLength(math.MaxInt64),
-			parquet.WithDictionaryPath(parquet.ColumnPath{"series_payloads", "list", "element", valuesColumn}, false),
-		),
-		pqarrow.NewArrowWriterProperties(pqarrow.WithStoreSchema()),
+		pageSchema, f,
+		pageWriterProperties(opts.Compression),
+		pageArrowWriterProps,
 	)
 	if err != nil {
 		f.Close()

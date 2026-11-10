@@ -76,25 +76,22 @@ type blockCohortEntry struct {
 // sorted postings and per-series segment offsets without opening the sample
 // Parquet payload. Public block queries must still validate full label sets.
 type blockCatalog struct {
-	Version  int
-	Series   []blockSeriesEntry
-	Postings []blockPosting
-	Cohorts  []blockCohortEntry
+	Version int
+	Series  []blockSeriesEntry
+	// SeriesIDs mirrors Series IDs in order, so matcher resolution never has to
+	// rebuild the full ID list per query or per negated matcher.
+	SeriesIDs []uint64
+	Postings  []blockPosting
+	Cohorts   []blockCohortEntry
 }
 
-func buildBlockCatalog(series []Series, opts WriteOptions) (blockCatalog, error) {
+// buildBlockCatalog builds the series dictionary, postings and cohort map.
+// intern optionally supplies a shared immutable label allocation; it is called
+// once per series and may be nil for standalone writes.
+func buildBlockCatalog(series []Series, opts WriteOptions, intern func(labels.Labels) (labels.Labels, error)) (blockCatalog, error) {
 	catalog := blockCatalog{Version: catalogVersion}
 	byID := make(map[uint64]int, len(series))
 	postings := map[blockPostingKey]*blockPosting{}
-	postingCounts := map[blockPostingKey]int{}
-	for i := range series {
-		series[i].Labels.Range(func(l labels.Label) {
-			postingCounts[blockPostingKey{name: l.Name, value: l.Value}]++
-		})
-	}
-	for key, count := range postingCounts {
-		postings[key] = &blockPosting{Name: key.name, Value: key.value, IDs: make([]uint64, 0, count)}
-	}
 	for i := range series {
 		id := metadataSeriesKey(series[i].Labels)
 		if previous, exists := byID[id]; exists {
@@ -104,7 +101,15 @@ func buildBlockCatalog(series []Series, opts WriteOptions) (blockCatalog, error)
 			return blockCatalog{}, fmt.Errorf("duplicate series %q", series[i].Labels)
 		}
 		byID[id] = len(catalog.Series)
-		catalog.Series = append(catalog.Series, blockSeriesEntry{ID: id, Labels: series[i].Labels.Copy()})
+		entryLabels := series[i].Labels.Copy()
+		if intern != nil {
+			shared, err := intern(series[i].Labels)
+			if err != nil {
+				return blockCatalog{}, err
+			}
+			entryLabels = shared
+		}
+		catalog.Series = append(catalog.Series, blockSeriesEntry{ID: id, Labels: entryLabels})
 		series[i].Labels.Range(func(l labels.Label) {
 			key := blockPostingKey{name: l.Name, value: l.Value}
 			posting := postings[key]
@@ -127,6 +132,10 @@ func buildBlockCatalog(series []Series, opts WriteOptions) (blockCatalog, error)
 			return labels.Compare(a.Labels, b.Labels)
 		}
 	})
+	catalog.SeriesIDs = make([]uint64, len(catalog.Series))
+	for i, entry := range catalog.Series {
+		catalog.SeriesIDs[i] = entry.ID
+	}
 	for _, posting := range postings {
 		slices.Sort(posting.IDs)
 		catalog.Postings = append(catalog.Postings, *posting)
@@ -406,7 +415,7 @@ func readBlockCatalog(dir string, meta Meta) (blockCatalog, error) {
 		entry.Segments = make([]blockSegmentRef, 0, numSegments)
 		for range numSegments {
 			var seg blockSegmentRef
-			seg.RowGroup = int(r.i32())
+			seg.RowGroup = r.i32()
 			seg.Row = r.i32()
 			seg.Offset = r.i32()
 			seg.MinTime = r.i64()
@@ -433,7 +442,7 @@ func readBlockCatalog(dir string, meta Meta) (blockCatalog, error) {
 	for range numCohorts {
 		var cohort blockCohortEntry
 		cohort.ID = r.u64()
-		cohort.RowGroup = int(r.i32())
+		cohort.RowGroup = r.i32()
 		cohort.NumSegments = r.i32()
 		cohort.NumSeries = r.i32()
 		numSeriesIDs := r.u32()
@@ -450,6 +459,10 @@ func readBlockCatalog(dir string, meta Meta) (blockCatalog, error) {
 	}
 	if r.pos != len(data) {
 		return blockCatalog{}, errors.New("trailing bytes in block catalog")
+	}
+	catalog.SeriesIDs = make([]uint64, len(catalog.Series))
+	for i, entry := range catalog.Series {
+		catalog.SeriesIDs[i] = entry.ID
 	}
 	return validateBlockCatalog(catalog, meta)
 }

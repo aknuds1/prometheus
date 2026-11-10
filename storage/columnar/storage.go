@@ -83,8 +83,10 @@ type Storage struct {
 	dir  string
 	opts StorageOptions
 
-	mtx          sync.Mutex
-	buffer       []*headSeries // Sorted by stable series hash.
+	mtx sync.Mutex
+	// buffer holds buffered series by stable hash. A map keeps insertion O(1);
+	// flushLocked sorts once at seal time instead of keeping an array ordered.
+	buffer       map[uint64]*headSeries
 	bufferN      int
 	bufferMin    int64
 	bufferMax    int64
@@ -100,9 +102,11 @@ type Storage struct {
 	metadataPublished *metadataRelations
 	metadataDirty     bool
 
-	walSequence uint64
-	replaying   bool
-	reads       *readStats
+	walSequence       uint64
+	walSeg            *walSegment
+	walClosedSegments []walClosedSegment
+	replaying         bool
+	reads             *readStats
 }
 
 // headSeries holds samples as typed columns. Histograms must be encoded before
@@ -142,6 +146,7 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 		dir:          dir,
 		opts:         opts,
 		last:         map[uint64]*seriesState{},
+		buffer:       map[uint64]*headSeries{},
 		seriesLabels: map[uint64]labels.Labels{},
 		bufferMin:    math.MaxInt64,
 		bufferMax:    math.MinInt64,
@@ -243,7 +248,9 @@ func (s *Storage) Close() error {
 		return nil
 	}
 	s.closed = true
-	return nil
+	// Flush the open WAL segment so every acknowledged record is complete and
+	// its footer is written.
+	return s.rotateWALSegment()
 }
 
 // Flush writes the buffer out as a block.
@@ -291,7 +298,7 @@ func (s *Storage) flushLocked() error {
 		return nil
 	}
 	var catalog blockCatalog
-	meta, err := writeBlock(s.dir, series, metadata, s.opts.WriteOptions, s.walSequence, &catalog)
+	meta, err := writeBlock(s.dir, series, metadata, s.opts.WriteOptions, s.walSequence, &catalog, s.sharedSeriesLabels)
 	if err != nil {
 		return err
 	}
@@ -300,11 +307,9 @@ func (s *Storage) flushLocked() error {
 		return err
 	}
 	block.reads = s.reads
-	if err := s.reuseBlockLabels(block); err != nil {
-		return err
-	}
+	// Labels were interned while the catalog was built.
 	s.blocks = append(s.blocks, block)
-	s.buffer = nil
+	s.buffer = map[uint64]*headSeries{}
 	s.bufferN = 0
 	s.bufferMin = math.MaxInt64
 	s.bufferMax = math.MinInt64
@@ -347,12 +352,12 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 		return 0, fmt.Errorf("%w: timestamp %d precedes retention cutoff %d", storage.ErrOutOfBounds, t, a.s.minValidTime)
 	}
 
-	hs, err := a.seriesFor(ls)
+	hs, hash, err := a.seriesFor(ls)
 	if err != nil {
 		return 0, err
 	}
 
-	prev, hasPrev := a.previousLocked(ls, hs)
+	prev, hasPrev := a.previousLocked(ls, hash, hs)
 	if hasPrev {
 		switch {
 		case t == prev.t:
@@ -419,19 +424,21 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 var headSeriesPool = sync.Pool{New: func() any { return new(headSeries) }}
 
 // seriesFor returns the transaction's series.
-func (a *appender) seriesFor(ls labels.Labels) (*headSeries, error) {
+// seriesFor returns the transaction's series and its stable hash, so callers do
+// not re-hash the same labels.
+func (a *appender) seriesFor(ls labels.Labels) (*headSeries, uint64, error) {
 	hash := stableSeriesHash(ls)
 	if hs, ok := a.txs[hash]; ok {
 		if !labels.Equal(hs.labels, ls) {
-			return nil, fmt.Errorf("%w for labels = %q", ErrSeriesHashCollision, ls)
+			return nil, 0, fmt.Errorf("%w for labels = %q", ErrSeriesHashCollision, ls)
 		}
-		return hs, nil
+		return hs, hash, nil
 	}
 	hs := headSeriesPool.Get().(*headSeries)
-	*hs = headSeries{labels: ls}
+	*hs = headSeries{hash: hash, labels: ls}
 	a.txs[hash] = hs
 	a.order = append(a.order, hash)
-	return hs, nil
+	return hs, hash, nil
 }
 
 // Commit applies the buffered series and metadata through the same batched
@@ -576,7 +583,7 @@ func detectsReset(prev seriesState, h *histogram.Histogram, fh *histogram.FloatH
 
 // previousLocked finds the newest sample before the append, including samples
 // already staged in the same appender transaction.
-func (a *appender) previousLocked(ls labels.Labels, tx *headSeries) (seriesState, bool) {
+func (a *appender) previousLocked(ls labels.Labels, hash uint64, tx *headSeries) (seriesState, bool) {
 	if len(tx.ts) > 0 {
 		last := tx.ts[len(tx.ts)-1]
 		state := seriesState{labels: ls, t: last, st: tx.st[len(tx.st)-1]}
@@ -588,7 +595,6 @@ func (a *appender) previousLocked(ls labels.Labels, tx *headSeries) (seriesState
 		}
 		return state, true
 	}
-	hash := stableSeriesHash(ls)
 	// Scalar appenders are used concurrently by independent scrape pools.
 	// The shared committed-tail map is protected by the same lock used by
 	// batch seals and lifecycle operations; transaction-local state above is not.

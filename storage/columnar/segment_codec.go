@@ -271,26 +271,44 @@ func encodeFloatColumn(values []float64) ([]byte, floatCodec, error) {
 	if len(values) == 0 {
 		return nil, valueXOR, nil
 	}
+	// The XOR2 chunk is at most built once: it is both the comparison baseline
+	// and the fallback, so building it twice doubled encode work and allocation.
+	var (
+		xorBytes []byte
+		xorErr   error
+		xorBuilt bool
+	)
+	xorOnce := func() ([]byte, error) {
+		if !xorBuilt {
+			xorBytes, xorErr = encodeXOR(values)
+			xorBuilt = true
+		}
+		return xorBytes, xorErr
+	}
 	probeCount := min(len(values), 64)
 	for precision := 0; precision <= 8; precision++ {
-		_, ok := encodeALP(values[:probeCount], precision)
-		if !ok {
+		if _, ok := encodeALP(values[:probeCount], precision); !ok {
 			continue
 		}
 		full, exact := encodeALP(values, precision)
-		if exact {
-			xorBytes, err := encodeXOR(values)
-			if err != nil {
-				return nil, 0, err
-			}
-			if len(full) <= len(xorBytes) {
-				return full, valueALP, nil
-			}
-			break
+		if !exact {
+			continue
 		}
+		xb, err := xorOnce()
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(full) <= len(xb) {
+			return full, valueALP, nil
+		}
+		// Coarser scaling never shrinks the column further.
+		break
 	}
-	xorBytes, err := encodeXOR(values)
-	return xorBytes, valueXOR, err
+	xb, err := xorOnce()
+	if err != nil {
+		return nil, 0, err
+	}
+	return xb, valueXOR, nil
 }
 
 func encodeALP(values []float64, precision int) ([]byte, bool) {

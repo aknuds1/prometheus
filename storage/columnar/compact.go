@@ -67,7 +67,7 @@ func (s *Storage) compactBlockSnapshot(ctx context.Context, blocks []*Block, des
 		}
 	}
 	var catalog blockCatalog
-	meta, err := writeBlock(dest, mergeSeries(samples), metadata, s.opts.WriteOptions, walSequence, &catalog)
+	meta, err := writeBlock(dest, mergeSeries(samples), metadata, s.opts.WriteOptions, walSequence, &catalog, s.sharedSeriesLabels)
 	return meta, compacted, catalog, err
 }
 

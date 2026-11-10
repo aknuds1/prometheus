@@ -14,13 +14,30 @@
 package columnar
 
 import (
+	"sync"
+
 	"github.com/prometheus/prometheus/model/labels"
 )
 
+// hashScratchPool reuses the hashing scratch buffer. labels.StableHash
+// allocated a fresh 1 KB buffer per call, and it runs per sample and per
+// catalog probe on ingestion hot paths.
+var hashScratchPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 1024)
+		return &b
+	},
+}
+
 // stableSeriesHash is the common, stable series key for the head, block catalog
 // and metadata memberships. Complete-label collision checks remain mandatory.
+// The hash is identical to labels.StableHash.
 func stableSeriesHash(ls labels.Labels) uint64 {
-	return labels.StableHash(ls)
+	scratch := hashScratchPool.Get().(*[]byte)
+	h, buf := labels.StableHashInto(ls, *scratch)
+	*scratch = buf
+	hashScratchPool.Put(scratch)
+	return h
 }
 
 // resourceLabel returns the exact label used in OTLP-derived metric series.

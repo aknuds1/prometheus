@@ -127,20 +127,8 @@ func headTimestampError(previous, next int64) error {
 // findHead returns the entry at hash from the sorted array. Complete labels are
 // checked by the caller wherever the ID might have come from outside storage.
 func (s *Storage) findHead(hash uint64) (*headSeries, bool) {
-	i, found := slices.BinarySearchFunc(s.buffer, hash, func(entry *headSeries, hash uint64) int {
-		switch {
-		case entry.hash < hash:
-			return -1
-		case entry.hash > hash:
-			return 1
-		default:
-			return 0
-		}
-	})
-	if !found {
-		return nil, false
-	}
-	return s.buffer[i], true
+	hs, ok := s.buffer[hash]
+	return hs, ok
 }
 
 // commitHead appends fully prepared arrays and updates tail state once after
@@ -151,19 +139,9 @@ func (s *Storage) commitHead(prepared []*headSeries) error {
 		hs, ok := s.findHead(state.hash)
 		if !ok {
 			// Prepared arrays already own their storage, so a new series can enter
-			// the sorted head directly without an intermediate duplicate copy.
+			// the head directly without an intermediate duplicate copy.
 			hs = state
-			i, _ := slices.BinarySearchFunc(s.buffer, state.hash, func(entry *headSeries, hash uint64) int {
-				switch {
-				case entry.hash < hash:
-					return -1
-				case entry.hash > hash:
-					return 1
-				default:
-					return 0
-				}
-			})
-			s.buffer = slices.Insert(s.buffer, i, hs)
+			s.buffer[state.hash] = hs
 		} else if !labels.Equal(hs.labels, state.labels) {
 			return ErrSeriesHashCollision
 		}

@@ -422,3 +422,56 @@ func (s *metadataStore) validateLabels(owner OwnerKey, ls labels.Labels) error {
 	}
 	return nil
 }
+
+// ownerUpdateChanges reports whether update would alter the published owner
+// history. Observation-only extensions do not count: publishing deliberately
+// omits them, so skipping the transaction keeps memory and WAL identical.
+func (s *metadataStore) ownerUpdateChanges(update Update) bool {
+	history, ok := s.byOwner[update.Owner]
+	if !ok {
+		return true
+	}
+	i := sort.Search(len(history.versions), func(i int) bool {
+		return history.versions[i].EffectiveFrom >= update.EffectiveFrom
+	})
+	if i < len(history.versions) && history.versions[i].EffectiveFrom == update.EffectiveFrom {
+		return !contentsEqual(history.versions[i].Content, update.Content)
+	}
+	if i > 0 && contentsEqual(history.versions[i-1].Content, update.Content) {
+		return false
+	}
+	return true
+}
+
+// associationChanges reports whether update would change owner history or the
+// series membership for its kind.
+func (s *metadataStore) associationChanges(seriesHash uint64, ls labels.Labels, update Update) bool {
+	if s.ownerUpdateChanges(update) {
+		return true
+	}
+	if existing, ok := s.chains[seriesHash]; ok && !labels.Equal(existing, ls) {
+		return true
+	}
+	rows := s.bySeries[seriesHash][update.Owner.Kind]
+	i := sort.Search(len(rows), func(i int) bool {
+		return rows[i].effectiveFrom >= update.EffectiveFrom
+	})
+	if i < len(rows) && rows[i].effectiveFrom == update.EffectiveFrom {
+		return rows[i].owner != update.Owner
+	}
+	if i > 0 && rows[i-1].owner == update.Owner {
+		return false
+	}
+	return true
+}
+
+// batchChanges reports whether any update in the batch would change the
+// published metadata state.
+func (s *metadataStore) batchChanges(batch Batch) bool {
+	for _, association := range batch.Updates {
+		if s.associationChanges(metadataSeriesKey(association.Labels), association.Labels, association.Update) {
+			return true
+		}
+	}
+	return slices.ContainsFunc(batch.OwnerUpdates, s.ownerUpdateChanges)
+}
