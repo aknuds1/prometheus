@@ -178,7 +178,7 @@ func selectFromHeads(heads []*headSeries, mint, maxt int64, _ bool, hints *stora
 	}
 	// Always sort inside a single source: merge queriers assume label order.
 	slices.SortFunc(selected, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
-	return &seriesSet{series: selected, reads: reads}
+	return newSeriesSet(selected, reads)
 }
 
 // selectRange returns the buffered samples within [mint, maxt] without copying.
@@ -223,7 +223,7 @@ func (q *blockQuerier) Select(ctx context.Context, _ bool, hints *storage.Select
 	if err != nil {
 		return storage.ErrSeriesSet(err)
 	}
-	return &seriesSet{series: series, reads: q.block.reads}
+	return newSeriesSet(series, q.block.reads)
 }
 
 // relevantRange applies the hint bounds to a querier range.
@@ -271,7 +271,7 @@ func selectFromSeries(series []Series, mint, maxt int64, sortSeries bool, hints 
 	// one block or the buffer is involved.
 	_ = sortSeries
 	slices.SortFunc(selected, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
-	return &seriesSet{series: selected, reads: reads}
+	return newSeriesSet(selected, reads)
 }
 
 func matchesAll(ls labels.Labels, matchers []*labels.Matcher) bool {
@@ -328,9 +328,17 @@ func headToSeries(hs *headSeries) Series {
 // seriesSet is a series set over already-selected series.
 type seriesSet struct {
 	series []Series
-	reads  *readStats
-	i      int
-	err    error
+	// wrappers backs At without allocating one wrapper per Next. Entries are
+	// distinct, so callers may hold several results at once, which merge queriers do.
+	wrappers []series
+	reads    *readStats
+	i        int
+	err      error
+}
+
+// newSeriesSet prepares a series set for series, reusing one wrapper per entry.
+func newSeriesSet(items []Series, reads *readStats) *seriesSet {
+	return &seriesSet{series: items, wrappers: make([]series, len(items)), reads: reads}
 }
 
 func (s *seriesSet) Next() bool {
@@ -344,7 +352,12 @@ func (s *seriesSet) Next() bool {
 	return true
 }
 
-func (s *seriesSet) At() storage.Series { return &series{s: s.series[s.i-1], reads: s.reads} }
+func (s *seriesSet) At() storage.Series {
+	w := &s.wrappers[s.i-1]
+	w.s = s.series[s.i-1]
+	w.reads = s.reads
+	return w
+}
 
 func (s *seriesSet) Err() error { return s.err }
 

@@ -31,7 +31,7 @@ func (b *Block) Select(ctx context.Context, mint, maxt int64, matcherSets [][]*l
 		return nil, nil
 	}
 
-	ids, err := b.resolveMatcherSets(matcherSets)
+	ids, err := b.resolveMatcherSets(newIDScratch(len(b.catalog.SeriesIDs)), matcherSets)
 	if err != nil || len(ids) == 0 {
 		return nil, err
 	}
@@ -82,29 +82,55 @@ func (b *Block) Select(ctx context.Context, mint, maxt int64, matcherSets [][]*l
 
 // resolveMatcherSets applies sorted-list union and intersection over block-local
 // stable series IDs. It never opens either labels or samples from Parquet.
-func (b *Block) resolveMatcherSets(matcherSets [][]*labels.Matcher) ([]uint64, error) {
+// idScratch reuses the intermediate ID buffers of matcher resolution. Every
+// union and intersection allocated a fresh slice, per block, per query.
+//
+// The returned ID slice is backed by scratch and is only valid until the next
+// call; callers must consume it immediately.
+type idScratch struct {
+	bufs  [3][]uint64
+	sets  [][]uint64
+	index int
+}
+
+func newIDScratch(totalSeries int) *idScratch {
+	var s idScratch
+	for i := range s.bufs {
+		s.bufs[i] = make([]uint64, 0, totalSeries)
+	}
+	return &s
+}
+
+// buffer rotates over three buffers, so no live input is ever the destination.
+func (s *idScratch) buffer() []uint64 {
+	s.index++
+	return s.bufs[s.index%len(s.bufs)][:0]
+}
+
+func (b *Block) resolveMatcherSets(scratch *idScratch, matcherSets [][]*labels.Matcher) ([]uint64, error) {
 	if len(matcherSets) == 0 {
 		return b.allSeriesIDs(), nil
 	}
-	sets := make([][]uint64, 0, len(matcherSets))
+	scratch.sets = scratch.sets[:0]
+	all := b.allSeriesIDs()
 	for _, matchers := range matcherSets {
-		ids := b.allSeriesIDs()
+		ids := all
 		for _, matcher := range matchers {
 			matching, err := b.positiveMatcherIDs(matcher)
 			if err != nil {
 				return nil, err
 			}
 			if matcher.Type == labels.MatchNotEqual || matcher.Type == labels.MatchNotRegexp {
-				matching = subtractSortedIDs(b.allSeriesIDs(), matching)
+				matching = subtractSortedIDsInto(scratch.buffer(), all, matching)
 			}
-			ids = intersectSortedIDs(ids, matching)
+			ids = intersectSortedIDsInto(scratch.buffer(), ids, matching)
 			if len(ids) == 0 {
 				break
 			}
 		}
-		sets = append(sets, ids)
+		scratch.sets = append(scratch.sets, ids)
 	}
-	return unionSortedIDSets(sets), nil
+	return unionSortedIDSetsInto(scratch.buffer(), scratch.sets), nil
 }
 
 // positiveMatcherIDs returns IDs whose stored or absent label would satisfy the
@@ -171,6 +197,75 @@ func compareStrings(a, b string) int {
 	default:
 		return 0
 	}
+}
+
+func intersectSortedIDsInto(dst, a, b []uint64) []uint64 {
+	dst = dst[:0]
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i] < b[j]:
+			i++
+		case a[i] > b[j]:
+			j++
+		default:
+			dst = append(dst, a[i])
+			i++
+			j++
+		}
+	}
+	return dst
+}
+
+func subtractSortedIDsInto(dst, a, b []uint64) []uint64 {
+	dst = dst[:0]
+	for i, j := 0, 0; i < len(a); i++ {
+		for j < len(b) && b[j] < a[i] {
+			j++
+		}
+		if j < len(b) && b[j] == a[i] {
+			continue
+		}
+		dst = append(dst, a[i])
+	}
+	return dst
+}
+
+func unionSortedIDsInto(dst, a, b []uint64) []uint64 {
+	dst = dst[:0]
+	i, j := 0, 0
+	for i < len(a) || j < len(b) {
+		switch {
+		case i == len(a):
+			return append(dst, b[j:]...)
+		case j == len(b):
+			return append(dst, a[i:]...)
+		case a[i] < b[j]:
+			dst = append(dst, a[i])
+			i++
+		case a[i] > b[j]:
+			dst = append(dst, b[j])
+			j++
+		default:
+			dst = append(dst, a[i])
+			i++
+			j++
+		}
+	}
+	return dst
+}
+
+func unionSortedIDSetsInto(dst []uint64, sets [][]uint64) []uint64 {
+	if len(sets) == 0 {
+		return dst[:0]
+	}
+	if len(sets) == 1 {
+		return sets[0]
+	}
+	acc := sets[0]
+	for _, set := range sets[1:] {
+		acc = unionSortedIDsInto(dst, acc, set)
+	}
+	return acc
 }
 
 func intersectSortedIDs(a, b []uint64) []uint64 {

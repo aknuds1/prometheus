@@ -85,7 +85,7 @@ func (q *blockQuerier) visitLabels(ctx context.Context, matchers []*labels.Match
 // visitLabels uses the catalog's series dictionary and postings. Label APIs do
 // not open or decode any sample payload, including for selective matchers.
 func (b *Block) visitLabels(ctx context.Context, matcherSets [][]*labels.Matcher, visit func(labels.Labels) error) error {
-	ids, err := b.resolveMatcherSets(matcherSets)
+	ids, err := b.resolveMatcherSets(newIDScratch(len(b.catalog.SeriesIDs)), matcherSets)
 	if err != nil {
 		return err
 	}
