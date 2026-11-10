@@ -101,13 +101,17 @@ func buildBlockCatalog(series []Series, opts WriteOptions, intern func(labels.La
 			return blockCatalog{}, fmt.Errorf("duplicate series %q", series[i].Labels)
 		}
 		byID[id] = len(catalog.Series)
-		entryLabels := series[i].Labels.Copy()
+		// Intern first: copying and then discarding the copy allocated a full
+		// label set per series per block, which showed up as GC pressure.
+		entryLabels := series[i].Labels
 		if intern != nil {
 			shared, err := intern(series[i].Labels)
 			if err != nil {
 				return blockCatalog{}, err
 			}
 			entryLabels = shared
+		} else {
+			entryLabels = entryLabels.Copy()
 		}
 		catalog.Series = append(catalog.Series, blockSeriesEntry{ID: id, Labels: entryLabels})
 		series[i].Labels.Range(func(l labels.Label) {
