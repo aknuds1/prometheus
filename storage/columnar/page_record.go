@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
+	"sync"
 )
 
 // selectedBlockSeries identifies only the time-overlapping segments required for
@@ -46,57 +48,108 @@ func (b *Block) readSelectedSeries(ctx context.Context, selections []selectedBlo
 		return nil, err
 	}
 
-	timestampsByCohort := make(map[int][]int64, 8)
+	// Gather every payload up front so the reads can be ordered and overlapped.
+	// One pread per series was the largest single cost after format 10.
+	type work struct {
+		selection int
+		ref       blockSegmentRef
+		blob      []byte
+	}
+	var items []work
 	for i, selection := range selections {
 		out[i].Labels = selection.entry.Labels
 		for _, ref := range selection.segments {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			timestamps, ok := timestampsByCohort[ref.Cohort]
-			if !ok {
-				timestamps, err = b.timestampVector(ref.Cohort)
-				if err != nil {
-					return nil, fmt.Errorf("reading cohort %d timestamps: %w", ref.Cohort, err)
-				}
-				timestampsByCohort[ref.Cohort] = timestamps
-			}
-			if ref.TsStart < 0 || ref.TsStart+ref.Count > len(timestamps) {
-				return nil, fmt.Errorf("segment window [%d,%d) exceeds cohort vector of %d samples",
-					ref.TsStart, ref.TsStart+ref.Count, len(timestamps))
-			}
-			blob, err := b.readAt(reader.segments, ref.Offset, ref.Length)
-			if err != nil {
-				return nil, fmt.Errorf("reading segment at %d: %w", ref.Offset, err)
-			}
-			if b.reads != nil {
-				b.reads.payloadBytes.Add(uint64(len(blob)))
-				b.reads.segmentsRead.Inc()
-			}
-			blob, err = decompressPayload(ref, blob)
-			if err != nil {
-				return nil, fmt.Errorf("decompressing segment at %d: %w", ref.Offset, err)
-			}
-			segment, err := decodeSegmentPayload(ref, blob)
-			if err != nil {
-				return nil, fmt.Errorf("decoding segment at %d: %w", ref.Offset, err)
-			}
-			page := TypedPage{Labels: selection.entry.Labels, Timestamps: timestamps[ref.TsStart : ref.TsStart+ref.Count]}
-			if err := segment.decodeColumnsInto(selection.entry.Labels, &page); err != nil {
-				return nil, fmt.Errorf("decoding segment at %d: %w", ref.Offset, err)
-			}
-			appendDecodedPage(&out[i], page)
-			selection.decoded++
+			items = append(items, work{selection: i, ref: ref})
 		}
+	}
+	if len(items) == 0 {
+		return out, nil
+	}
+
+	// Ascending offsets let the kernel and the device see a sequential pattern.
+	order := make([]int, len(items))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool { return items[order[a]].ref.Offset < items[order[b]].ref.Offset })
+
+	workers := min(len(items), 8)
+	next := make(chan int)
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range next {
+				item := &items[idx]
+				blob, err := b.readAt(reader.segments, item.ref.Offset, item.ref.Length)
+				if err != nil {
+					errs <- fmt.Errorf("reading segment at %d: %w", item.ref.Offset, err)
+					return
+				}
+				item.blob = blob
+			}
+		}()
+	}
+	for _, idx := range order {
+		if err := ctx.Err(); err != nil {
+			close(next)
+			wg.Wait()
+			return nil, err
+		}
+		next <- idx
+	}
+	close(next)
+	wg.Wait()
+	close(errs)
+	if err := <-errs; err != nil {
+		return nil, err
+	}
+
+	timestampsByCohort := make(map[int][]int64, 8)
+	for idx := range items {
+		item := &items[idx]
+		ref := item.ref
+		timestamps, ok := timestampsByCohort[ref.Cohort]
+		if !ok {
+			timestamps, err = b.timestampVector(ref.Cohort)
+			if err != nil {
+				return nil, fmt.Errorf("reading cohort %d timestamps: %w", ref.Cohort, err)
+			}
+			timestampsByCohort[ref.Cohort] = timestamps
+		}
+		if ref.TsStart < 0 || ref.TsStart+ref.Count > len(timestamps) {
+			return nil, fmt.Errorf("segment window [%d,%d) exceeds cohort vector of %d samples",
+				ref.TsStart, ref.TsStart+ref.Count, len(timestamps))
+		}
+		if b.reads != nil {
+			b.reads.payloadBytes.Add(uint64(len(item.blob)))
+			b.reads.segmentsRead.Inc()
+		}
+		blob, err := decompressPayload(ref, item.blob)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing segment at %d: %w", ref.Offset, err)
+		}
+		segment, err := decodeSegmentPayload(ref, blob)
+		if err != nil {
+			return nil, fmt.Errorf("decoding segment at %d: %w", ref.Offset, err)
+		}
+		page := TypedPage{
+			Labels:     selections[item.selection].entry.Labels,
+			Timestamps: timestamps[ref.TsStart : ref.TsStart+ref.Count],
+		}
+		if err := segment.decodeColumnsInto(page.Labels, &page); err != nil {
+			return nil, fmt.Errorf("decoding segment at %d: %w", ref.Offset, err)
+		}
+		appendDecodedPage(&out[item.selection], page)
+	}
+	for i := range out {
 		if err := out[i].Validate(); err != nil {
 			return nil, err
 		}
-	}
-	if b.reads != nil {
-		for i := range out {
-			if out[i].Len() > 0 {
-				b.reads.sampleRows.Inc()
-			}
+		if b.reads != nil && out[i].Len() > 0 {
+			b.reads.sampleRows.Inc()
 		}
 	}
 	return out, nil

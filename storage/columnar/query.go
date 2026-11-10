@@ -358,9 +358,19 @@ type series struct {
 
 func (s *series) Labels() labels.Labels { return s.s.Labels }
 
-func (s *series) Iterator(_ chunkenc.Iterator) chunkenc.Iterator {
+func (s *series) Iterator(reuse chunkenc.Iterator) chunkenc.Iterator {
+	// Honour the reuse contract: the query engine passes one iterator back per
+	// series, so reusing it removes an allocation per series per query.
 	// pos must start before the first sample, otherwise Next would skip it and a
 	// single-sample series would yield nothing at all.
+	if it, ok := reuse.(*sampleIterator); ok {
+		it.series = s.s
+		it.reads = s.reads
+		it.pos = -1
+		it.err = nil
+		it.batch = storage.SampleBatch{}
+		return it
+	}
 	return &sampleIterator{series: s.s, reads: s.reads, pos: -1}
 }
 
