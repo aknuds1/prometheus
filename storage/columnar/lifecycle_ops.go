@@ -140,6 +140,14 @@ func (s *Storage) RetainBefore(ctx context.Context, cutoff int64) (int, error) {
 	if err := retireBlocks(s.dir, removed); err != nil {
 		return 0, err
 	}
+	expired := make([]*Block, 0, len(removed))
+	for _, block := range s.blocks {
+		if slices.Contains(retained, block) {
+			continue
+		}
+		expired = append(expired, block)
+	}
+	s.closeRetired(expired)
 	s.blocks = retained
 	s.minValidTime = max(s.minValidTime, cutoff)
 	if err := s.rebuildSeriesLabels(); err != nil {

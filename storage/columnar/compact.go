@@ -136,7 +136,9 @@ func (s *Storage) Compact(ctx context.Context) (Meta, error) {
 	// Adopt the validated snapshot before deleting inputs. If cleanup fails, the
 	// new block is still complete and ListBlocks suppresses its named parents on
 	// reopening. The returned error makes the residual disk cost explicit.
+	previous := s.blocks
 	s.blocks = []*Block{published}
+	s.closeRetired(previous)
 	if err := s.rebuildSeriesLabels(); err != nil {
 		return meta, err
 	}

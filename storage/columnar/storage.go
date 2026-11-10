@@ -86,13 +86,14 @@ type Storage struct {
 	mtx sync.Mutex
 	// buffer holds buffered series by stable hash. A map keeps insertion O(1);
 	// flushLocked sorts once at seal time instead of keeping an array ordered.
-	buffer       map[uint64]*headSeries
-	bufferN      int
-	bufferMin    int64
-	bufferMax    int64
-	minValidTime int64
-	blocks       []*Block
-	last         map[uint64]*seriesState
+	buffer        map[uint64]*headSeries
+	bufferN       int
+	bufferMin     int64
+	bufferMax     int64
+	minValidTime  int64
+	blocks        []*Block
+	retiredBlocks []*Block
+	last          map[uint64]*seriesState
 	// seriesLabels deduplicates immutable label storage across blocks and
 	// recovered/appended samples. Every reuse checks complete labels.
 	seriesLabels map[uint64]labels.Labels
@@ -248,9 +249,25 @@ func (s *Storage) Close() error {
 		return nil
 	}
 	s.closed = true
+	var errs []error
+	for _, block := range s.blocks {
+		errs = append(errs, block.Close())
+	}
+	for _, block := range s.retiredBlocks {
+		errs = append(errs, block.Close())
+	}
+	s.retiredBlocks = nil
 	// Flush the open WAL segment so every acknowledged record is complete and
 	// its footer is written.
-	return s.rotateWALSegment()
+	errs = append(errs, s.rotateWALSegment())
+	return errors.Join(errs...)
+}
+
+// closeRetired releases cached readers for blocks no longer published.
+func (s *Storage) closeRetired(blocks []*Block) {
+	for _, block := range blocks {
+		s.retiredBlocks = append(s.retiredBlocks, block)
+	}
 }
 
 // Flush writes the buffer out as a block.

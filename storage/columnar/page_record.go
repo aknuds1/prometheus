@@ -271,15 +271,11 @@ func (b *Block) readSelectedSeries(ctx context.Context, selections []selectedBlo
 		}
 	}
 
-	rr, pf, f, err := b.newRecordReader(ctx, rowGroups, nil)
+	rr, err := b.recordReader(ctx, rowGroups, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		rr.Release()
-		pf.Close()
-		f.Close()
-	}()
+	defer rr.Release()
 
 	requestIndex := 0
 	for rr.Next() {

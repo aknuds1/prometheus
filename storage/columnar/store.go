@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
@@ -182,6 +183,58 @@ type Block struct {
 	// scan granularity.
 	rowGroups int
 	catalog   blockCatalog
+
+	// readerMtx guards the lazily opened Parquet reader. Re-opening the file and
+	// rebuilding column-chunk metadata for every query dominated query CPU.
+	readerMtx sync.Mutex
+	dataFile  *os.File
+	parquet   *file.Reader
+	arrowRead *pqarrow.FileReader
+}
+
+// Close releases cached reader state. Blocks are immutable, so this is safe to
+// call once the block is no longer queried.
+func (b *Block) Close() error {
+	b.readerMtx.Lock()
+	defer b.readerMtx.Unlock()
+	var err error
+	if b.parquet != nil {
+		// The Parquet reader owns the underlying file handle.
+		err = b.parquet.Close()
+		b.parquet = nil
+	}
+	b.arrowRead = nil
+	b.dataFile = nil
+	return err
+}
+
+// recordReader returns a reader over the given row groups and columns, reusing
+// the block's open Parquet reader and footer metadata across queries.
+func (b *Block) recordReader(ctx context.Context, rowGroups, columns []int) (pqarrow.RecordReader, error) {
+	if b.reads != nil {
+		b.reads.samples.Inc()
+	}
+	b.readerMtx.Lock()
+	defer b.readerMtx.Unlock()
+	if b.arrowRead == nil {
+		f, err := os.Open(blockDataPath(b.dir))
+		if err != nil {
+			return nil, err
+		}
+		pf, err := file.NewParquetReader(f)
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		reader, err := pqarrow.NewFileReader(pf, pqarrow.ArrowReadProperties{}, b.mem)
+		if err != nil {
+			pf.Close()
+			f.Close()
+			return nil, err
+		}
+		b.dataFile, b.parquet, b.arrowRead = f, pf, reader
+	}
+	return b.arrowRead.GetRecordReader(ctx, columns, rowGroups)
 }
 
 // OpenBlock opens the block in dir.
