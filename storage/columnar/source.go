@@ -79,9 +79,9 @@ const DefaultMaxSeries = 100_000
 // result is sorted by label set and truncated to limit when limit is positive.
 func (s *Storage) SelectSeries(ctx context.Context, mint, maxt int64, matcherSets [][]*labels.Matcher, limit int) ([]Series, error) {
 	s.mtx.Lock()
-	buffer := make([]Series, 0, len(s.buffer))
+	heads := make([]*headSeries, 0, len(s.buffer))
 	for _, hs := range s.buffer {
-		buffer = append(buffer, headToSeries(hs))
+		heads = append(heads, hs)
 	}
 	blocks := slices.Clone(s.blocks)
 	closed := s.closed
@@ -91,7 +91,15 @@ func (s *Storage) SelectSeries(ctx context.Context, mint, maxt int64, matcherSet
 		return nil, errors.New("columnar: storage is closed")
 	}
 
-	all := buffer
+	all := make([]Series, 0, 16)
+	for _, hs := range heads {
+		if !matchesAny(hs.labels, matcherSets) {
+			continue
+		}
+		if series, ok := hs.selectRange(mint, maxt); ok {
+			all = append(all, series)
+		}
+	}
 	for _, block := range blocks {
 		if !block.Overlaps(mint, maxt) {
 			continue

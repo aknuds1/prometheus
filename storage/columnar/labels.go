@@ -33,17 +33,20 @@ func (q *memQuerier) LabelValues(ctx context.Context, name string, hints *storag
 
 func (q *memQuerier) collectLabels(ctx context.Context, valueName string, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	values := map[string]struct{}{}
-	for _, series := range q.series {
+	for _, hs := range q.heads {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		if trimSeries(series, q.mint, q.maxt).Len() == 0 || !matchesAll(series.Labels, matchers) {
+		if !matchesAll(hs.labels, matchers) {
+			continue
+		}
+		if _, ok := hs.selectRange(q.mint, q.maxt); !ok {
 			continue
 		}
 		if q.reads != nil {
 			q.reads.labelRows.Inc()
 		}
-		collectLabelValue(values, series.Labels, valueName)
+		collectLabelValue(values, hs.labels, valueName)
 	}
 	return sortedLabelValues(values, hints), nil, nil
 }

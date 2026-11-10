@@ -40,11 +40,14 @@ func (s *Storage) Querier(mint, maxt int64) (storage.Querier, error) {
 
 	var queriers []storage.Querier
 	if len(s.buffer) > 0 {
-		series := make([]Series, 0, len(s.buffer))
+		// Retain only pointers here. Materialising a Series per buffered series on
+		// every query dominated query allocation, and most are filtered out by the
+		// matchers before any sample is read.
+		heads := make([]*headSeries, 0, len(s.buffer))
 		for _, hs := range s.buffer {
-			series = append(series, headToSeries(hs))
+			heads = append(heads, hs)
 		}
-		queriers = append(queriers, &memQuerier{series: series, mint: mint, maxt: maxt, reads: s.reads})
+		queriers = append(queriers, &memQuerier{heads: heads, mint: mint, maxt: maxt, reads: s.reads})
 	}
 	for _, block := range s.blocks {
 		if !block.Overlaps(mint, maxt) {
@@ -134,16 +137,75 @@ func (s *Storage) ChunkQuerier(mint, maxt int64) (storage.ChunkQuerier, error) {
 
 // memQuerier serves in-memory series.
 type memQuerier struct {
-	series []Series
-	mint   int64
-	maxt   int64
-	reads  *readStats
+	heads []*headSeries
+	mint  int64
+	maxt  int64
+	reads *readStats
 }
 
 func (*memQuerier) Close() error { return nil }
 
 func (q *memQuerier) Select(_ context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-	return selectFromSeries(q.series, q.mint, q.maxt, sortSeries, hints, q.reads, matchers)
+	return selectFromHeads(q.heads, q.mint, q.maxt, sortSeries, hints, q.reads, matchers)
+}
+
+// selectFromHeads filters buffered series by matcher before materialising any
+// samples, and sizes its result from the match count rather than the input.
+// Around half of the opportunities: the head holds every ingested series, while
+// a selector usually matches few.
+func selectFromHeads(heads []*headSeries, mint, maxt int64, _ bool, hints *storage.SelectHints, reads *readStats, matchers []*labels.Matcher) storage.SeriesSet {
+	if hints != nil {
+		if hints.Start > mint {
+			mint = hints.Start
+		}
+		if hints.End < maxt {
+			maxt = hints.End
+		}
+	}
+	selected := make([]Series, 0, 16)
+	for _, hs := range heads {
+		if !matchesAll(hs.labels, matchers) {
+			continue
+		}
+		series, ok := hs.selectRange(mint, maxt)
+		if !ok {
+			continue
+		}
+		if reads != nil {
+			reads.labelRows.Inc()
+		}
+		selected = append(selected, series)
+	}
+	// Always sort inside a single source: merge queriers assume label order.
+	slices.SortFunc(selected, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
+	return &seriesSet{series: selected, reads: reads}
+}
+
+// selectRange returns the buffered samples within [mint, maxt] without copying.
+func (h *headSeries) selectRange(mint, maxt int64) (Series, bool) {
+	from, to := 0, len(h.ts)
+	for from < to && h.ts[from] < mint {
+		from++
+	}
+	for to > from && h.ts[to-1] > maxt {
+		to--
+	}
+	if from == to {
+		return Series{}, false
+	}
+	out := Series{
+		Labels:     h.labels,
+		Timestamps: h.ts[from:to],
+		Kinds:      h.kind[from:to],
+		Values:     h.v[from:to],
+	}
+	if len(h.st) > 0 {
+		out.StartTimestamps = h.st[from:to]
+	}
+	if len(h.hist) > 0 {
+		out.Histograms = h.hist[from:to]
+	}
+	return out, true
 }
 
 // blockQuerier serves the series of one block.
@@ -189,7 +251,9 @@ func selectFromSeries(series []Series, mint, maxt int64, sortSeries bool, hints 
 		}
 	}
 
-	selected := make([]Series, 0, len(series))
+	// Size from matches, not from the input: a narrow selector over a large
+	// head allocated a Series per input series only to discard most of them.
+	selected := make([]Series, 0, 16)
 	for _, s := range series {
 		if !matchesAll(s.Labels, matchers) {
 			continue

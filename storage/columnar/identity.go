@@ -46,7 +46,9 @@ func resourceLabel(owner OwnerKey) labels.Label {
 }
 
 // metadataSeriesKey is the series identity shared with storage.ResourceQuerier.
-func metadataSeriesKey(ls labels.Labels) uint64 { return labels.StableHash(ls) }
+// It routes through the pooled hasher: labels.StableHash allocates a 1 KB
+// scratch buffer and this key is computed for every series of every block.
+func metadataSeriesKey(ls labels.Labels) uint64 { return stableSeriesHash(ls) }
 
 // sharedSeriesLabels returns one immutable label allocation per stable identity.
 // The caller copies an arbitrary input once on first use; every later use checks
