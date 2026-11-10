@@ -14,6 +14,7 @@
 package columnar_test
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +44,13 @@ func BenchmarkSegmentCodecsStageG1(b *testing.B) {
 	segment, err := columnar.NewSampleSegment(ls, timestamps, make([]int64, len(timestamps)), make([]columnar.SampleKind, len(timestamps)), values, make([][]byte, len(timestamps)))
 	require.NoError(b, err)
 	control := newXOR2Control(timestamps, values)
+	probe := segment.NewPageIterator(ls)
+	require.True(b, probe.Next())
+	require.Len(b, probe.Page().Values, len(values))
+	for i, actual := range probe.Page().Values {
+		require.Equal(b, math.Float64bits(values[i]), math.Float64bits(actual), "decoded bit identity at sample %d", i)
+	}
+	require.NoError(b, probe.Close())
 
 	b.Run("columnar-encode", func(b *testing.B) {
 		b.ReportMetric(float64(len(values)), "samples/op")
@@ -72,6 +80,9 @@ func BenchmarkSegmentCodecsStageG1(b *testing.B) {
 				b.Fatal(iterator.Err())
 			}
 			page := iterator.Page()
+			if len(page.Values) != page.Len() {
+				b.Fatalf("decoded %d values in a %d-sample page", len(page.Values), page.Len())
+			}
 			if page.Len() != len(values) {
 				b.Fatalf("decoded %d samples, want %d", page.Len(), len(values))
 			}
@@ -157,8 +168,8 @@ func newXOR2Control(timestamps []int64, values []float64) *chunkenc.XOR2Chunk {
 	if err != nil {
 		panic(err)
 	}
-	for i := range timestamps {
-		appender.Append(0, int64(i), values[i])
+	for i, timestamp := range timestamps {
+		appender.Append(0, timestamp, values[i])
 	}
 	return chunk
 }
