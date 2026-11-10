@@ -31,17 +31,6 @@ const (
 	catalogVersion  = 1
 )
 
-// blockSegmentRef locates one series segment in a cohort/time-window page.
-// Offset is both the series' fixed position in its cohort slice and its offset
-// in the page's per-series payload list.
-type blockSegmentRef struct {
-	RowGroup int
-	Row      int
-	Offset   int
-	MinTime  int64
-	MaxTime  int64
-}
-
 // blockSeriesEntry is the block series dictionary. ID is labels.StableHash of
 // Labels, exactly the key used by native metadata memberships. In particular,
 // __otel_resource__ participates in identity wherever OTLP ingestion adds it.
@@ -70,6 +59,13 @@ type blockCohortEntry struct {
 	SeriesIDs   []uint64
 	MinTime     int64
 	MaxTime     int64
+
+	// Shared timestamp vector for this cohort. TsCount is the number of samples
+	// per vector, which every member shares by construction.
+	TsOffset int64
+	TsLength int
+	TsCount  int
+	TsCodec  uint8
 }
 
 // blockCatalog is loaded when a block opens. It provides the series dictionary,
@@ -206,6 +202,7 @@ func buildBlockCatalog(series []Series, opts WriteOptions, intern func(labels.La
 				MaxTime: series[members[0]].Timestamps[series[members[0]].Len()-1],
 			}
 			catalog.Cohorts = append(catalog.Cohorts, cohort)
+			catalog.Cohorts[rowGroup].TsCount = series[members[0]].Len()
 			for offset, seriesIndex := range members {
 				id := metadataSeriesKey(series[seriesIndex].Labels)
 				catalog.Cohorts[rowGroup].SeriesIDs = append(catalog.Cohorts[rowGroup].SeriesIDs, id)
@@ -213,13 +210,8 @@ func buildBlockCatalog(series []Series, opts WriteOptions, intern func(labels.La
 				if catalogIndex < 0 || !labels.Equal(catalog.Series[catalogIndex].Labels, series[seriesIndex].Labels) {
 					return blockCatalog{}, errors.New("columnar: series dictionary lost a cohort member")
 				}
-				for segment, sample := 0, 0; sample < series[seriesIndex].Len(); segment, sample = segment+1, sample+DefaultSamplesPerSegment {
-					endSample := min(sample+DefaultSamplesPerSegment, series[seriesIndex].Len())
-					catalog.Series[catalogIndex].Segments = append(catalog.Series[catalogIndex].Segments, blockSegmentRef{
-						RowGroup: rowGroup, Row: segment, Offset: offset,
-						MinTime: series[seriesIndex].Timestamps[sample], MaxTime: series[seriesIndex].Timestamps[endSample-1],
-					})
-				}
+				_ = catalogIndex
+				_ = offset
 			}
 		}
 	}
@@ -305,11 +297,17 @@ func writeBlockCatalog(dir string, catalog blockCatalog) (err error) {
 		}
 		w.u32(uint32(len(entry.Segments)))
 		for _, seg := range entry.Segments {
-			w.i32(seg.RowGroup)
-			w.i32(seg.Row)
-			w.i32(seg.Offset)
+			w.i32(seg.Cohort)
+			w.i32(seg.TsStart)
+			w.i64(seg.Offset)
+			w.i32(seg.Length)
+			w.i32(seg.Count)
 			w.i64(seg.MinTime)
 			w.i64(seg.MaxTime)
+			w.u8(seg.ValueCodec)
+			w.u8(seg.KindCodec)
+			w.u8(seg.StartCodec)
+			w.u8(seg.Compression)
 		}
 	}
 	w.u32(uint32(len(catalog.Postings)))
@@ -333,6 +331,10 @@ func writeBlockCatalog(dir string, catalog blockCatalog) (err error) {
 		}
 		w.i64(cohort.MinTime)
 		w.i64(cohort.MaxTime)
+		w.i64(cohort.TsOffset)
+		w.i32(cohort.TsLength)
+		w.i32(cohort.TsCount)
+		w.u8(cohort.TsCodec)
 	}
 	return w.err
 }
@@ -357,6 +359,14 @@ func (w *catalogWriter) u64(v uint64) {
 	}
 	binary.LittleEndian.PutUint64(w.buf[:8], v)
 	_, w.err = w.w.Write(w.buf[:8])
+}
+
+func (w *catalogWriter) u8(v uint8) {
+	if w.err != nil {
+		return
+	}
+	w.buf[0] = v
+	_, w.err = w.w.Write(w.buf[:1])
 }
 
 func (w *catalogWriter) i32(v int) {
@@ -419,11 +429,17 @@ func readBlockCatalog(dir string, meta Meta) (blockCatalog, error) {
 		entry.Segments = make([]blockSegmentRef, 0, numSegments)
 		for range numSegments {
 			var seg blockSegmentRef
-			seg.RowGroup = r.i32()
-			seg.Row = r.i32()
-			seg.Offset = r.i32()
+			seg.Cohort = r.i32()
+			seg.TsStart = r.i32()
+			seg.Offset = r.i64()
+			seg.Length = r.i32()
+			seg.Count = r.i32()
 			seg.MinTime = r.i64()
 			seg.MaxTime = r.i64()
+			seg.ValueCodec = r.u8()
+			seg.KindCodec = r.u8()
+			seg.StartCodec = r.u8()
+			seg.Compression = r.u8()
 			entry.Segments = append(entry.Segments, seg)
 		}
 		catalog.Series = append(catalog.Series, entry)
@@ -456,6 +472,10 @@ func readBlockCatalog(dir string, meta Meta) (blockCatalog, error) {
 		}
 		cohort.MinTime = r.i64()
 		cohort.MaxTime = r.i64()
+		cohort.TsOffset = r.i64()
+		cohort.TsLength = r.i32()
+		cohort.TsCount = r.i32()
+		cohort.TsCodec = r.u8()
 		catalog.Cohorts = append(catalog.Cohorts, cohort)
 	}
 	if r.err != nil {
@@ -501,6 +521,18 @@ func (r *catalogReader) u64() uint64 {
 	return v
 }
 
+func (r *catalogReader) u8() uint8 {
+	if r.err != nil || r.pos+1 > len(r.data) {
+		if r.err == nil {
+			r.err = errors.New("short block catalog read")
+		}
+		return 0
+	}
+	v := r.data[r.pos]
+	r.pos++
+	return v
+}
+
 func (r *catalogReader) i32() int {
 	return int(int32(r.u32()))
 }
@@ -538,15 +570,14 @@ func validateBlockCatalog(catalog blockCatalog, meta Meta) (blockCatalog, error)
 			return blockCatalog{}, errors.New("series dictionary is not strictly sorted by stable ID")
 		}
 		for _, segment := range entry.Segments {
-			if segment.RowGroup < 0 || segment.RowGroup >= len(catalog.Cohorts) {
+			if segment.Cohort < 0 || segment.Cohort >= len(catalog.Cohorts) {
 				return blockCatalog{}, errors.New("series segment points outside the cohort catalog")
 			}
-			cohort := catalog.Cohorts[segment.RowGroup]
-			if segment.Row < 0 || segment.Row >= cohort.NumSegments || segment.Offset < 0 || segment.Offset >= cohort.NumSeries {
-				return blockCatalog{}, errors.New("series segment has invalid cohort coordinates")
+			if segment.Offset < 0 || segment.Length < 0 || segment.Count <= 0 {
+				return blockCatalog{}, errors.New("series segment has an invalid byte range")
 			}
-			if cohort.SeriesIDs[segment.Offset] != entry.ID {
-				return blockCatalog{}, errors.New("cohort member offset references a different stable series ID")
+			if segment.MinTime > segment.MaxTime {
+				return blockCatalog{}, errors.New("series segment has inverted time bounds")
 			}
 		}
 	}

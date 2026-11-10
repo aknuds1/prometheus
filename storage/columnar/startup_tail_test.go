@@ -42,7 +42,7 @@ func TestRestartReadsOnlyTailPagePerSeries(t *testing.T) {
 	defer reopened.Close()
 	stats := reopened.ReadStats()
 	require.Equal(t, uint64(1), stats.SampleRowsDecoded, "one final segment is read for the one series")
-	require.Equal(t, uint64(1), stats.RowGroupsRead)
+	require.Equal(t, uint64(1), stats.SegmentsRead, "only the tail segment is read, not every segment")
 
 	// The recovered tail still rejects the immediately preceding duplicate.
 	err = reopened.AppendBatch(t.Context(), Batch{Series: []BatchSeries{batchFloatChunk(ls, timestamps[len(timestamps)-1])}})

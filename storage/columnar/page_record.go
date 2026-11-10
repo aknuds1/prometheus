@@ -15,294 +15,78 @@ package columnar
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"math"
 	"os"
+	"path/filepath"
 	"slices"
-	"sync"
-
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/arrow-go/v18/parquet"
-	"github.com/apache/arrow-go/v18/parquet/compress"
-	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
-const (
-	pageCohortColumn = iota
-	pageSegmentColumn
-	pageCountColumn
-	pageMinTimeColumn
-	pageMaxTimeColumn
-	pageTimestampCodecColumn
-	pageTimestampsColumn
-	pageSeriesPayloadsColumn
-)
-
-// pageSchema is built once: constructing the Arrow schema for every cohort and
-// every block was measurable overhead.
-var (
-	pageSchema           = buildPageSchema()
-	pageWriterPropsCache sync.Map // compress.Compression -> *parquet.WriterProperties
-	pageArrowWriterProps = pqarrow.NewArrowWriterProperties(pqarrow.WithStoreSchema())
-)
-
-// pageWriterProperties returns cached writer properties for codec. They are
-// immutable configuration, so rebuilding them per block was pure overhead.
-func pageWriterProperties(codec compress.Compression) *parquet.WriterProperties {
-	if cached, ok := pageWriterPropsCache.Load(codec); ok {
-		return cached.(*parquet.WriterProperties)
-	}
-	props := parquet.NewWriterProperties(
-		parquet.WithCompression(codec),
-		// Each Write starts a new row group. Do not split a long cohort's
-		// segment rows merely because MaxSeriesPerRowGroup bounds membership.
-		parquet.WithMaxRowGroupLength(math.MaxInt64),
-		parquet.WithDictionaryPath(parquet.ColumnPath{"series_payloads", "list", "element", valuesColumn}, false),
-	)
-	pageWriterPropsCache.Store(codec, props)
-	return props
-}
-
-// PageSchema is the physical sample schema. One row is one time window of one
-// cohort slice. Its timestamp column is shared by every series payload, while
-// each payload retains independent value, kind, start-time and histogram
-// columns. Rows of one cohort form one Parquet row group.
-func buildPageSchema() *arrow.Schema {
-	seriesPayload := arrow.StructOf(
-		arrow.Field{Name: seriesIDColumn, Type: arrow.PrimitiveTypes.Uint64, Nullable: false},
-		arrow.Field{Name: "min_value", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-		arrow.Field{Name: "max_value", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-		arrow.Field{Name: "value_codec", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
-		arrow.Field{Name: valuesColumn, Type: arrow.BinaryTypes.Binary, Nullable: false},
-		arrow.Field{Name: "kind_codec", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
-		arrow.Field{Name: kindsColumn, Type: arrow.BinaryTypes.Binary, Nullable: false},
-		arrow.Field{Name: "start_timestamp_codec", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
-		arrow.Field{Name: startTimesCol, Type: arrow.BinaryTypes.Binary, Nullable: false},
-		arrow.Field{Name: histogramsCol, Type: typedHistogramArrowType(), Nullable: true},
-	)
-	return arrow.NewSchema([]arrow.Field{
-		{Name: "cohort_id", Type: arrow.PrimitiveTypes.Uint64, Nullable: false},
-		{Name: "segment_index", Type: arrow.PrimitiveTypes.Uint32, Nullable: false},
-		{Name: "count", Type: arrow.PrimitiveTypes.Uint64, Nullable: false},
-		{Name: "min_time", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-		{Name: "max_time", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-		{Name: "timestamp_codec", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
-		{Name: timestampsCol, Type: arrow.BinaryTypes.Binary, Nullable: false},
-		{Name: "series_payloads", Type: arrow.ListOf(seriesPayload), Nullable: false},
-	}, nil)
-}
-
-// writePageFile writes one record and therefore one Parquet row group per
-// cohort. No labels are repeated in the sample payload; the block catalog owns
-// the series dictionary and all row/cohort offsets.
-// pageBuilderPool reuses Arrow RecordBuilders across cohorts and flushes.
-// NewRecordBatch resets the builder, so a returned builder is clean for reuse.
-var pageBuilderPool = sync.Pool{New: func() any { return array.NewRecordBuilder(memory.NewGoAllocator(), pageSchema) }}
-
-func writePageFile(path string, series []Series, catalog blockCatalog, opts WriteOptions) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	writer, err := pqarrow.NewFileWriter(
-		pageSchema, f,
-		pageWriterProperties(opts.Compression),
-		pageArrowWriterProps,
-	)
-	if err != nil {
-		f.Close()
-		return err
-	}
-	defer func() {
-		if closeErr := writer.Close(); err == nil {
-			err = closeErr
-		}
-	}()
-
-	byID := make(map[uint64]int, len(series))
-	for i, item := range series {
-		byID[metadataSeriesKey(item.Labels)] = i
-	}
-	mem := memory.NewGoAllocator()
-	for _, cohort := range catalog.Cohorts {
-		members := make([]Series, cohort.NumSeries)
-		for offset, id := range cohort.SeriesIDs {
-			i, ok := byID[id]
-			if !ok {
-				return fmt.Errorf("cohort %d references an unknown series ID %d", cohort.ID, id)
-			}
-			members[offset] = series[i]
-		}
-		for i := range members {
-			if members[i].Len() == 0 {
-				return fmt.Errorf("cohort %d has no series at offset %d", cohort.ID, i)
-			}
-		}
-		record, err := buildCohortRecord(mem, cohort, members)
-		if err != nil {
-			return err
-		}
-		err = writer.Write(record)
-		record.Release()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func buildCohortRecord(_ memory.Allocator, cohort blockCohortEntry, members []Series) (arrow.RecordBatch, error) {
-	builder := pageBuilderPool.Get().(*array.RecordBuilder)
-	defer func() {
-		// NewRecordBatch already reset the builder; just return it to the pool.
-		pageBuilderPool.Put(builder)
-	}()
-	cohorts := builder.Field(pageCohortColumn).(*array.Uint64Builder)
-	segmentIndexes := builder.Field(pageSegmentColumn).(*array.Uint32Builder)
-	counts := builder.Field(pageCountColumn).(*array.Uint64Builder)
-	minTimes := builder.Field(pageMinTimeColumn).(*array.Int64Builder)
-	maxTimes := builder.Field(pageMaxTimeColumn).(*array.Int64Builder)
-	timestampCodecs := builder.Field(pageTimestampCodecColumn).(*array.Uint8Builder)
-	timestampPayloads := builder.Field(pageTimestampsColumn).(*array.BinaryBuilder)
-	payloadLists := builder.Field(pageSeriesPayloadsColumn).(*array.ListBuilder)
-
-	for segmentIndex := range cohort.NumSegments {
-		start := segmentIndex * DefaultSamplesPerSegment
-		for i, item := range members {
-			end := min(start+DefaultSamplesPerSegment, item.Len())
-			if end <= start {
-				return nil, fmt.Errorf("cohort member %s has no segment %d", item.Labels, segmentIndex)
-			}
-			var starts []int64
-			if len(item.StartTimestamps) > 0 {
-				starts = item.StartTimestamps[start:end]
-			}
-			var histograms [][]byte
-			if len(item.Histograms) > 0 {
-				histograms = item.Histograms[start:end]
-			}
-			segment, err := NewSampleSegment(item.Labels, item.Timestamps[start:end], starts, item.Kinds[start:end], item.Values[start:end], histograms)
-			if err != nil {
-				return nil, err
-			}
-			if i == 0 {
-				cohorts.Append(cohort.ID)
-				segmentIndexes.Append(uint32(segmentIndex))
-				counts.Append(uint64(segment.Count))
-				minTimes.Append(segment.MinTime)
-				maxTimes.Append(segment.MaxTime)
-				timestampCodecs.Append(uint8(segment.timestampCodec))
-				timestampPayloads.Append(segment.timestamps)
-				payloadLists.Append(true)
-			}
-			payloads := payloadLists.ValueBuilder().(*array.StructBuilder)
-			payloads.Append(true)
-			payloads.FieldBuilder(0).(*array.Uint64Builder).Append(metadataSeriesKey(item.Labels))
-			payloads.FieldBuilder(1).(*array.Float64Builder).Append(segment.MinValue)
-			payloads.FieldBuilder(2).(*array.Float64Builder).Append(segment.MaxValue)
-			payloads.FieldBuilder(3).(*array.Uint8Builder).Append(uint8(segment.valueCodec))
-			payloads.FieldBuilder(4).(*array.BinaryBuilder).Append(segment.values)
-			payloads.FieldBuilder(5).(*array.Uint8Builder).Append(uint8(segment.kindCodec))
-			payloads.FieldBuilder(6).(*array.BinaryBuilder).Append(segment.kinds)
-			payloads.FieldBuilder(7).(*array.Uint8Builder).Append(uint8(segment.startCodec))
-			payloads.FieldBuilder(8).(*array.BinaryBuilder).Append(segment.startTimes)
-			appendTypedHistogram(payloads.FieldBuilder(9).(*array.StructBuilder), segment.histograms)
-		}
-	}
-	return builder.NewRecordBatch(), nil
-}
-
-// selectedBlockSeries identifies only the time-overlapping segments required
-// for one dictionary entry.
+// selectedBlockSeries identifies only the time-overlapping segments required for
+// one dictionary entry.
 type selectedBlockSeries struct {
 	entry    blockSeriesEntry
 	segments []blockSegmentRef
 	decoded  int
 }
 
-// readSelectedSeries opens exactly the row groups referenced by selections and
-// decodes only their requested per-series payload offsets. Shared timestamps are
-// decoded once per cohort/time-window row, not once per member series.
+// readSelectedSeries reads exactly the requested segment payloads. Unlike a
+// Parquet row group, a payload range is a single series' own bytes, so the read
+// cost scales with the number of matched series rather than with every series in
+// the block.
 func (b *Block) readSelectedSeries(ctx context.Context, selections []selectedBlockSeries) ([]Series, error) {
 	out := make([]Series, len(selections))
-	groups := map[int]struct{}{}
-	offsetsByGroup := map[int]map[int]map[int]int{}
-	for i, selection := range selections {
-		// The block entry is immutable and belongs to the storage lifetime.
-		// Consumers may construct independent mutable copies if needed.
-		out[i].Labels = selection.entry.Labels
-		for _, ref := range selection.segments {
-			groups[ref.RowGroup] = struct{}{}
-			if offsetsByGroup[ref.RowGroup] == nil {
-				offsetsByGroup[ref.RowGroup] = map[int]map[int]int{}
-			}
-			if offsetsByGroup[ref.RowGroup][ref.Row] == nil {
-				offsetsByGroup[ref.RowGroup][ref.Row] = map[int]int{}
-			}
-			offsetsByGroup[ref.RowGroup][ref.Row][ref.Offset] = i
-		}
-	}
-	if len(groups) == 0 {
+	if len(selections) == 0 {
 		return out, nil
 	}
-	rowGroups := make([]int, 0, len(groups))
-	for group := range groups {
-		rowGroups = append(rowGroups, group)
-	}
-	sortInts(rowGroups)
 	if b.reads != nil {
-		b.reads.rowGroups.Add(uint64(len(rowGroups)))
+		b.reads.samples.Inc()
 	}
-
-	type rowRequest struct {
-		cohort  blockCohortEntry
-		row     int
-		offsets map[int]int
-	}
-	var requests []rowRequest
-	for _, group := range rowGroups {
-		offsetsByRow := offsetsByGroup[group]
-		cohort := b.catalog.Cohorts[group]
-		for row := range cohort.NumSegments {
-			requests = append(requests, rowRequest{cohort: cohort, row: row, offsets: offsetsByRow[row]})
-		}
-	}
-
-	rr, err := b.recordReader(ctx, rowGroups, nil)
+	reader, err := b.openSegmentReader()
 	if err != nil {
 		return nil, err
 	}
-	defer rr.Release()
 
-	requestIndex := 0
-	for rr.Next() {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		record := rr.RecordBatch()
-		for row := range int(record.NumRows()) {
-			if requestIndex >= len(requests) {
-				return nil, errors.New("sample payload returned more rows than the block catalog")
-			}
-			request := requests[requestIndex]
-			requestIndex++
-			if err := decodeCohortRow(record, row, request.cohort, request.row, request.offsets, selections, out); err != nil {
+	timestampsByCohort := make(map[int][]int64, 8)
+	for i, selection := range selections {
+		out[i].Labels = selection.entry.Labels
+		for _, ref := range selection.segments {
+			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-		}
-	}
-	if err := rr.Err(); err != nil {
-		return nil, err
-	}
-	if requestIndex != len(requests) {
-		return nil, fmt.Errorf("sample payload returned %d rows, catalog expected %d", requestIndex, len(requests))
-	}
-	for i := range selections {
-		if selections[i].decoded != len(selections[i].segments) {
-			return nil, fmt.Errorf("series %s decoded %d of %d selected segments", selections[i].entry.Labels, selections[i].decoded, len(selections[i].segments))
+			timestamps, ok := timestampsByCohort[ref.Cohort]
+			if !ok {
+				timestamps, err = b.timestampVector(ref.Cohort)
+				if err != nil {
+					return nil, fmt.Errorf("reading cohort %d timestamps: %w", ref.Cohort, err)
+				}
+				timestampsByCohort[ref.Cohort] = timestamps
+			}
+			if ref.TsStart < 0 || ref.TsStart+ref.Count > len(timestamps) {
+				return nil, fmt.Errorf("segment window [%d,%d) exceeds cohort vector of %d samples",
+					ref.TsStart, ref.TsStart+ref.Count, len(timestamps))
+			}
+			blob, err := b.readAt(reader.segments, ref.Offset, ref.Length)
+			if err != nil {
+				return nil, fmt.Errorf("reading segment at %d: %w", ref.Offset, err)
+			}
+			if b.reads != nil {
+				b.reads.payloadBytes.Add(uint64(len(blob)))
+				b.reads.segmentsRead.Inc()
+			}
+			blob, err = decompressPayload(ref, blob)
+			if err != nil {
+				return nil, fmt.Errorf("decompressing segment at %d: %w", ref.Offset, err)
+			}
+			segment, err := decodeSegmentPayload(ref, blob)
+			if err != nil {
+				return nil, fmt.Errorf("decoding segment at %d: %w", ref.Offset, err)
+			}
+			page := TypedPage{Labels: selection.entry.Labels, Timestamps: timestamps[ref.TsStart : ref.TsStart+ref.Count]}
+			if err := segment.decodeColumnsInto(selection.entry.Labels, &page); err != nil {
+				return nil, fmt.Errorf("decoding segment at %d: %w", ref.Offset, err)
+			}
+			appendDecodedPage(&out[i], page)
+			selection.decoded++
 		}
 		if err := out[i].Validate(); err != nil {
 			return nil, err
@@ -318,72 +102,7 @@ func (b *Block) readSelectedSeries(ctx context.Context, selections []selectedBlo
 	return out, nil
 }
 
-func decodeCohortRow(record arrow.RecordBatch, row int, cohort blockCohortEntry, segmentRow int, offsets map[int]int, selections []selectedBlockSeries, out []Series) error {
-	if len(offsets) == 0 {
-		return nil
-	}
-	cohortID := record.Column(pageCohortColumn).(*array.Uint64).Value(row)
-	if cohortID != cohort.ID {
-		return fmt.Errorf("sample payload cohort %d does not match catalog cohort %d", cohortID, cohort.ID)
-	}
-	segmentIndex := record.Column(pageSegmentColumn).(*array.Uint32).Value(row)
-	if int(segmentIndex) != segmentRow {
-		return fmt.Errorf("sample payload segment %d does not match catalog segment %d", segmentIndex, segmentRow)
-	}
-	count := record.Column(pageCountColumn).(*array.Uint64).Value(row)
-	if count > math.MaxInt {
-		return fmt.Errorf("segment sample count %d overflows int", count)
-	}
-	timestamps, err := decodeSharedTimestamps(
-		record.Column(pageTimestampsColumn).(*array.Binary).Value(row),
-		int(count),
-		integerCodec(record.Column(pageTimestampCodecColumn).(*array.Uint8).Value(row)),
-		record.Column(pageMinTimeColumn).(*array.Int64).Value(row),
-		record.Column(pageMaxTimeColumn).(*array.Int64).Value(row),
-	)
-	if err != nil {
-		return err
-	}
-	payloadList := record.Column(pageSeriesPayloadsColumn).(*array.List)
-	payloads := payloadList.ListValues().(*array.Struct)
-	seriesIDs := payloads.Field(0).(*array.Uint64)
-	minValues := payloads.Field(1).(*array.Float64)
-	maxValues := payloads.Field(2).(*array.Float64)
-	valueCodecs := payloads.Field(3).(*array.Uint8)
-	valuePayloads := payloads.Field(4).(*array.Binary)
-	kindCodecs := payloads.Field(5).(*array.Uint8)
-	kindPayloads := payloads.Field(6).(*array.Binary)
-	startCodecs := payloads.Field(7).(*array.Uint8)
-	startPayloads := payloads.Field(8).(*array.Binary)
-	histograms := payloads.Field(9).(*array.Struct)
-	start, end := payloadList.ValueOffsets(row)
-	for offset, selectedIndex := range offsets {
-		payloadIndex := int(start) + offset
-		if payloadIndex >= int(end) {
-			return fmt.Errorf("cohort %d segment %d has no payload offset %d", cohort.ID, segmentRow, offset)
-		}
-		selection := &selections[selectedIndex]
-		if actual := seriesIDs.Value(payloadIndex); actual != selection.entry.ID {
-			return fmt.Errorf("cohort payload series ID %d does not match dictionary ID %d", actual, selection.entry.ID)
-		}
-		segment := SampleSegment{
-			SeriesHash: selection.entry.ID, Count: int(count), MinTime: timestamps[0], MaxTime: timestamps[len(timestamps)-1],
-			MinValue: minValues.Value(payloadIndex), MaxValue: maxValues.Value(payloadIndex),
-			valueCodec: floatCodec(valueCodecs.Value(payloadIndex)), values: valuePayloads.Value(payloadIndex),
-			kindCodec: integerCodec(kindCodecs.Value(payloadIndex)), kinds: kindPayloads.Value(payloadIndex),
-			startCodec: integerCodec(startCodecs.Value(payloadIndex)), startTimes: startPayloads.Value(payloadIndex),
-		}
-		segment.histograms = readTypedHistogram(histograms, payloadIndex)
-		page, err := segment.decodeWithSharedTimestamps(selection.entry.Labels, timestamps)
-		if err != nil {
-			return fmt.Errorf("decoding cohort %d segment %d series %s: %w", cohort.ID, segmentRow, selection.entry.Labels, err)
-		}
-		appendDecodedPage(&out[selectedIndex], page)
-		selection.decoded++
-	}
-	return nil
-}
-
+// appendDecodedPage appends one decoded page to series.
 func appendDecodedPage(item *Series, page TypedPage) {
 	previous := item.Len()
 	item.Timestamps = append(item.Timestamps, page.Timestamps...)
@@ -407,25 +126,34 @@ func appendDecodedPage(item *Series, page TypedPage) {
 	}
 }
 
-func decodeSharedTimestamps(payload []byte, count int, codec integerCodec, minTime, maxTime int64) ([]int64, error) {
-	if codec == integerConstantInterval {
-		timestamps := make([]int64, count)
-		if count > 0 {
-			timestamps[0] = minTime
-		}
-		if count > 1 {
-			interval := (maxTime - minTime) / int64(count-1)
-			for i := 1; i < count; i++ {
-				timestamps[i] = timestamps[i-1] + interval
-			}
-		}
-		return timestamps, nil
+// openSegmentReader lazily opens the payload files of the block.
+func (b *Block) openSegmentReader() (*segmentReader, error) {
+	b.readerMtx.Lock()
+	defer b.readerMtx.Unlock()
+	if b.reader != nil {
+		return b.reader, nil
 	}
-	timestamps, err := decodeIntegerColumnInto(payload, count, codec, nil)
+	segments, err := openForRead(blockSegmentsPath(b.dir))
 	if err != nil {
-		return nil, fmt.Errorf("decoding shared timestamps: %w", err)
+		return nil, err
 	}
-	return timestamps, nil
+	timestamps, err := openForRead(blockTimestampsPath(b.dir))
+	if err != nil {
+		segments.Close()
+		return nil, err
+	}
+	b.reader = &segmentReader{segments: segments, timestamps: timestamps}
+	return b.reader, nil
 }
+
+func openForRead(path string) (*os.File, error) { return os.Open(path) }
+
+func joinBlockFile(dir, name string) string { return filepath.Join(dir, name) }
+
+// blockSegmentsPath returns the payload file of a block directory.
+func blockSegmentsPath(dir string) string { return joinBlockFile(dir, segmentsFileName) }
+
+// blockTimestampsPath returns the shared timestamp file of a block directory.
+func blockTimestampsPath(dir string) string { return joinBlockFile(dir, timestampsFileName) }
 
 func sortInts(values []int) { slices.Sort(values) }

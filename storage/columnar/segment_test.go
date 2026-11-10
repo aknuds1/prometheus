@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/model/histogram"
@@ -84,17 +83,10 @@ func TestSegmentBlockRoundTripAndBoundaries(t *testing.T) {
 	require.NoError(t, err)
 	block, err := OpenBlock(filepath.Join(dir, meta.ULID))
 	require.NoError(t, err)
-	reader, err := block.recordReader(t.Context(), nil, nil)
-	require.NoError(t, err)
-	defer reader.Release()
-	require.True(t, reader.Next())
-	record := reader.RecordBatch()
-	require.Equal(t, int64(3), record.NumRows(), "one cohort/time-window page per segment")
-	payloads := record.Column(pageSeriesPayloadsColumn).(*array.List)
-	for row := range int(record.NumRows()) {
-		start, end := payloads.ValueOffsets(row)
-		require.Equal(t, int64(1), end-start, "one stable series payload offset per page")
-	}
+	// One shared timestamp vector per cohort, three segments of 256 samples.
+	require.Len(t, block.catalog.Cohorts, 1)
+	require.Equal(t, 3, block.catalog.Cohorts[0].NumSegments)
+	require.Equal(t, sampleCount, block.catalog.Cohorts[0].TsCount, "one shared vector for the whole cohort")
 	decoded, err := block.Series(t.Context())
 	require.NoError(t, err)
 	require.Len(t, decoded, 1)

@@ -154,7 +154,7 @@ func TestSelectiveAndAbsentSeriesReadCounts(t *testing.T) {
 	require.Equal(t, shared, selected[0].Timestamps)
 	statsAfterOne := block.reads
 	require.Equal(t, uint64(1), statsAfterOne.samples.Load())
-	require.Equal(t, uint64(1), statsAfterOne.rowGroups.Load())
+	require.Equal(t, uint64(1), statsAfterOne.segmentsRead.Load(), "only the matched series' payload is read")
 	require.Equal(t, uint64(1), statsAfterOne.sampleRows.Load())
 	require.Zero(t, statsAfterOne.labels.Load())
 
@@ -165,7 +165,7 @@ func TestSelectiveAndAbsentSeriesReadCounts(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, selected)
 	require.Zero(t, block.reads.samples.Load(), "mismatched metadata identity does not open arbitrary samples")
-	require.Zero(t, block.reads.rowGroups.Load())
+	require.Zero(t, block.reads.segmentsRead.Load())
 	require.Zero(t, block.reads.sampleRows.Load())
 
 	selected, err = block.Select(t.Context(), 100, 200, [][]*labels.Matcher{{
@@ -174,7 +174,7 @@ func TestSelectiveAndAbsentSeriesReadCounts(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, selected)
 	require.Zero(t, block.reads.samples.Load(), "segment bounds prune an out-of-range series inside an overlapping block")
-	require.Zero(t, block.reads.rowGroups.Load())
+	require.Zero(t, block.reads.segmentsRead.Load())
 }
 
 func TestCohortOptionalColumnsAlignAcrossSegments(t *testing.T) {
@@ -227,8 +227,9 @@ func TestCohortSharingUsesExactTimestampEquality(t *testing.T) {
 	require.Equal(t, 2, block.catalog.Cohorts[0].NumSegments)
 	for _, entry := range block.catalog.Series {
 		require.Len(t, entry.Segments, 2)
-		require.Equal(t, 0, entry.Segments[0].Row)
-		require.Equal(t, 1, entry.Segments[1].Row)
+		require.Equal(t, entry.Segments[0].Cohort, entry.Segments[1].Cohort)
+		require.Less(t, entry.Segments[0].MinTime, entry.Segments[1].MinTime, "segments must stay time ordered")
+		require.Positive(t, entry.Segments[0].Length)
 	}
 	got, err := block.Series(t.Context())
 	require.NoError(t, err)

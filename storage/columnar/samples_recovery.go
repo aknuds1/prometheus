@@ -27,7 +27,18 @@ func (s *Storage) restoreSeriesTail(block *Block) error {
 	if block.meta.NumSamples == 0 {
 		return nil
 	}
-	series, err := block.Series(context.Background())
+	// Only the final segment contributes the next append's ordering or histogram
+	// reset-hint state. Older segments need not enter memory.
+	selections := make([]selectedBlockSeries, 0, len(block.catalog.Series))
+	for _, entry := range block.catalog.Series {
+		if len(entry.Segments) == 0 {
+			continue
+		}
+		selections = append(selections, selectedBlockSeries{
+			entry: entry, segments: []blockSegmentRef{entry.Segments[len(entry.Segments)-1]},
+		})
+	}
+	series, err := block.readSelectedSeries(context.Background(), selections)
 	if err != nil {
 		return err
 	}

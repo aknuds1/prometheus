@@ -37,4 +37,6 @@ package columnar
 // FormatVersion is the version of the block format written by this package.
 //
 // It is bumped whenever the on-disk schema changes; blocks are not migrated.
-const FormatVersion = 9
+//
+// Version 10 replaces Parquet sample rows with offset-addressed segments.
+const FormatVersion = 10

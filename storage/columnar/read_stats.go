@@ -19,12 +19,16 @@ import "go.uber.org/atomic"
 // opens are distinct from sample projections and label-only reads so callers can
 // test pruning instead of relying on timing alone.
 type ReadStats struct {
-	LabelPayloadOpens       uint64
-	SamplePayloadOpens      uint64
-	MetadataPayloadOpens    uint64
-	RowGroupsRead           uint64
-	SampleRowsDecoded       uint64
-	SampleBatchesRead       uint64
+	LabelPayloadOpens    uint64
+	SamplePayloadOpens   uint64
+	MetadataPayloadOpens uint64
+	RowGroupsRead        uint64
+	SampleRowsDecoded    uint64
+	SampleBatchesRead    uint64
+	// PayloadBytesRead and SegmentsRead prove that segmentation pruning is real:
+	// both scale with matched series, and are zero when nothing matches.
+	PayloadBytesRead        uint64
+	SegmentsRead            uint64
 	LabelRowsVisited        uint64
 	MetadataIndexCandidates uint64
 	MetadataIndexFallbacks  uint64
@@ -37,6 +41,8 @@ type readStats struct {
 	rowGroups          atomic.Uint64
 	sampleRows         atomic.Uint64
 	sampleBatches      atomic.Uint64
+	payloadBytes       atomic.Uint64
+	segmentsRead       atomic.Uint64
 	labelRows          atomic.Uint64
 	metadataCandidates atomic.Uint64
 	metadataFallbacks  atomic.Uint64
@@ -50,6 +56,8 @@ func (s *Storage) ReadStats() ReadStats {
 		RowGroupsRead:           s.reads.rowGroups.Load(),
 		SampleRowsDecoded:       s.reads.sampleRows.Load(),
 		SampleBatchesRead:       s.reads.sampleBatches.Load(),
+		PayloadBytesRead:        s.reads.payloadBytes.Load(),
+		SegmentsRead:            s.reads.segmentsRead.Load(),
 		LabelRowsVisited:        s.reads.labelRows.Load(),
 		MetadataIndexCandidates: s.reads.metadataCandidates.Load(),
 		MetadataIndexFallbacks:  s.reads.metadataFallbacks.Load(),
@@ -65,6 +73,8 @@ func (r *readStats) reset() {
 	r.rowGroups.Store(0)
 	r.sampleRows.Store(0)
 	r.sampleBatches.Store(0)
+	r.payloadBytes.Store(0)
+	r.segmentsRead.Store(0)
 	r.labelRows.Store(0)
 	r.metadataCandidates.Store(0)
 	r.metadataFallbacks.Store(0)

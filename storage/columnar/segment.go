@@ -80,19 +80,48 @@ func NewSampleSegment(ls labels.Labels, timestamps, startTimestamps []int64, kin
 		segment.MaxValue = max(segment.MaxValue, value)
 	}
 	var err error
-	if segment.histograms, err = encodeTypedHistograms(kinds, histograms); err != nil {
-		return SampleSegment{}, err
-	}
 	if segment.timestamps, segment.timestampCodec, err = encodeTimestamps(timestamps); err != nil {
 		return SampleSegment{}, err
 	}
-	if segment.values, segment.valueCodec, err = encodeFloatColumn(values); err != nil {
+	if err := segment.encodeColumns(kinds, values, startTimestamps, histograms); err != nil {
 		return SampleSegment{}, err
+	}
+	return segment, nil
+}
+
+// NewSegmentPayload seals only the non-time columns. Format 10 stores one
+// timestamp vector per cohort, so a per-series payload carries values, kinds,
+// start timestamps and histograms but no timestamps of its own.
+func NewSegmentPayload(ls labels.Labels, kinds []SampleKind, values []float64, startTimestamps []int64, histograms [][]byte) (SampleSegment, error) {
+	segment := SampleSegment{SeriesHash: stableSeriesHash(ls), Count: len(kinds)}
+	if len(kinds) == 0 {
+		return segment, nil
+	}
+	segment.MinValue, segment.MaxValue = values[0], values[0]
+	for _, value := range values[1:] {
+		segment.MinValue = min(segment.MinValue, value)
+		segment.MaxValue = max(segment.MaxValue, value)
+	}
+	if err := segment.encodeColumns(kinds, values, startTimestamps, histograms); err != nil {
+		return SampleSegment{}, err
+	}
+	return segment, nil
+}
+
+// encodeColumns fills the non-time columns of segment.
+func (s *SampleSegment) encodeColumns(kinds []SampleKind, values []float64, startTimestamps []int64, histograms [][]byte) error {
+	segment := s
+	var err error
+	if segment.histograms, err = encodeTypedHistograms(kinds, histograms); err != nil {
+		return err
+	}
+	if segment.values, segment.valueCodec, err = encodeFloatColumn(values); err != nil {
+		return err
 	}
 	allFloat, unknownStart := true, true
 	for i, kind := range kinds {
 		if kind < SampleFloat || kind > SampleStale {
-			return SampleSegment{}, fmt.Errorf("unknown sample kind %d", kind)
+			return fmt.Errorf("unknown sample kind %d", kind)
 		}
 		allFloat = allFloat && kind == SampleFloat
 		unknownStart = unknownStart && (len(startTimestamps) == 0 || startTimestamps[i] == 0)
@@ -107,18 +136,18 @@ func NewSampleSegment(ls labels.Labels, timestamps, startTimestamps []int64, kin
 		segment.kinds, segment.kindCodec, err = encodeIntegerColumn(integerKinds)
 	}
 	if err != nil {
-		return SampleSegment{}, err
+		return err
 	}
 	if unknownStart {
 		segment.startTimes = nil
 	} else {
 		encoded, codec, encodeErr := encodeIntegerColumn(startTimestamps)
 		if encodeErr != nil {
-			return SampleSegment{}, encodeErr
+			return encodeErr
 		}
 		segment.startTimes, segment.startCodec = encoded, codec
 	}
-	return segment, nil
+	return nil
 }
 
 // EncodedSize is encoded column payload size, excluding labels and Parquet
