@@ -15,15 +15,65 @@ package columnar
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+
+	"github.com/oklog/ulid/v2"
 )
+
+// ErrHeadNotFlushed prevents live compaction or retention from silently omitting
+// pending head samples and metadata associations from their publication model.
+var ErrHeadNotFlushed = errors.New("columnar: flush the head before lifecycle publication")
+
+// compactBlockSnapshot reads and merges a fixed immutable block set. CompactTo
+// uses this for separate output; Compact then publishes exactly this snapshot.
+func (s *Storage) compactBlockSnapshot(ctx context.Context, blocks []*Block, dest string) (Meta, *metadataStore, error) {
+	var samples []Series
+	var compacted *metadataStore
+	if s.metadata != nil {
+		compacted = newMetadataStore(s.opts.MetadataVersionCap)
+	}
+	var walSequence uint64
+	for _, block := range blocks {
+		if err := ctx.Err(); err != nil {
+			return Meta{}, nil, err
+		}
+		walSequence = max(walSequence, block.meta.WALSequence)
+		if block.meta.NumSamples > 0 {
+			series, err := block.Series(ctx)
+			if err != nil {
+				return Meta{}, nil, err
+			}
+			samples = append(samples, series...)
+		}
+		if compacted != nil && block.meta.Metadata != nil {
+			relations, err := block.readMetadataRelations(ctx)
+			if err != nil {
+				return Meta{}, nil, err
+			}
+			if err := compacted.restoreRelations(relations); err != nil {
+				return Meta{}, nil, fmt.Errorf("compacting metadata from block %s: %w", block.meta.ULID, err)
+			}
+		}
+	}
+	var metadata *metadataRelations
+	if compacted != nil {
+		relations := compacted.snapshot()
+		if relations.hasChanges() {
+			metadata = &relations
+		}
+	}
+	meta, err := writeBlock(dest, mergeSeries(samples), metadata, s.opts.WriteOptions, walSequence)
+	return meta, compacted, err
+}
 
 // CompactTo merges the current immutable blocks into one block at dest. It does
 // not include the unflushed head, delete input blocks, or replace live storage.
-// This is an experiment for measuring history-validity and merge costs; lifecycle
-// publication and retention remain a separate experiment.
+// It remains a separate measurement/publication primitive rather than a second
+// implicit production policy.
 func (s *Storage) CompactTo(ctx context.Context, dest string) (Meta, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -33,41 +83,68 @@ func (s *Storage) CompactTo(ctx context.Context, dest string) (Meta, error) {
 	if filepath.Clean(dest) == filepath.Clean(s.dir) {
 		return Meta{}, errors.New("columnar: compaction output must use a separate directory")
 	}
+	meta, _, err := s.compactBlockSnapshot(ctx, s.blocks, dest)
+	return meta, err
+}
 
-	var samples []Series
-	var metadata *metadataRelations
-	var compacted *metadataStore
-	if s.metadata != nil {
-		compacted = newMetadataStore(s.opts.MetadataVersionCap)
+// Compact merges all published blocks and replaces the live block set. The head
+// must be flushed first. The replacement manifest names its input parents before
+// the block is moved into place, so a crash that leaves parents behind does not
+// resurrect duplicate data or make later reads open every old block again.
+func (s *Storage) Compact(ctx context.Context) (Meta, error) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	if s.closed {
+		return Meta{}, errors.New("columnar: storage is closed")
 	}
-	var walSequence uint64
+	if len(s.buffer) > 0 || s.metadataDirty {
+		return Meta{}, ErrHeadNotFlushed
+	}
+	if len(s.blocks) == 0 {
+		return Meta{}, ErrNoBlocks
+	}
+	parents := make([]string, 0, len(s.blocks))
 	for _, block := range s.blocks {
-		if err := ctx.Err(); err != nil {
-			return Meta{}, err
-		}
-		walSequence = max(walSequence, block.meta.WALSequence)
-		if block.meta.NumSamples > 0 {
-			series, err := block.Series(ctx)
-			if err != nil {
-				return Meta{}, err
-			}
-			samples = append(samples, series...)
-		}
-		if compacted != nil && block.meta.Metadata != nil {
-			relations, err := block.readMetadataRelations(ctx)
-			if err != nil {
-				return Meta{}, err
-			}
-			if err := compacted.restoreRelations(relations); err != nil {
-				return Meta{}, fmt.Errorf("compacting metadata from block %s: %w", block.meta.ULID, err)
-			}
-		}
+		parents = append(parents, block.meta.ULID)
 	}
-	if compacted != nil {
-		relations := compacted.snapshot()
-		if relations.hasChanges() {
-			metadata = &relations
-		}
+
+	staging := filepath.Join(s.dir, ".compaction-"+ulid.Make().String()+tmpDirSuffix)
+	defer os.RemoveAll(staging)
+	meta, compactedMetadata, err := s.compactBlockSnapshot(ctx, s.blocks, staging)
+	if err != nil {
+		return Meta{}, err
 	}
-	return writeBlock(dest, mergeSeries(samples), metadata, s.opts.WriteOptions, walSequence)
+	meta.Replaces = parents
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return Meta{}, err
+	}
+	if err := os.WriteFile(blockMetaPath(filepath.Join(staging, meta.ULID)), raw, 0o600); err != nil {
+		return Meta{}, err
+	}
+	publishedPath := filepath.Join(s.dir, meta.ULID)
+	if err := os.Rename(filepath.Join(staging, meta.ULID), publishedPath); err != nil {
+		return Meta{}, err
+	}
+	published, err := OpenBlock(publishedPath)
+	if err != nil {
+		return Meta{}, fmt.Errorf("opening published compaction %s: %w", meta.ULID, err)
+	}
+	published.reads = s.reads
+
+	// Adopt the validated snapshot before deleting inputs. If cleanup fails, the
+	// new block is still complete and ListBlocks suppresses its named parents on
+	// reopening. The returned error makes the residual disk cost explicit.
+	s.blocks = []*Block{published}
+	if s.metadata != nil {
+		compactedMetadata.reads = s.reads
+		s.metadata = compactedMetadata
+		s.setIndexedResourceAttrsLocked(s.opts.IndexedResourceAttributes)
+		publishedRelations := compactedMetadata.snapshot()
+		s.metadataPublished = &publishedRelations
+	}
+	if err := retireBlocks(s.dir, parents); err != nil {
+		return meta, fmt.Errorf("compaction %s published, but parent cleanup failed: %w", meta.ULID, err)
+	}
+	return meta, nil
 }

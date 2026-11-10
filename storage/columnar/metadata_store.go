@@ -94,6 +94,17 @@ func (s *metadataStore) update(update Update) error {
 	return s.updateHistory(s.ownerHistory(update.Owner), update)
 }
 
+func (s *metadataStore) deleteOwner(owner OwnerKey) {
+	for condition := range s.ownerIndex[owner] {
+		delete(s.attributeIndex[condition], owner)
+		if len(s.attributeIndex[condition]) == 0 {
+			delete(s.attributeIndex, condition)
+		}
+	}
+	delete(s.ownerIndex, owner)
+	delete(s.byOwner, owner)
+}
+
 func (s *metadataStore) ownerHistory(owner OwnerKey) *metadataOwnerHistory {
 	history, ok := s.byOwner[owner]
 	if !ok {

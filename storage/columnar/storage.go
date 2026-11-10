@@ -76,14 +76,15 @@ type Storage struct {
 	dir  string
 	opts StorageOptions
 
-	mtx       sync.Mutex
-	buffer    []*headSeries // Sorted by stable series hash.
-	bufferN   int
-	bufferMin int64
-	bufferMax int64
-	blocks    []*Block
-	last      map[uint64]*seriesState
-	closed    bool
+	mtx          sync.Mutex
+	buffer       []*headSeries // Sorted by stable series hash.
+	bufferN      int
+	bufferMin    int64
+	bufferMax    int64
+	minValidTime int64
+	blocks       []*Block
+	last         map[uint64]*seriesState
+	closed       bool
 
 	metadata          *metadataStore
 	metadataPublished *metadataRelations
@@ -128,12 +129,13 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 		opts.MetadataVersionCap = 0
 	}
 	s := &Storage{
-		dir:       dir,
-		opts:      opts,
-		last:      map[uint64]*seriesState{},
-		bufferMin: math.MaxInt64,
-		bufferMax: math.MinInt64,
-		reads:     &readStats{},
+		dir:          dir,
+		opts:         opts,
+		last:         map[uint64]*seriesState{},
+		bufferMin:    math.MaxInt64,
+		bufferMax:    math.MinInt64,
+		minValidTime: math.MinInt64,
+		reads:        &readStats{},
 	}
 	if !opts.DisableNativeMetadata {
 		s.metadata = newMetadataStore(opts.MetadataVersionCap)
@@ -322,6 +324,9 @@ type appender struct {
 func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, opts storage.AOptions) (storage.SeriesRef, error) {
 	if a.done {
 		return 0, errors.New("columnar: appender used after Commit or Rollback")
+	}
+	if t < a.s.minValidTime {
+		return 0, fmt.Errorf("%w: timestamp %d precedes retention cutoff %d", storage.ErrOutOfBounds, t, a.s.minValidTime)
 	}
 
 	hs, err := a.seriesFor(ls)

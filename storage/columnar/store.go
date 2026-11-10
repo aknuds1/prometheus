@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
@@ -60,8 +61,11 @@ type Meta struct {
 	NumSamples    int    `json:"num_samples"`
 	FormatVersion int    `json:"format_version"`
 	// WALSequence is the highest append-log batch included in this block.
-	WALSequence uint64           `json:"wal_sequence,omitempty"`
-	Metadata    *MetadataSummary `json:"metadata,omitempty"`
+	WALSequence uint64 `json:"wal_sequence,omitempty"`
+	// Replaces names validated parents of a published compaction, allowing reopen
+	// to suppress crash-left parents without first reading all their payloads.
+	Replaces []string         `json:"replaces,omitempty"`
+	Metadata *MetadataSummary `json:"metadata,omitempty"`
 	// SeriesPerRowGroup bounds the size of each cohort slice. NumRowGroups lets a
 	// reader validate its catalog without opening the sample Parquet payload.
 	SeriesPerRowGroup int64 `json:"series_per_row_group"`
@@ -287,7 +291,7 @@ func ListBlocks(dir string) ([]*Block, error) {
 
 	blocks := make([]*Block, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == walDirName || filepath.Ext(entry.Name()) == tmpDirSuffix {
+		if !entry.IsDir() || entry.Name() == walDirName || filepath.Ext(entry.Name()) == tmpDirSuffix || strings.HasPrefix(entry.Name(), retiredBlockPrefix) {
 			continue
 		}
 		block, err := OpenBlock(filepath.Join(dir, entry.Name()))
@@ -295,6 +299,18 @@ func ListBlocks(dir string) ([]*Block, error) {
 			return nil, err
 		}
 		blocks = append(blocks, block)
+	}
+	replaced := map[string]struct{}{}
+	for _, block := range blocks {
+		for _, parent := range block.meta.Replaces {
+			replaced[parent] = struct{}{}
+		}
+	}
+	if len(replaced) > 0 {
+		blocks = slices.DeleteFunc(blocks, func(block *Block) bool {
+			_, obsolete := replaced[block.meta.ULID]
+			return obsolete
+		})
 	}
 	if len(blocks) == 0 {
 		return nil, ErrNoBlocks

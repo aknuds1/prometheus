@@ -21,9 +21,10 @@
 //
 // Blocks are written once and never modified. Sample blocks and native metadata
 // are restored from blocks; unflushed batches replay through Arrow IPC WAL
-// segments. CompactTo writes merged blocks to a separate directory, but no live
-// compaction publication or retention is provided. Nothing here is safe to run in
-// production. Format versions are discarded rather than migrated.
+// segments. CompactTo writes a separate measurement block. Compact publishes a
+// synchronous parent-replacing snapshot and RetainBefore retires whole expired
+// blocks in the lifecycle experiment. Nothing here is safe to run in production.
+// Format versions are discarded rather than migrated.
 //
 // Each block has a hash-sorted series dictionary, sorted label/value postings
 // and per-series segment offsets. Sample Parquet row groups are cohort slices

@@ -101,6 +101,9 @@ func (s *Storage) batchValidateAgainstHead(series *headSeries) error {
 	if series.Len() == 0 {
 		return nil
 	}
+	if series.ts[0] < s.minValidTime {
+		return fmt.Errorf("%w: series %s first buffer timestamp %d precedes retention cutoff %d", storage.ErrOutOfBounds, series.labels, series.ts[0], s.minValidTime)
+	}
 	last, ok := s.last[series.hash]
 	if ok {
 		if !labels.Equal(last.labels, series.labels) {
