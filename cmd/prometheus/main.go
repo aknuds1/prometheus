@@ -365,7 +365,7 @@ func (c *flagConfig) setFeatureListOptions(logger *slog.Logger) error {
 				logger.Info("Experimental fast startup is enabled.")
 			case "columnar-prototype":
 				c.enableColumnarPrototype = true
-				logger.Warn("Experimental columnar prototype enabled. It is not durable, does not compact, and is not a Prometheus storage backend; do not use it for real data.")
+				logger.Warn("Experimental columnar prototype enabled. Its WAL, lifecycle operations and format are experiments without TSDB durability, compatibility or production-readiness guarantees; do not use it for real data.")
 			case "search-api":
 				c.web.EnableSearch = true
 				logger.Info("Experimental search API enabled.")
@@ -1000,8 +1000,27 @@ func main() {
 			cfg.tsdb.EnableMetadataWALRecords || cfg.agent.EnableMetadataWALRecords,
 			cfg.tsdb.EnableSTStorage || cfg.agent.EnableSTStorage,
 		)
-		fanoutStorage = storage.NewFanout(logger, localStorage, remoteStorage)
+
+		fanoutStorage storage.Storage
 	)
+
+	var columnarStorage *columnar.Storage
+	if cfg.enableColumnarPrototype {
+		// Open the secondary before the scrape/rule appenders are constructed.
+		// Their fanout is intentionally fixed at construction; attaching late
+		// would leave ordinary scrapes out of the prototype entirely.
+		columnarDir := filepath.Join(localStoragePath, "columnar")
+		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{})
+		if err != nil {
+			logger.Error("Unable to open the experimental columnar storage", "dir", columnarDir, "err", err)
+			os.Exit(1)
+		}
+	}
+	secondaries := []storage.Storage{remoteStorage}
+	if columnarStorage != nil {
+		secondaries = append(secondaries, columnarStorage)
+	}
+	fanoutStorage = storage.NewFanout(logger, localStorage, secondaries...)
 
 	var (
 		ctxWeb, cancelWeb = context.WithCancel(context.Background())
@@ -1338,18 +1357,10 @@ func main() {
 	}
 
 	var (
-		columnarStorage  *columnar.Storage
 		columnarServer   *http.Server
 		columnarListener net.Listener
 	)
 	if cfg.enableColumnarPrototype {
-		columnarDir := filepath.Join(localStoragePath, "columnar")
-		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{})
-		if err != nil {
-			logger.Error("Unable to open the experimental columnar storage", "dir", columnarDir, "err", err)
-			os.Exit(1)
-		}
-
 		mux := http.NewServeMux()
 		metadataHandler := columnar.NewMetadataHandler(columnarStorage, logger.With("component", "columnar-metadata"))
 		mux.Handle("/resources", metadataHandler)
