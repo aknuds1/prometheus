@@ -77,7 +77,7 @@ type Storage struct {
 	opts StorageOptions
 
 	mtx       sync.Mutex
-	buffer    map[uint64]*headSeries
+	buffer    []*headSeries // Sorted by stable series hash.
 	bufferN   int
 	bufferMin int64
 	bufferMax int64
@@ -97,6 +97,7 @@ type Storage struct {
 // headSeries holds samples as typed columns. Histograms must be encoded before
 // entering the head: the caller is allowed to reuse the source histogram.
 type headSeries struct {
+	hash   uint64
 	labels labels.Labels
 	ts     []int64
 	st     []int64
@@ -129,7 +130,6 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 	s := &Storage{
 		dir:       dir,
 		opts:      opts,
-		buffer:    map[uint64]*headSeries{},
 		last:      map[uint64]*seriesState{},
 		bufferMin: math.MaxInt64,
 		bufferMax: math.MinInt64,
@@ -249,15 +249,8 @@ func (s *Storage) flushLocked() error {
 	if len(s.buffer) == 0 && !s.metadataDirty {
 		return nil
 	}
-	keys := make([]labels.Labels, 0, len(s.buffer))
+	series := make([]Series, 0, len(s.buffer))
 	for _, hs := range s.buffer {
-		keys = append(keys, hs.labels)
-	}
-	slices.SortFunc(keys, labels.Compare)
-
-	series := make([]Series, 0, len(keys))
-	for _, ls := range keys {
-		hs := s.buffer[stableSeriesHash(ls)]
 		series = append(series, Series{
 			Labels:          hs.labels,
 			Timestamps:      hs.ts,
@@ -291,7 +284,7 @@ func (s *Storage) flushLocked() error {
 	}
 	block.reads = s.reads
 	s.blocks = append(s.blocks, block)
-	s.buffer = map[uint64]*headSeries{}
+	s.buffer = nil
 	s.bufferN = 0
 	s.bufferMin = math.MaxInt64
 	s.bufferMax = math.MinInt64

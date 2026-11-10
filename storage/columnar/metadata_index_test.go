@@ -140,7 +140,7 @@ func TestLabelQueriesStreamAndSkipSamples(t *testing.T) {
 	require.Equal(t, []string{"one"}, values)
 
 	stats := s.ReadStats()
-	require.Equal(t, uint64(4), stats.LabelPayloadOpens)
+	require.Zero(t, stats.LabelPayloadOpens, "the block catalog serves labels without a Parquet open")
 	require.Zero(t, stats.SamplePayloadOpens, "label-only methods never open sample projections")
 	require.Equal(t, uint64(8), stats.LabelRowsVisited, "one head row and one block row per query visit")
 	require.Zero(t, stats.SampleRowsDecoded, "label operations must not decode sample columns")

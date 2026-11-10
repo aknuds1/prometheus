@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/storage"
 )
 
@@ -139,6 +140,35 @@ type AssociationUpdate struct {
 	Update Update
 }
 
+// batchMetadataTransaction resolves each owner history once per batch/context,
+// then reuses it for repeated Resource/schema/scope/source associations. It
+// operates on the transactional clone, not the published metadata catalog.
+type batchMetadataTransaction struct {
+	store  *metadataStore
+	owners map[OwnerKey]*metadataOwnerHistory
+}
+
+func (t *batchMetadataTransaction) ownerHistory(owner OwnerKey) *metadataOwnerHistory {
+	if history, ok := t.owners[owner]; ok {
+		return history
+	}
+	history := t.store.ownerHistory(owner)
+	t.owners[owner] = history
+	return history
+}
+
+func (t *batchMetadataTransaction) associate(update AssociationUpdate) error {
+	history := t.ownerHistory(update.Update.Owner)
+	return t.store.associateWithHistory(metadataSeriesKey(update.Labels), update.Labels, update.Update, history)
+}
+
+func (t *batchMetadataTransaction) update(update Update) error {
+	if update.Owner.Kind > MetadataSource {
+		return fmt.Errorf("columnar: invalid metadata kind %d", update.Owner.Kind)
+	}
+	return t.store.updateHistory(t.ownerHistory(update.Owner), update)
+}
+
 // AppendBatch validates and appends an entire batch in one atomic store
 // transaction. A label/metadata error doesn't produce a half-written batch.
 //
@@ -150,11 +180,11 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		return ctx.Err()
 	}
 
-	// Prepare/validate before the transaction, not while mutating.
-	for _, series := range batch.Series {
-		if err := validateSeriesColumns(series); err != nil {
-			return err
-		}
+	// Prepare sorted typed arrays and validate every sample range before taking
+	// the store transaction lock or publishing a WAL segment.
+	prepared, err := prepareBatchSeries(batch)
+	if err != nil {
+		return err
 	}
 	for i, up := range batch.Updates {
 		if up.Labels.IsEmpty() {
@@ -172,32 +202,12 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		return errors.New("columnar: storage is closed")
 	}
 
-	// Build the complete transaction first; a failure disk flush or member update
-	// doesn't commit the prefix that happened to pass validation.
-	for _, series := range batch.Series {
+	// Check the complete transaction against both block tails and the head before
+	// any metadata clone, WAL file, or in-memory sample becomes visible.
+	for _, series := range prepared {
 		if err := s.batchValidateAgainstHead(series); err != nil {
 			return err
 		}
-	}
-
-	txs := map[uint64]*headSeries{}
-	order := make([]uint64, 0, len(batch.Series))
-	for _, series := range batch.Series {
-		if len(series.Timestamps) == 0 {
-			continue
-		}
-		hash := stableSeriesHash(series.Labels)
-		hs, ok := txs[hash]
-		if !ok {
-			hs = newHeadSeries(series.Labels)
-			txs[hash] = hs
-			order = append(order, hash)
-		} else if !labels.Equal(hs.labels, series.Labels) {
-			return ErrSeriesHashCollision
-		}
-		// Nothing new series is merged by StableHash without checking the actual
-		// labels, preventing association collapse even in compressed ID maps.
-		appendTypedSeries(hs, series)
 	}
 
 	metadataChanged := len(batch.Updates)+len(batch.OwnerUpdates) > 0
@@ -211,13 +221,16 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		if err != nil {
 			return fmt.Errorf("preparing metadata transaction: %w", err)
 		}
+		transaction := batchMetadataTransaction{
+			store: nextMetadata, owners: make(map[OwnerKey]*metadataOwnerHistory, len(batch.Updates)+len(batch.OwnerUpdates)),
+		}
 		for i, update := range batch.Updates {
-			if err := nextMetadata.associate(metadataSeriesKey(update.Labels), update.Labels, update.Update); err != nil {
+			if err := transaction.associate(update); err != nil {
 				return fmt.Errorf("metadata update %d: %w", i, err)
 			}
 		}
 		for i, update := range batch.OwnerUpdates {
-			if err := nextMetadata.update(update); err != nil {
+			if err := transaction.update(update); err != nil {
 				return fmt.Errorf("owner metadata update %d: %w", i, err)
 			}
 		}
@@ -227,18 +240,7 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 	}
 	s.metadata = nextMetadata
 	s.metadataDirty = s.metadataDirty || metadataChanged
-	return s.commitHead(txs, order)
-}
-
-// headSeries is a typed columnar head series. native histograms store the encoded
-// payload per sample; no per-row interface walks the samples when writing.
-type BSERIES_DO_NOT_USE struct {
-	labels labels.Labels
-	ts     []int64
-	st     []int64
-	v      []float64
-	kind   []SampleKind
-	hist   [][]byte
+	return s.commitHead(prepared)
 }
 
 func appendTypedSeries(dst *headSeries, src BatchSeries) {
@@ -253,7 +255,7 @@ func appendTypedSeries(dst *headSeries, src BatchSeries) {
 	dst.ts = append(dst.ts, src.Timestamps...)
 	if len(src.StartTimestamps) > 0 {
 		dst.st = append(dst.st, src.StartTimestamps...)
-	} else {
+	} else if len(dst.st) > 0 {
 		dst.st = append(dst.st, make([]int64, len(src.Timestamps))...)
 	}
 	dst.v = append(dst.v, src.Values...)
@@ -281,6 +283,9 @@ func validateSeriesColumns(series BatchSeries) error {
 	}
 	for i := range n {
 		kind := series.Kinds[i]
+		if kind == SampleStale && !value.IsStaleNaN(series.Values[i]) {
+			return fmt.Errorf("columnar: stale sample at index %d does not carry the stale NaN marker", i)
+		}
 		switch kind {
 		case SampleFloat, SampleStale:
 			if len(series.Histograms) > 0 && len(series.Histograms[i]) > 0 {
@@ -297,7 +302,7 @@ func validateSeriesColumns(series BatchSeries) error {
 			return fmt.Errorf("columnar: invalid kind %d at index %d", kind, i)
 		}
 		if i > 0 && series.Timestamps[i] <= series.Timestamps[i-1] {
-			return fmt.Errorf("columnar: non-increasing timestamp at index %d", i)
+			return fmt.Errorf("columnar: sample index %d: %w", i, batchTimestampError(series.Timestamps[i-1], series.Timestamps[i]))
 		}
 	}
 	return nil

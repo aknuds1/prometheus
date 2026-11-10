@@ -40,8 +40,8 @@ func buildSegmentRecord(mem memory.Allocator, series []Series) (arrow.RecordBatc
 	labelSets := builder.Field(1).(*array.ListBuilder)
 	segmentLists := builder.Field(2).(*array.ListBuilder)
 
-	for i, item := range series {
-		ids.Append(uint64(i))
+	for _, item := range series {
+		ids.Append(metadataSeriesKey(item.Labels))
 		appendMetadataLabels(labelSets, item.Labels)
 		segmentLists.Append(true)
 		segments := segmentLists.ValueBuilder().(*array.StructBuilder)
@@ -83,16 +83,7 @@ func appendSampleSegment(builder *array.StructBuilder, segment SampleSegment) {
 	builder.FieldBuilder(10).(*array.BinaryBuilder).Append(segment.kinds)
 	builder.FieldBuilder(11).(*array.Uint8Builder).Append(uint8(segment.startCodec))
 	builder.FieldBuilder(12).(*array.BinaryBuilder).Append(segment.startTimes)
-	histograms := builder.FieldBuilder(13).(*array.ListBuilder)
-	histograms.Append(true)
-	payloads := histograms.ValueBuilder().(*array.BinaryBuilder)
-	for _, payload := range segment.histograms {
-		if payload == nil {
-			payloads.AppendNull()
-			continue
-		}
-		payloads.Append(payload)
-	}
+	appendTypedHistogram(builder.FieldBuilder(13).(*array.StructBuilder), segment.histograms)
 }
 
 func appendSegmentRecordSeries(out *[]Series, record arrow.RecordBatch) error {
@@ -115,8 +106,7 @@ func appendSegmentRecordSeries(out *[]Series, record arrow.RecordBatch) error {
 	kindPayloads := segments.Field(10).(*array.Binary)
 	startCodecs := segments.Field(11).(*array.Uint8)
 	startPayloads := segments.Field(12).(*array.Binary)
-	histogramLists := segments.Field(13).(*array.List)
-	histogramPayloads := histogramLists.ListValues().(*array.Binary)
+	histograms := segments.Field(13).(*array.Struct)
 
 	for row := range int(record.NumRows()) {
 		start, end := labelSets.ValueOffsets(row)
@@ -142,22 +132,12 @@ func appendSegmentRecordSeries(out *[]Series, record arrow.RecordBatch) error {
 				kindCodec: integerCodec(kindCodecs.Value(i)), kinds: slices.Clone(kindPayloads.Value(i)),
 				startCodec: integerCodec(startCodecs.Value(i)), startTimes: slices.Clone(startPayloads.Value(i)),
 			}
-			histStart, histEnd := histogramLists.ValueOffsets(i)
-			segment.histograms = make([][]byte, histEnd-histStart)
-			for j := histStart; j < histEnd; j++ {
-				if !histogramPayloads.IsNull(int(j)) {
-					segment.histograms[int(j-histStart)] = slices.Clone(histogramPayloads.Value(int(j)))
-				}
-			}
+			segment.histograms = readTypedHistogram(histograms, i)
 			page, err := segment.Decode(ls)
 			if err != nil {
 				return fmt.Errorf("decoding segment %d: %w", i, err)
 			}
-			item.Timestamps = append(item.Timestamps, page.Timestamps...)
-			item.StartTimestamps = append(item.StartTimestamps, page.StartTimestamps...)
-			item.Kinds = append(item.Kinds, page.Kinds...)
-			item.Values = append(item.Values, page.Values...)
-			item.Histograms = append(item.Histograms, page.Histograms...)
+			appendDecodedPage(&item, page)
 		}
 		if err := item.Validate(); err != nil {
 			return err

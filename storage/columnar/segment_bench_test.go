@@ -146,17 +146,21 @@ func TestSegmentCodecBytesAgainstXOR2(t *testing.T) {
 	dir := t.TempDir()
 	meta, err := columnar.WriteBlock(dir, rows, columnar.WriteOptions{})
 	require.NoError(t, err)
-	info, err := os.Stat(filepath.Join(dir, meta.ULID, "data.parquet"))
-	require.NoError(t, err)
+	var blockBytes int64
+	for _, name := range []string{"data.parquet", "index", "meta.json"} {
+		info, err := os.Stat(filepath.Join(dir, meta.ULID, name))
+		require.NoError(t, err)
+		blockBytes += info.Size()
+	}
 	sampleCount := seriesCount * len(timestamps[0])
 	payloadRatio := float64(payloadBytes) / float64(xor2Bytes)
-	blockRatio := float64(info.Size()) / float64(xor2Bytes)
+	blockRatio := float64(blockBytes) / float64(xor2Bytes)
 	t.Logf("payload: %.3f B/sample, XOR2: %.3f B/sample, ratio=%.3f",
 		float64(payloadBytes)/float64(sampleCount), float64(xor2Bytes)/float64(sampleCount), payloadRatio)
-	t.Logf("Parquet data file: %.3f B/sample, XOR2 ratio=%.3f",
-		float64(info.Size())/float64(sampleCount), blockRatio)
-	// Payload ratios explain codec choice; the format gate is about the complete
-	// Parquet block with its labels, segment headers and projections included.
+	t.Logf("Complete block (data/index/meta): %.3f B/sample, XOR2 ratio=%.3f",
+		float64(blockBytes)/float64(sampleCount), blockRatio)
+	// Payload ratios explain codec choice; the format gate includes the complete
+	// physical data, catalog/index and manifest rather than Parquet alone.
 	if blockRatio > 0.8 {
 		t.Errorf("Parquet block ratio %.3f exceeds the 0.8x XOR2 gate", blockRatio)
 	}

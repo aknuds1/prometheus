@@ -154,21 +154,25 @@ func decodeWALSamples(
 	values := valuesColumn.ListValues().(*array.Float64)
 	histograms := histogramsColumn.ListValues().(*array.Binary)
 	timestampStart, timestampEnd := timestampsColumn.ValueOffsets(row)
-	startStart, _ := startTimestampsColumn.ValueOffsets(row)
+	startStart, startEnd := startTimestampsColumn.ValueOffsets(row)
 	kindStart, _ := kindsColumn.ValueOffsets(row)
 	valueStart, _ := valuesColumn.ValueOffsets(row)
-	histogramStart, _ := histogramsColumn.ValueOffsets(row)
+	histogramStart, histogramEnd := histogramsColumn.ValueOffsets(row)
 	for i := timestampStart; i < timestampEnd; i++ {
 		index := int(i - timestampStart)
 		out.Timestamps = append(out.Timestamps, timestamps.Value(int(i)))
-		out.StartTimestamps = append(out.StartTimestamps, startTimestamps.Value(int(startStart)+index))
+		if startEnd > startStart {
+			out.StartTimestamps = append(out.StartTimestamps, startTimestamps.Value(int(startStart)+index))
+		}
 		out.Kinds = append(out.Kinds, SampleKind(kinds.Value(int(kindStart)+index)))
 		out.Values = append(out.Values, values.Value(int(valueStart)+index))
-		var payload []byte
-		if value := histograms.Value(int(histogramStart) + index); len(value) > 0 {
-			payload = append([]byte(nil), value...)
+		if histogramEnd > histogramStart {
+			var payload []byte
+			if value := histograms.Value(int(histogramStart) + index); len(value) > 0 {
+				payload = append([]byte(nil), value...)
+			}
+			out.Histograms = append(out.Histograms, payload)
 		}
-		out.Histograms = append(out.Histograms, payload)
 	}
 	return nil
 }

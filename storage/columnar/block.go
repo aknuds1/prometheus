@@ -14,18 +14,13 @@
 package columnar
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/compress"
-	"github.com/apache/arrow-go/v18/parquet/file"
-	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
@@ -68,10 +63,9 @@ const (
 	SampleStale SampleKind = 3
 )
 
-// BlockSchema is the Arrow schema of a block file. Each row contains one
-// series and its sealed segments. Each segment has independent typed columns
-// for time, float value, kind, start time and histogram payloads, plus bounds and
-// codec IDs. DecodeRecord and PageIterator hide those physical choices.
+// BlockSchema is the logical Arrow endpoint schema. Each row contains one
+// series and its sealed segments. The on-disk sample schema is PageSchema;
+// DecodeRecord keeps the endpoint independent of cohort/page layout choices.
 func BlockSchema() *arrow.Schema {
 	segmentType := arrow.StructOf(
 		arrow.Field{Name: "count", Type: arrow.PrimitiveTypes.Uint64, Nullable: false},
@@ -87,7 +81,7 @@ func BlockSchema() *arrow.Schema {
 		arrow.Field{Name: "kinds", Type: arrow.BinaryTypes.Binary, Nullable: false},
 		arrow.Field{Name: "start_timestamp_codec", Type: arrow.PrimitiveTypes.Uint8, Nullable: false},
 		arrow.Field{Name: "start_timestamps", Type: arrow.BinaryTypes.Binary, Nullable: false},
-		arrow.Field{Name: "histograms", Type: arrow.ListOf(arrow.BinaryTypes.Binary), Nullable: false},
+		arrow.Field{Name: "histograms", Type: typedHistogramArrowType(), Nullable: true},
 	)
 	return arrow.NewSchema([]arrow.Field{
 		{Name: seriesIDColumn, Type: arrow.PrimitiveTypes.Uint64, Nullable: false},
@@ -237,105 +231,9 @@ func (o WriteOptions) withDefaults() WriteOptions {
 	return o
 }
 
-// writeBlockFile writes series to path as a Parquet file with the block schema.
-//
-// Callers must have validated and sorted series already.
-func writeBlockFile(path string, series []Series, opts WriteOptions) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-
-	writer, err := pqarrow.NewFileWriter(
-		BlockSchema(),
-		f,
-		parquet.NewWriterProperties(
-			parquet.WithCompression(opts.Compression),
-			parquet.WithMaxRowGroupLength(opts.MaxSeriesPerRowGroup),
-			// Dictionary encoding must stay off for the sample values.
-			//
-			// A dictionary is keyed by value, and NaN never equals itself, so every NaN
-			// lands in whichever slot the encoder happens to reuse. That silently
-			// rewrites a quiet NaN into a signalling one, or the reverse, depending on
-			// what else is in the column. Prometheus marks staleness with a signalling
-			// NaN, so this is the difference between a stale marker and a value of NaN.
-			// The kind column carries staleness explicitly, but the value column must
-			// still round trip unchanged.
-			parquet.WithDictionaryPath(parquet.ColumnPath{"values", "list", "element"}, false),
-			parquet.WithDictionaryPath(parquet.ColumnPath{"histograms", "list", "element"}, false),
-		),
-		pqarrow.NewArrowWriterProperties(
-			// Keep the Arrow schema in the file metadata, so the reader does not
-			// have to reconstruct it from Parquet types.
-			pqarrow.WithStoreSchema(),
-		),
-	)
-	if err != nil {
-		// The writer owns the file from here on, so it is only closed on this path.
-		f.Close()
-		return err
-	}
-	defer func() {
-		// Closing the Parquet writer also closes the underlying file.
-		if closeErr := writer.Close(); err == nil {
-			err = closeErr
-		}
-	}()
-
-	mem := memory.NewGoAllocator()
-	record, err := buildRecord(mem, series)
-	if err != nil {
-		return err
-	}
-	defer record.Release()
-
-	return writer.Write(record)
-}
-
 // buildRecord converts series into one Arrow record batch.
 func buildRecord(mem memory.Allocator, series []Series) (arrow.RecordBatch, error) {
 	return buildSegmentRecord(mem, series)
-}
-
-// readAllSeries reads every series of the block file at path.
-//
-// It materialises the whole block, which is acceptable for small blocks and for
-// the conformance path, but not for querying: a selector should read only the
-// row groups it needs, and Parquet offers no finer unit.
-func readAllSeries(ctx context.Context, path string) ([]Series, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	pf, err := file.NewParquetReader(f)
-	if err != nil {
-		return nil, err
-	}
-	defer pf.Close()
-
-	reader, err := pqarrow.NewFileReader(pf, pqarrow.ArrowReadProperties{}, memory.NewGoAllocator())
-	if err != nil {
-		return nil, err
-	}
-
-	rr, err := reader.GetRecordReader(ctx, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer rr.Release()
-
-	var out []Series
-	for rr.Next() {
-		if err := appendRecordSeries(&out, rr.RecordBatch()); err != nil {
-			return nil, err
-		}
-	}
-	if err := rr.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // DecodeRecord converts a record batch in the block schema back into series.

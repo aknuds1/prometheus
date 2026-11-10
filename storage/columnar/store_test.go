@@ -51,7 +51,7 @@ func TestWriteAndReadBlock(t *testing.T) {
 	block, err := OpenBlock(filepath.Join(dir, meta.ULID))
 	require.NoError(t, err)
 	require.Equal(t, meta, block.Meta())
-	require.Equal(t, 1, block.NumRowGroups())
+	require.Equal(t, 2, block.NumRowGroups(), "unequal timestamp vectors occupy different cohorts")
 
 	got, err := block.Series(t.Context())
 	require.NoError(t, err)

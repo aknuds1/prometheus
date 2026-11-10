@@ -18,8 +18,6 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/apache/arrow-go/v18/arrow/array"
-
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/annotations"
@@ -52,10 +50,8 @@ func (q *memQuerier) collectLabels(ctx context.Context, valueName string, hints 
 
 func (q *blockQuerier) LabelNames(ctx context.Context, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	values := map[string]struct{}{}
-	err := q.visitLabels(ctx, func(ls labels.Labels) error {
-		if matchesAll(ls, matchers) {
-			collectLabelValue(values, ls, "")
-		}
+	err := q.visitLabels(ctx, matchers, func(ls labels.Labels) error {
+		collectLabelValue(values, ls, "")
 		return nil
 	})
 	if err != nil {
@@ -66,10 +62,8 @@ func (q *blockQuerier) LabelNames(ctx context.Context, hints *storage.LabelHints
 
 func (q *blockQuerier) LabelValues(ctx context.Context, name string, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	values := map[string]struct{}{}
-	err := q.visitLabels(ctx, func(ls labels.Labels) error {
-		if matchesAll(ls, matchers) {
-			collectLabelValue(values, ls, name)
-		}
+	err := q.visitLabels(ctx, matchers, func(ls labels.Labels) error {
+		collectLabelValue(values, ls, name)
 		return nil
 	})
 	if err != nil {
@@ -78,48 +72,36 @@ func (q *blockQuerier) LabelValues(ctx context.Context, name string, hints *stor
 	return sortedLabelValues(values, hints), nil, nil
 }
 
-func (q *blockQuerier) visitLabels(ctx context.Context, visit func(labels.Labels) error) error {
+func (q *blockQuerier) visitLabels(ctx context.Context, matchers []*labels.Matcher, visit func(labels.Labels) error) error {
 	if !q.block.Overlaps(q.mint, q.maxt) {
 		return nil
 	}
-	return q.block.visitLabels(ctx, visit)
+	return q.block.visitLabels(ctx, [][]*labels.Matcher{matchers}, visit)
 }
 
-func (b *Block) visitLabels(ctx context.Context, visit func(labels.Labels) error) error {
-	reader, parquetFile, file, err := b.newRecordReader(ctx, nil, labelLeaves)
+// visitLabels uses the catalog's series dictionary and postings. Label APIs do
+// not open or decode any sample payload, including for selective matchers.
+func (b *Block) visitLabels(ctx context.Context, matcherSets [][]*labels.Matcher, visit func(labels.Labels) error) error {
+	ids, err := b.resolveMatcherSets(matcherSets)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		reader.Release()
-		parquetFile.Close()
-		file.Close()
-	}()
-
-	for reader.Next() {
+	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		record := reader.RecordBatch()
-		labelList := record.Column(0).(*array.List)
-		structs := labelList.ListValues().(*array.Struct)
-		names := structs.Field(0).(*array.String)
-		values := structs.Field(1).(*array.String)
-		for row := range int(record.NumRows()) {
-			start, end := labelList.ValueOffsets(row)
-			pairs := make([]labels.Label, 0, end-start)
-			for i := start; i < end; i++ {
-				pairs = append(pairs, labels.Label{Name: names.Value(int(i)), Value: values.Value(int(i))})
-			}
-			if b.reads != nil {
-				b.reads.labelRows.Inc()
-			}
-			if err := visit(labels.New(pairs...)); err != nil {
-				return err
-			}
+		i := sortSearchSeries(b.catalog.Series, id)
+		if i < 0 || !matchesAny(b.catalog.Series[i].Labels, matcherSets) {
+			continue
+		}
+		if b.reads != nil {
+			b.reads.labelRows.Inc()
+		}
+		if err := visit(b.catalog.Series[i].Labels); err != nil {
+			return err
 		}
 	}
-	return reader.Err()
+	return nil
 }
 
 func collectLabelValue(values map[string]struct{}, ls labels.Labels, valueName string) {

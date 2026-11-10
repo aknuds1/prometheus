@@ -205,7 +205,7 @@ func TestRecentSelectorDoesNotOpenOlderBlocks(t *testing.T) {
 	require.False(t, series.Next())
 	require.NoError(t, series.Err())
 	stats := s.ReadStats()
-	require.Equal(t, uint64(1), stats.LabelPayloadOpens)
+	require.Zero(t, stats.LabelPayloadOpens, "the series dictionary and postings are read from the catalog")
 	require.Equal(t, uint64(1), stats.SamplePayloadOpens)
 	require.Equal(t, uint64(1), stats.RowGroupsRead)
 	require.Equal(t, uint64(1), stats.SampleRowsDecoded)

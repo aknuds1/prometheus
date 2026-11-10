@@ -15,193 +15,230 @@ package columnar
 
 import (
 	"context"
-
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
+	"errors"
+	"fmt"
+	"slices"
 
 	"github.com/prometheus/prometheus/model/labels"
 )
 
-// Parquet leaf columns of the block schema.
-//
-// These are leaf indexes, not Arrow field indexes: pqarrow selects columns per
-// leaf, so the labels list<struct<name,value>> occupies two of them. Asking for
-// a single leaf of a struct yields a struct with one child, which decodes into
-// label sets with no values.
-const (
-	leafSeriesID = iota
-	leafLabelName
-	leafLabelValue
-	leafTimestamp
-	leafKind
-	leafValue
-	leafHistogram
-)
-
-// labelLeaves are the leaves holding the label sets.
-var labelLeaves = []int{leafLabelName, leafLabelValue}
-
-// Select returns the series of the block that match matcherSets within
-// [mint, maxt].
-//
-// It reads two passes rather than one. The first reads only the labels column and
-// decides which rows match; the second reads every column of the row groups that
-// contain those rows. Without that split a select costs a full scan of the block,
-// which is what made queries two orders of magnitude slower than the TSDB: row
-// groups are the only unit Parquet can skip, and skipping needs to know where the
-// matches are before reading the payload.
+// Select resolves postings entirely in the block catalog, then intersects the
+// result with per-series segment time bounds. Only cohort row groups referenced
+// by surviving segments are opened. A response still checks complete labels and
+// decodes only selected per-series offsets inside a cohort page.
 func (b *Block) Select(ctx context.Context, mint, maxt int64, matcherSets [][]*labels.Matcher, limit int) ([]Series, error) {
 	if !b.Overlaps(mint, maxt) {
 		return nil, nil
 	}
 
-	// Pass one: labels only.
-	rowLabels, err := b.readLabels(ctx)
-	if err != nil {
+	ids, err := b.resolveMatcherSets(matcherSets)
+	if err != nil || len(ids) == 0 {
 		return nil, err
 	}
-
-	matched := make([]int, 0, 64)
-	for i, ls := range rowLabels {
-		if !matchesAny(ls, matcherSets) {
-			continue
+	selections := make([]selectedBlockSeries, 0, len(ids))
+	for _, id := range ids {
+		i := sortSearchSeries(b.catalog.Series, id)
+		if i < 0 {
+			return nil, fmt.Errorf("postings reference unknown series ID %d", id)
 		}
-		matched = append(matched, i)
+		entry := b.catalog.Series[i]
+		segments := make([]blockSegmentRef, 0, len(entry.Segments))
+		for _, ref := range entry.Segments {
+			if ref.MinTime <= maxt && ref.MaxTime >= mint {
+				segments = append(segments, ref)
+			}
+		}
+		if len(segments) > 0 {
+			selections = append(selections, selectedBlockSeries{entry: entry, segments: segments})
+		}
 	}
-	if len(matched) == 0 {
+	if len(selections) == 0 {
 		return nil, nil
 	}
 
-	// Pass two: only the row groups holding matches.
-	rowGroups := b.rowGroupsFor(matched)
-	rows, err := b.readRows(ctx, rowGroups)
+	selected, err := b.readSelectedSeries(ctx, selections)
 	if err != nil {
 		return nil, err
 	}
-
-	// The rows read are the rows of the selected row groups, in order, so walk the
-	// groups in the same order to recover each row's global index.
-	wanted := make(map[int]struct{}, len(matched))
-	for _, row := range matched {
-		wanted[row] = struct{}{}
-	}
-
-	perGroup := int(b.meta.SeriesPerRowGroup)
-	out := make([]Series, 0, len(matched))
-	next := 0
-	for _, group := range rowGroups {
-		start := group * perGroup
-		end := min(start+perGroup, b.meta.NumSeries)
-		for row := start; row < end && next < len(rows); row++ {
-			series := rows[next]
-			next++
-			if _, ok := wanted[row]; !ok {
-				continue
-			}
-			trimmed := trimSeries(series, mint, maxt)
-			if trimmed.Len() == 0 {
-				continue
-			}
-			out = append(out, trimmed)
-			if limit > 0 && len(out) >= limit {
-				return out, nil
-			}
+	out := make([]Series, 0, len(selected))
+	for _, series := range selected {
+		// Postings candidates are authoritative only together with complete
+		// identity. This final check also prevents regex/empty-label corner cases
+		// from ever selecting an arbitrary cohort member.
+		if !matchesAny(series.Labels, matcherSets) {
+			continue
 		}
+		trimmed := trimSeries(series, mint, maxt)
+		if trimmed.Len() > 0 {
+			out = append(out, trimmed)
+		}
+	}
+	slices.SortFunc(out, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }
 
-// readLabels reads the label set of every row, without reading any sample data.
-func (b *Block) readLabels(ctx context.Context) ([]labels.Labels, error) {
-	rr, pf, f, err := b.newRecordReader(ctx, nil, labelLeaves)
-	if err != nil {
-		return nil, err
+// resolveMatcherSets applies sorted-list union and intersection over block-local
+// stable series IDs. It never opens either labels or samples from Parquet.
+func (b *Block) resolveMatcherSets(matcherSets [][]*labels.Matcher) ([]uint64, error) {
+	if len(matcherSets) == 0 {
+		return b.allSeriesIDs(), nil
 	}
-	defer func() {
-		rr.Release()
-		pf.Close()
-		f.Close()
-	}()
-
-	out := make([]labels.Labels, 0, b.meta.NumSeries)
-	for rr.Next() {
-		out = append(out, decodeLabels(rr.RecordBatch())...)
+	sets := make([][]uint64, 0, len(matcherSets))
+	for _, matchers := range matcherSets {
+		ids := b.allSeriesIDs()
+		for _, matcher := range matchers {
+			matching, err := b.positiveMatcherIDs(matcher)
+			if err != nil {
+				return nil, err
+			}
+			if matcher.Type == labels.MatchNotEqual || matcher.Type == labels.MatchNotRegexp {
+				matching = subtractSortedIDs(b.allSeriesIDs(), matching)
+			}
+			ids = intersectSortedIDs(ids, matching)
+			if len(ids) == 0 {
+				break
+			}
+		}
+		sets = append(sets, ids)
 	}
-	return out, rr.Err()
+	return unionSortedIDSets(sets), nil
 }
 
-// readRows reads the given row groups and returns their series in row order.
-func (b *Block) readRows(ctx context.Context, rowGroups []int) ([]Series, error) {
-	if len(rowGroups) == 0 {
-		return nil, nil
+// positiveMatcherIDs returns IDs whose stored or absent label would satisfy the
+// positive form of matcher. Negation is handled explicitly by the caller.
+func (b *Block) positiveMatcherIDs(matcher *labels.Matcher) ([]uint64, error) {
+	if matcher == nil {
+		return nil, errors.New("columnar: nil label matcher")
 	}
-	if b.reads != nil {
-		b.reads.rowGroups.Add(uint64(len(rowGroups)))
-	}
-	rr, pf, f, err := b.newRecordReader(ctx, rowGroups, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		rr.Release()
-		pf.Close()
-		f.Close()
-	}()
-
-	out := make([]Series, 0, int(b.meta.SeriesPerRowGroup)*len(rowGroups))
-	for rr.Next() {
-		series, err := DecodeRecord(rr.RecordBatch())
+	if matcher.Type == labels.MatchNotEqual || matcher.Type == labels.MatchNotRegexp {
+		var err error
+		matcher, err = matcher.Inverse()
 		if err != nil {
 			return nil, err
 		}
-		if b.reads != nil {
-			b.reads.sampleRows.Add(uint64(len(series)))
+	}
+	switch matcher.Type {
+	case labels.MatchEqual, labels.MatchNotEqual:
+		if matcher.Value != "" {
+			key := postingLookupKey(matcher.Name, matcher.Value)
+			i, found := slices.BinarySearchFunc(b.catalog.Postings, key, func(posting blockPosting, key string) int {
+				return compareStrings(postingLookupKey(posting.Name, posting.Value), key)
+			})
+			if !found {
+				return nil, nil
+			}
+			return b.catalog.Postings[i].IDs, nil
 		}
-		out = append(out, series...)
-	}
-	return out, rr.Err()
-}
-
-// rowGroupsFor maps matching row indexes to the row groups that contain them.
-//
-// The indexes returned by readRows are relative to the first row group read, so
-// the caller needs the same mapping; it is derived again in Select by walking the
-// matching rows in order.
-func (b *Block) rowGroupsFor(matched []int) []int {
-	perGroup := int(b.meta.SeriesPerRowGroup)
-	if perGroup <= 0 {
-		return nil // Unknown geometry: read everything.
+	case labels.MatchRegexp, labels.MatchNotRegexp:
+	default:
+		return nil, fmt.Errorf("columnar: unsupported matcher type %v", matcher.Type)
 	}
 
-	seen := map[int]struct{}{}
-	var groups []int
-	for _, row := range matched {
-		group := row / perGroup
-		if _, ok := seen[group]; ok {
+	var matching, present []uint64
+	for _, posting := range b.catalog.Postings {
+		if posting.Name != matcher.Name {
 			continue
 		}
-		seen[group] = struct{}{}
-		groups = append(groups, group)
+		present = unionSortedIDs(present, posting.IDs)
+		if matcher.Matches(posting.Value) {
+			matching = unionSortedIDs(matching, posting.IDs)
+		}
 	}
-	return groups
+	// PromQL label matchers also apply to an absent label, whose value is empty.
+	if matcher.Matches("") {
+		matching = unionSortedIDs(matching, subtractSortedIDs(b.allSeriesIDs(), present))
+	}
+	return matching, nil
 }
 
-// decodeLabels extracts the label sets of a record batch that holds only the
-// labels column.
-func decodeLabels(record arrow.RecordBatch) []labels.Labels {
-	list := record.Column(0).(*array.List)
-	structs := list.ListValues().(*array.Struct)
-	names := structs.Field(0).(*array.String)
-	values := structs.Field(1).(*array.String)
+func (b *Block) allSeriesIDs() []uint64 {
+	ids := make([]uint64, len(b.catalog.Series))
+	for i, entry := range b.catalog.Series {
+		ids[i] = entry.ID
+	}
+	return ids
+}
 
-	out := make([]labels.Labels, 0, record.NumRows())
-	for row := range int(record.NumRows()) {
-		start, end := list.ValueOffsets(row)
-		ls := make([]labels.Label, 0, end-start)
-		for i := start; i < end; i++ {
-			ls = append(ls, labels.Label{Name: names.Value(int(i)), Value: values.Value(int(i))})
+func postingLookupKey(name, value string) string { return name + "\x00" + value }
+
+func compareStrings(a, b string) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func intersectSortedIDs(a, b []uint64) []uint64 {
+	out := make([]uint64, 0, min(len(a), len(b)))
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i] < b[j]:
+			i++
+		case a[i] > b[j]:
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
 		}
-		out = append(out, labels.New(ls...))
+	}
+	return out
+}
+
+func unionSortedIDs(a, b []uint64) []uint64 {
+	out := make([]uint64, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) || j < len(b) {
+		switch {
+		case i == len(a):
+			out = append(out, b[j:]...)
+			return out
+		case j == len(b):
+			out = append(out, a[i:]...)
+			return out
+		case a[i] < b[j]:
+			out = append(out, a[i])
+			i++
+		case a[i] > b[j]:
+			out = append(out, b[j])
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	return out
+}
+
+func subtractSortedIDs(a, b []uint64) []uint64 {
+	out := make([]uint64, 0, len(a))
+	for i, j := 0, 0; i < len(a); i++ {
+		for j < len(b) && b[j] < a[i] {
+			j++
+		}
+		if j < len(b) && b[j] == a[i] {
+			continue
+		}
+		out = append(out, a[i])
+	}
+	return out
+}
+
+func unionSortedIDSets(sets [][]uint64) []uint64 {
+	if len(sets) == 0 {
+		return nil
+	}
+	out := sets[0]
+	for _, set := range sets[1:] {
+		out = unionSortedIDs(out, set)
 	}
 	return out
 }

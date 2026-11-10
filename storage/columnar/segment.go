@@ -16,7 +16,6 @@ package columnar
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"sync"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -39,7 +38,7 @@ type SampleSegment struct {
 	values         []byte
 	kinds          []byte
 	startTimes     []byte
-	histograms     [][]byte
+	histograms     typedHistogramSegment
 }
 
 // TypedPage is a whole segment decoded into parallel typed arrays. A nil
@@ -70,13 +69,7 @@ func NewSampleSegment(ls labels.Labels, timestamps, startTimestamps []int64, kin
 	if err := series.Validate(); err != nil {
 		return SampleSegment{}, err
 	}
-	segment := SampleSegment{
-		SeriesHash: stableSeriesHash(ls), Count: len(timestamps),
-		histograms: cloneByteSlices(histograms),
-	}
-	if !slices.Contains(kinds, SampleHistogram) && !slices.Contains(kinds, SampleFloatHistogram) {
-		segment.histograms = nil
-	}
+	segment := SampleSegment{SeriesHash: stableSeriesHash(ls), Count: len(timestamps)}
 	if len(timestamps) == 0 {
 		return segment, nil
 	}
@@ -87,6 +80,9 @@ func NewSampleSegment(ls labels.Labels, timestamps, startTimestamps []int64, kin
 		segment.MaxValue = max(segment.MaxValue, value)
 	}
 	var err error
+	if segment.histograms, err = encodeTypedHistograms(kinds, histograms); err != nil {
+		return SampleSegment{}, err
+	}
 	if segment.timestamps, segment.timestampCodec, err = encodeTimestamps(timestamps); err != nil {
 		return SampleSegment{}, err
 	}
@@ -129,9 +125,7 @@ func NewSampleSegment(ls labels.Labels, timestamps, startTimestamps []int64, kin
 // record/framing overhead.
 func (s SampleSegment) EncodedSize() int {
 	size := len(s.timestamps) + len(s.values) + len(s.kinds) + len(s.startTimes)
-	for _, payload := range s.histograms {
-		size += len(payload)
-	}
+	size += s.histograms.encodedSize()
 	return size
 }
 
@@ -159,6 +153,25 @@ func (s SampleSegment) DecodeInto(ls labels.Labels, page *TypedPage) error {
 	} else if page.Timestamps, err = decodeIntegerColumnInto(s.timestamps, s.Count, s.timestampCodec, page.Timestamps); err != nil {
 		return fmt.Errorf("decoding timestamps: %w", err)
 	}
+	return s.decodeColumnsInto(ls, page)
+}
+
+// decodeWithSharedTimestamps decodes a cohort member's non-time columns against
+// the cohort's already decoded, exactly equal timestamp vector.
+func (s SampleSegment) decodeWithSharedTimestamps(ls labels.Labels, timestamps []int64) (TypedPage, error) {
+	if len(timestamps) != s.Count {
+		return TypedPage{}, fmt.Errorf("cohort timestamps have count %d, expected %d", len(timestamps), s.Count)
+	}
+	page := TypedPage{Labels: ls, Timestamps: timestamps}
+	if err := s.decodeColumnsInto(ls, &page); err != nil {
+		return TypedPage{}, err
+	}
+	return page, nil
+}
+
+func (s SampleSegment) decodeColumnsInto(ls labels.Labels, page *TypedPage) error {
+	var err error
+	page.Labels = ls
 	if len(s.startTimes) > 0 {
 		page.StartTimestamps, err = decodeIntegerColumnInto(s.startTimes, s.Count, s.startCodec, page.StartTimestamps)
 		if err != nil {
@@ -184,8 +197,10 @@ func (s SampleSegment) DecodeInto(ls labels.Labels, page *TypedPage) error {
 			page.Kinds[i] = SampleKind(kind)
 		}
 	}
-	page.Histograms = cloneByteSlices(s.histograms)
-	return nil
+	histograms := s.histograms
+	histograms.count = countHistogramKinds(page.Kinds)
+	page.Histograms, err = histograms.decode(page.Kinds)
+	return err
 }
 
 // Decode returns an independent typed page. Reuse-oriented callers can use a
@@ -251,17 +266,6 @@ func (it *segmentPageIterator) Close() error {
 		it.page = nil
 	}
 	return nil
-}
-
-func cloneByteSlices(input [][]byte) [][]byte {
-	if input == nil {
-		return nil
-	}
-	out := make([][]byte, len(input))
-	for i, payload := range input {
-		out[i] = slices.Clone(payload)
-	}
-	return out
 }
 
 func reuseKinds(destination []SampleKind, count int) []SampleKind {

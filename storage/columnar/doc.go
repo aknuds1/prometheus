@@ -25,12 +25,15 @@
 // compaction publication or retention is provided. Nothing here is safe to run in
 // production. Format versions are discarded rather than migrated.
 //
-// The data model is series-major: one row per series, with its labels and its
-// samples as nested lists. That matches PromQL's unit of computation and keeps
-// series identity in one place instead of repeating labels on every sample.
+// Each block has a hash-sorted series dictionary, sorted label/value postings
+// and per-series segment offsets. Sample Parquet row groups are cohort slices
+// with one row per time window: equal timestamp vectors are stored once and
+// each row holds independent typed payload columns for its member series.
+// Native metadata memberships and sample series dictionary entries both use
+// labels.StableHash as their identity key.
 package columnar
 
 // FormatVersion is the version of the block format written by this package.
 //
 // It is bumped whenever the on-disk schema changes; blocks are not migrated.
-const FormatVersion = 7
+const FormatVersion = 9

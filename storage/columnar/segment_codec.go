@@ -39,11 +39,15 @@ const (
 const (
 	valueALP floatCodec = iota
 	valueXOR
+	valueRLE
 )
 
 // kindUniformFloat is an optional fast path only for the kind column. Stale,
 // histogram and mixed-kind segments retain the generic RLE/plain representation.
-const kindUniformFloat integerCodec = 4
+const (
+	kindUniformFloat integerCodec = 4
+	integerVarint    integerCodec = 5
+)
 
 func encodeTimestamps(values []int64) ([]byte, integerCodec, error) {
 	if len(values) == 0 {
@@ -147,6 +151,9 @@ func decodeIntegerColumn(data []byte, count int, codec integerCodec) ([]int64, e
 }
 
 func decodeIntegerColumnInto(data []byte, count int, codec integerCodec, destination []int64) ([]int64, error) {
+	if count < 0 {
+		return nil, errors.New("negative integer column count")
+	}
 	if count == 0 {
 		return []int64{}, nil
 	}
@@ -242,6 +249,18 @@ func decodeIntegerColumnInto(data []byte, count int, codec integerCodec, destina
 		for i := range count {
 			values[i] = int64(binary.LittleEndian.Uint64(data[i*8:]))
 		}
+	case integerVarint:
+		for i := range count {
+			value, consumed, readErr := readSigned(data[n:])
+			if readErr != nil {
+				return nil, readErr
+			}
+			n += consumed
+			values[i] = value
+		}
+		if n != len(data) {
+			return nil, errors.New("trailing bytes in varint integer column")
+		}
 	default:
 		return nil, fmt.Errorf("unknown integer codec %d", codec)
 	}
@@ -249,6 +268,9 @@ func decodeIntegerColumnInto(data []byte, count int, codec integerCodec, destina
 }
 
 func encodeFloatColumn(values []float64) ([]byte, floatCodec, error) {
+	if len(values) == 0 {
+		return nil, valueXOR, nil
+	}
 	probeCount := min(len(values), 64)
 	for precision := 0; precision <= 8; precision++ {
 		_, ok := encodeALP(values[:probeCount], precision)
@@ -310,9 +332,61 @@ func decodeFloatColumn(data []byte, count int, codec floatCodec) ([]float64, err
 	return decodeFloatColumnInto(data, count, codec, nil)
 }
 
+func encodeFloatRLEColumn(values []float64) ([]byte, floatCodec, error) {
+	best, codec, err := encodeFloatColumn(values)
+	if err != nil {
+		return nil, 0, err
+	}
+	var rle []byte
+	for start := 0; start < len(values); {
+		end := start + 1
+		bits := math.Float64bits(values[start])
+		for end < len(values) && math.Float64bits(values[end]) == bits {
+			end++
+		}
+		rle = binary.LittleEndian.AppendUint64(rle, bits)
+		rle = binary.AppendUvarint(rle, uint64(end-start))
+		start = end
+	}
+	if len(rle) <= len(best) {
+		return rle, valueRLE, nil
+	}
+	return best, codec, nil
+}
+
 func decodeFloatColumnInto(data []byte, count int, codec floatCodec, destination []float64) ([]float64, error) {
+	if count < 0 {
+		return nil, errors.New("negative float column count")
+	}
+	if count == 0 {
+		return []float64{}, nil
+	}
 	if codec == valueXOR {
 		return decodeXORInto(data, count, destination)
+	}
+	if codec == valueRLE {
+		values := reuseFloat64s(destination, count)
+		position := 0
+		for index := 0; index < count; {
+			if position+8 > len(data) {
+				return nil, errors.New("short float RLE value")
+			}
+			value := math.Float64frombits(binary.LittleEndian.Uint64(data[position:]))
+			position += 8
+			run, consumed, err := readUnsigned(data[position:])
+			if err != nil || run == 0 || run > uint64(count-index) {
+				return nil, errors.New("invalid float RLE run")
+			}
+			position += consumed
+			for range int(run) {
+				values[index] = value
+				index++
+			}
+		}
+		if position != len(data) {
+			return nil, errors.New("trailing bytes in float RLE column")
+		}
+		return values, nil
 	}
 	if codec != valueALP {
 		return nil, fmt.Errorf("unknown float codec %d", codec)

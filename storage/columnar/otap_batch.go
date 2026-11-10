@@ -17,6 +17,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -28,6 +29,7 @@ import (
 	"golang.org/x/exp/constraints"
 
 	"github.com/prometheus/prometheus/model/labels"
+	promvalue "github.com/prometheus/prometheus/model/value"
 	otlpprw "github.com/prometheus/prometheus/storage/remote/otlptranslator/prometheusremotewrite"
 )
 
@@ -178,6 +180,9 @@ func (b *otapBatchBuilder) appendNumberDataPoints(rec arrow.RecordBatch, metrics
 		}
 
 		var value float64
+		if kind == SampleStale {
+			value = math.Float64frombits(promvalue.StaleNaN)
+		}
 		hasValue := kind == SampleStale
 		switch {
 		case hasValue:

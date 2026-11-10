@@ -62,10 +62,10 @@ type Meta struct {
 	// WALSequence is the highest append-log batch included in this block.
 	WALSequence uint64           `json:"wal_sequence,omitempty"`
 	Metadata    *MetadataSummary `json:"metadata,omitempty"`
-	// SeriesPerRowGroup is the row group size the block was written with. A select
-	// needs it to map a matching row to the row group that contains it, so that it
-	// reads only those groups.
+	// SeriesPerRowGroup bounds the size of each cohort slice. NumRowGroups lets a
+	// reader validate its catalog without opening the sample Parquet payload.
 	SeriesPerRowGroup int64 `json:"series_per_row_group"`
+	NumRowGroups      int   `json:"num_row_groups"`
 }
 
 // WriteBlock writes a new block directory below dir containing series.
@@ -134,8 +134,16 @@ func writeBlock(dir string, series []Series, metadata *metadataRelations, opts W
 		}
 	}()
 
-	if err := writeBlockFile(blockDataPath(tmpDir), series, opts); err != nil {
+	catalog, err := buildBlockCatalog(series, opts)
+	if err != nil {
+		return Meta{}, err
+	}
+	meta.NumRowGroups = len(catalog.Cohorts)
+	if err := writePageFile(blockDataPath(tmpDir), series, catalog, opts); err != nil {
 		return Meta{}, fmt.Errorf("writing block data: %w", err)
+	}
+	if err := writeBlockCatalog(tmpDir, catalog); err != nil {
+		return Meta{}, fmt.Errorf("writing block catalog: %w", err)
 	}
 	if err := writeMetadataRelations(tmpDir, metadata, opts); err != nil {
 		return Meta{}, fmt.Errorf("writing block metadata: %w", err)
@@ -166,6 +174,7 @@ type Block struct {
 	// rowGroups is the number of row groups in the data file, used to expose
 	// scan granularity.
 	rowGroups int
+	catalog   blockCatalog
 }
 
 // OpenBlock opens the block in dir.
@@ -182,23 +191,17 @@ func OpenBlock(dir string) (*Block, error) {
 		return nil, fmt.Errorf("block %s has format version %d, this build reads version %d", dir, meta.FormatVersion, FormatVersion)
 	}
 
-	f, err := os.Open(blockDataPath(dir))
+	catalog, err := readBlockCatalog(dir, meta)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading block catalog: %w", err)
 	}
-	defer f.Close()
-
-	pf, err := file.NewParquetReader(f)
-	if err != nil {
-		return nil, err
-	}
-	defer pf.Close()
 
 	return &Block{
 		dir:       dir,
 		meta:      meta,
 		mem:       memory.NewGoAllocator(),
-		rowGroups: pf.NumRowGroups(),
+		rowGroups: meta.NumRowGroups,
+		catalog:   catalog,
 	}, nil
 }
 
@@ -217,11 +220,12 @@ func (b *Block) NumRowGroups() int { return b.rowGroups }
 // path must not use it, because the only way Parquet lets a selector avoid work
 // is by skipping row groups, and this reads all of them.
 func (b *Block) Series(ctx context.Context) ([]Series, error) {
-	series, err := readAllSeries(ctx, blockDataPath(b.dir))
-	if b.reads != nil {
-		b.reads.samples.Inc()
-		b.reads.sampleRows.Add(uint64(len(series)))
+	selections := make([]selectedBlockSeries, len(b.catalog.Series))
+	for i, entry := range b.catalog.Series {
+		selections[i] = selectedBlockSeries{entry: entry, segments: entry.Segments}
 	}
+	series, err := b.readSelectedSeries(ctx, selections)
+	slices.SortFunc(series, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
 	return series, err
 }
 
@@ -244,11 +248,7 @@ var ErrNoBlocks = errors.New("no columnar blocks")
 // columns.
 func (b *Block) newRecordReader(ctx context.Context, rowGroups, columns []int) (pqarrow.RecordReader, *file.Reader, *os.File, error) {
 	if b.reads != nil {
-		if len(columns) == len(labelLeaves) && columns[0] == leafLabelName && columns[1] == leafLabelValue {
-			b.reads.labels.Inc()
-		} else {
-			b.reads.samples.Inc()
-		}
+		b.reads.samples.Inc()
 	}
 	f, err := os.Open(blockDataPath(b.dir))
 	if err != nil {

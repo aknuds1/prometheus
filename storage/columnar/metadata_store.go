@@ -91,13 +91,21 @@ func (s *metadataStore) update(update Update) error {
 	if update.Owner.Kind > MetadataSource {
 		return fmt.Errorf("columnar: invalid metadata kind %d", update.Owner.Kind)
 	}
+	return s.updateHistory(s.ownerHistory(update.Owner), update)
+}
 
-	history, ok := s.byOwner[update.Owner]
+func (s *metadataStore) ownerHistory(owner OwnerKey) *metadataOwnerHistory {
+	history, ok := s.byOwner[owner]
 	if !ok {
 		history = &metadataOwnerHistory{index: map[string]struct{}{}}
-		s.byOwner[update.Owner] = history
+		s.byOwner[owner] = history
 	}
+	return history
+}
 
+// updateHistory applies a version after the batch metadata transaction has
+// resolved its owner once. Redundant observations update bounds only.
+func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Update) error {
 	// An equal-time assertion must agree exactly. Do this before changing any
 	// observation bounds so a rejected update leaves the owner untouched.
 	i := sort.Search(len(history.versions), func(i int) bool {
@@ -167,7 +175,7 @@ func contentsEqual(a, b Content) bool {
 // associate links one series into the owner, with an effective time.
 // Owner history and membership are deliberately separate. A new member never
 // duplicates the Resource owner's descriptive attributes.
-func (s *metadataStore) associate(seriesHash uint64, ls labels.Labels, update Update) error {
+func (s *metadataStore) associateWithHistory(seriesHash uint64, ls labels.Labels, update Update, history *metadataOwnerHistory) error {
 	// Reject all identity conflicts before mutating the owner's history.
 	if err := s.validateLabels(update.Owner, ls); err != nil {
 		return err
@@ -182,7 +190,7 @@ func (s *metadataStore) associate(seriesHash uint64, ls labels.Labels, update Up
 				ErrConflictingMembership, row.owner.ID, update.Owner.ID, update.EffectiveFrom)
 		}
 	}
-	if err := s.update(update); err != nil {
+	if err := s.updateHistory(history, update); err != nil {
 		return err
 	}
 	return s.attachMembership(seriesHash, ls, update.Owner, update.EffectiveFrom, update.EffectiveFrom)

@@ -125,6 +125,47 @@ func BenchmarkAppendTSDB(b *testing.B) {
 	}
 }
 
+// BenchmarkAppendHeadG3 compares array-batch ingestion with the current scalar
+// columnar appender over the same 100,000 samples. Both arms disable WAL and
+// flushing deliberately: this is a head-path gate, not a durable-ingest claim.
+func BenchmarkAppendHeadG3(b *testing.B) {
+	const series, samples = 1000, 100
+	allLabels, timestamps, values := syntheticSeries(series, samples)
+	batch := columnar.Batch{Series: make([]columnar.BatchSeries, series)}
+	for i := range series {
+		batch.Series[i] = columnar.BatchSeries{
+			Labels: allLabels[i], Timestamps: timestamps[i], Kinds: make([]columnar.SampleKind, samples), Values: values[i],
+		}
+	}
+
+	for _, mode := range []string{"batch", "scalar"} {
+		b.Run(mode, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ReportMetric(series*samples, "samples/op")
+			b.ResetTimer()
+			for range b.N {
+				st, err := columnar.NewStorage(b.TempDir(), columnar.StorageOptions{
+					FlushSamples: math.MaxInt, DisableWAL: true, DisableNativeMetadata: true,
+				})
+				require.NoError(b, err)
+				if mode == "batch" {
+					require.NoError(b, st.AppendBatch(b.Context(), batch))
+				} else {
+					app := st.AppenderV2(b.Context())
+					for i := range series {
+						for j := range samples {
+							_, err := app.Append(0, allLabels[i], 0, timestamps[i][j], values[i][j], nil, nil, storage.AOptions{})
+							require.NoError(b, err)
+						}
+					}
+					require.NoError(b, app.Commit())
+				}
+				require.NoError(b, st.Close())
+			}
+		})
+	}
+}
+
 // BenchmarkQueryRateColumnar measures a range query over the columnar store.
 func BenchmarkQueryRateColumnar(b *testing.B) {
 	columnarBench, cleanup := ingestedColumnar(b)

@@ -92,9 +92,13 @@ func TestSegmentBlockRoundTripAndBoundaries(t *testing.T) {
 		file.Close()
 	}()
 	require.True(t, reader.Next())
-	segments := reader.RecordBatch().Column(2).(*array.List)
-	start, end := segments.ValueOffsets(0)
-	require.Equal(t, int64(3), end-start)
+	record := reader.RecordBatch()
+	require.Equal(t, int64(3), record.NumRows(), "one cohort/time-window page per segment")
+	payloads := record.Column(pageSeriesPayloadsColumn).(*array.List)
+	for row := range int(record.NumRows()) {
+		start, end := payloads.ValueOffsets(row)
+		require.Equal(t, int64(1), end-start, "one stable series payload offset per page")
+	}
 	decoded, err := block.Series(t.Context())
 	require.NoError(t, err)
 	require.Len(t, decoded, 1)

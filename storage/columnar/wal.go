@@ -147,10 +147,8 @@ func buildWALRecord(batch Batch, sequence uint64) (arrow.RecordBatch, error) {
 		appendMetadataLabels(labelSets, series.Labels)
 		timestamps.Append(true)
 		timestamps.ValueBuilder().(*array.Int64Builder).AppendValues(series.Timestamps, nil)
-		startTimestamps.Append(true)
-		if len(series.StartTimestamps) == 0 {
-			startTimestamps.ValueBuilder().(*array.Int64Builder).AppendValues(make([]int64, len(series.Timestamps)), nil)
-		} else {
+		startTimestamps.Append(len(series.StartTimestamps) > 0)
+		if len(series.StartTimestamps) > 0 {
 			startTimestamps.ValueBuilder().(*array.Int64Builder).AppendValues(series.StartTimestamps, nil)
 		}
 		kinds.Append(true)
@@ -160,10 +158,12 @@ func buildWALRecord(batch Batch, sequence uint64) (arrow.RecordBatch, error) {
 		}
 		values.Append(true)
 		values.ValueBuilder().(*array.Float64Builder).AppendValues(series.Values, nil)
-		histograms.Append(true)
-		histogramValues := histograms.ValueBuilder().(*array.BinaryBuilder)
-		for _, payload := range series.Histograms {
-			histogramValues.Append(payload)
+		histograms.Append(len(series.Histograms) > 0)
+		if len(series.Histograms) > 0 {
+			histogramValues := histograms.ValueBuilder().(*array.BinaryBuilder)
+			for _, payload := range series.Histograms {
+				histogramValues.Append(payload)
+			}
 		}
 	}
 	for _, association := range batch.Updates {
