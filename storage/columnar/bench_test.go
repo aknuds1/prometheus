@@ -20,6 +20,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"testing"
@@ -468,7 +469,7 @@ func TestReplayRealCorpus(t *testing.T) {
 	t.Logf("querying %s to %s (%s step)", rangeStart.Format(time.RFC3339), rangeEnd.Format(time.RFC3339), "1m")
 	_ = start
 
-	measure := func(name string, q storage.Queryable, expr string) {
+	evaluate := func(q storage.Queryable, expr string) (time.Duration, string) {
 		query, err := engine.NewRangeQuery(t.Context(), q, nil, expr, rangeStart, rangeEnd, time.Minute)
 		require.NoError(t, err)
 		begin := time.Now()
@@ -476,7 +477,24 @@ func TestReplayRealCorpus(t *testing.T) {
 		elapsed := time.Since(begin)
 		require.NoError(t, result.Err)
 		query.Close()
-		t.Logf("%-24s %-40s %s", name, expr, elapsed.Round(time.Millisecond))
+		return elapsed, result.Value.String()
+	}
+	measureDistribution := func(name string, q storage.Queryable, expr string) (time.Duration, time.Duration, string) {
+		durations := make([]time.Duration, 20)
+		var baseline string
+		for i := range durations {
+			duration, value := evaluate(q, expr)
+			durations[i] = duration
+			if i == 0 {
+				baseline = value
+			} else {
+				require.Equal(t, baseline, value, "stable full result for %s query %s", name, expr)
+			}
+		}
+		slices.Sort(durations)
+		p50, p95 := durations[len(durations)/2], durations[(len(durations)*95+99)/100-1]
+		t.Logf("G4 %-8s %-40s p50=%s p95=%s", name, expr, p50.Round(time.Microsecond), p95.Round(time.Microsecond))
+		return p50, p95, baseline
 	}
 
 	t.Logf("replayed series=%d samples=%d blocks=%d", len(all), appended, st.NumBlocks())
@@ -491,7 +509,18 @@ func TestReplayRealCorpus(t *testing.T) {
 		`rate(node_cpu_seconds_total[5m])`,
 		`sum by (mode) (rate(node_cpu_seconds_total[5m]))`,
 	} {
-		measure("columnar", st, expr)
-		measure("tsdb", db, expr)
+		columnar50, columnar95, columnarValue := measureDistribution("columnar", st, expr)
+		tsdb50, tsdb95, tsdbValue := measureDistribution("tsdb", db, expr)
+		require.Equal(t, columnarValue, tsdbValue, "full differential result for %s", expr)
+		for i, percentile := range []string{"p50", "p95"} {
+			columnarDuration, tsdbDuration := columnar50, tsdb50
+			if i == 1 {
+				columnarDuration, tsdbDuration = columnar95, tsdb95
+			}
+			ratio := float64(columnarDuration) / float64(tsdbDuration)
+			if ratio > 2 {
+				t.Errorf("G4 %s ratio for %s is %.3fx TSDB, exceeding 2x gate", percentile, expr, ratio)
+			}
+		}
 	}
 }

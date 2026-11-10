@@ -60,18 +60,26 @@ eval instant at 10m http_requests_total{path="/foo"}
 // semantically usable at all; a layout that cannot pass it is not worth
 // measuring.
 func TestBuiltinConformance(t *testing.T) {
-	// TODO(prototype): re-enable once counter reset hints match the TSDB exactly.
-	//
-	// Current state: 431 of 440 subtests pass. The remaining failures are nine
-	// subtests in functions.test, extended_vectors.test and native_histograms.test,
-	// all about the counter reset hint the TSDB exposes for synthetic histogram
-	// sequences. The TSDB derives that hint from chunk headers it wrote itself, so
-	// matching it exactly means reproducing its chunk splitting, not just detecting
-	// resets in the values.
-	t.Skip("nine hint-fidelity subtests remain; see the comment above")
+	for _, tc := range []struct {
+		name    string
+		factory func(testing.TB) storage.Storage
+	}{
+		{name: "independent_blocks", factory: newConformanceStorage},
+		{name: "typed_head", factory: newConformanceHeadStorage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			promqltest.RunBuiltinTestsWithStorage(t,
+				promqltest.NewTestEngine(t, false, 5*time.Minute, promqltest.DefaultMaxSamplesPerQuery),
+				tc.factory,
+			)
+		})
+	}
+}
 
-	promqltest.RunBuiltinTestsWithStorage(t,
-		promqltest.NewTestEngine(t, false, 5*time.Minute, promqltest.DefaultMaxSamplesPerQuery),
-		newConformanceStorage,
-	)
+func newConformanceHeadStorage(t testing.TB) storage.Storage {
+	t.Helper()
+	s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{FlushSamples: 1_000_000, DisableWAL: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	return s
 }

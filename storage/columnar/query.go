@@ -15,8 +15,10 @@ package columnar
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"slices"
+	"sort"
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
@@ -141,7 +143,7 @@ type memQuerier struct {
 func (*memQuerier) Close() error { return nil }
 
 func (q *memQuerier) Select(_ context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-	return selectFromSeries(q.series, q.mint, q.maxt, sortSeries, hints, matchers)
+	return selectFromSeries(q.series, q.mint, q.maxt, sortSeries, hints, q.reads, matchers)
 }
 
 // blockQuerier serves the series of one block.
@@ -159,7 +161,7 @@ func (q *blockQuerier) Select(ctx context.Context, _ bool, hints *storage.Select
 	if err != nil {
 		return storage.ErrSeriesSet(err)
 	}
-	return &seriesSet{series: series}
+	return &seriesSet{series: series, reads: q.block.reads}
 }
 
 // relevantRange applies the hint bounds to a querier range.
@@ -177,7 +179,7 @@ func relevantRange(mint, maxt int64, hints *storage.SelectHints) (int64, int64) 
 }
 
 // selectFromSeries applies matchers and the time range to a set of series.
-func selectFromSeries(series []Series, mint, maxt int64, sortSeries bool, hints *storage.SelectHints, matchers []*labels.Matcher) storage.SeriesSet {
+func selectFromSeries(series []Series, mint, maxt int64, sortSeries bool, hints *storage.SelectHints, reads *readStats, matchers []*labels.Matcher) storage.SeriesSet {
 	if hints != nil {
 		if hints.Start > mint {
 			mint = hints.Start
@@ -205,7 +207,7 @@ func selectFromSeries(series []Series, mint, maxt int64, sortSeries bool, hints 
 	// one block or the buffer is involved.
 	_ = sortSeries
 	slices.SortFunc(selected, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
-	return &seriesSet{series: selected}
+	return &seriesSet{series: selected, reads: reads}
 }
 
 func matchesAll(ls labels.Labels, matchers []*labels.Matcher) bool {
@@ -262,6 +264,7 @@ func headToSeries(hs *headSeries) Series {
 // seriesSet is a series set over already-selected series.
 type seriesSet struct {
 	series []Series
+	reads  *readStats
 	i      int
 	err    error
 }
@@ -277,7 +280,7 @@ func (s *seriesSet) Next() bool {
 	return true
 }
 
-func (s *seriesSet) At() storage.Series { return &series{s.series[s.i-1]} }
+func (s *seriesSet) At() storage.Series { return &series{s: s.series[s.i-1], reads: s.reads} }
 
 func (s *seriesSet) Err() error { return s.err }
 
@@ -285,7 +288,8 @@ func (*seriesSet) Warnings() annotations.Annotations { return nil }
 
 // series is a storage.Series backed by one block row.
 type series struct {
-	s Series
+	s     Series
+	reads *readStats
 }
 
 func (s *series) Labels() labels.Labels { return s.s.Labels }
@@ -293,15 +297,103 @@ func (s *series) Labels() labels.Labels { return s.s.Labels }
 func (s *series) Iterator(_ chunkenc.Iterator) chunkenc.Iterator {
 	// pos must start before the first sample, otherwise Next would skip it and a
 	// single-sample series would yield nothing at all.
-	return &sampleIterator{series: s.s, pos: -1}
+	return &sampleIterator{series: s.s, reads: s.reads, pos: -1}
 }
 
 // sampleIterator iterates the samples of a block row.
 type sampleIterator struct {
 	series Series
+	reads  *readStats
+	batch  storage.SampleBatch
+	err    error
 	// pos is the index of the current sample, -1 before the first Next.
 	pos int
 }
+
+// NextBatch exposes borrowed typed arrays without changing scalar iterator
+// progress. Its last sample is also the ordinary scalar current sample.
+func (it *sampleIterator) NextBatch(maxSamples int) bool {
+	return it.NextBatchUntil(maxSamples, math.MaxInt64)
+}
+
+// NextBatchUntil leaves future samples available for subsequent range steps.
+func (it *sampleIterator) NextBatchUntil(maxSamples int, maxt int64) bool {
+	start := max(it.pos+1, 0)
+	if it.err != nil || start >= it.series.Len() {
+		it.batch = storage.SampleBatch{}
+		return false
+	}
+	end := it.series.Len()
+	if maxt != math.MaxInt64 {
+		end = start + sort.Search(it.series.Len()-start, func(i int) bool {
+			return it.series.Timestamps[start+i] > maxt
+		})
+	}
+	if end == start {
+		it.batch = storage.SampleBatch{}
+		return false
+	}
+	if maxSamples > 0 {
+		end = min(end, start+maxSamples)
+	}
+	batch := storage.SampleBatch{
+		Timestamps: it.series.Timestamps[start:end], Values: it.series.Values[start:end],
+	}
+	if len(it.series.StartTimestamps) > 0 {
+		batch.StartTimestamps = it.series.StartTimestamps[start:end]
+	}
+	count := end - start
+	staleNormalized := false
+	for i := range it.series.Kinds[start:end] {
+		switch kind := it.series.Kinds[start+i]; kind {
+		case SampleStale:
+			// Direct block construction predates the stricter batch stale check.
+			// Preserve scalar At's canonical stale marker in that case.
+			if !staleNormalized {
+				staleNormalized = true
+				batch.Values = slices.Clone(batch.Values)
+				for j, kind := range it.series.Kinds[start:end] {
+					if kind == SampleStale {
+						batch.Values[j] = math.Float64frombits(value.StaleNaN)
+					}
+				}
+			}
+		case SampleHistogram, SampleFloatHistogram:
+			h, fh, err := it.series.HistogramAt(start + i)
+			if err != nil {
+				it.err = err
+				it.batch = storage.SampleBatch{}
+				it.pos = it.series.Len()
+				return false
+			}
+			if h != nil {
+				if batch.Histograms == nil {
+					batch.Histograms = make([]*histogram.Histogram, count)
+				}
+				batch.Histograms[i] = h
+			} else if fh != nil {
+				if batch.FloatHistograms == nil {
+					batch.FloatHistograms = make([]*histogram.FloatHistogram, count)
+				}
+				batch.FloatHistograms[i] = fh
+			}
+		case SampleFloat:
+		default:
+			it.err = fmt.Errorf("columnar: invalid sample kind %d", kind)
+			it.batch = storage.SampleBatch{}
+			it.pos = it.series.Len()
+			return false
+		}
+	}
+	it.batch = batch
+	it.pos = end - 1
+	if it.reads != nil {
+		it.reads.sampleBatches.Inc()
+	}
+	return true
+}
+
+func (it *sampleIterator) Batch() storage.SampleBatch { return it.batch }
 
 func (it *sampleIterator) Next() chunkenc.ValueType {
 	if it.pos+1 >= it.series.Len() {
@@ -381,7 +473,7 @@ func (it *sampleIterator) AtST() int64 {
 	return it.series.StartTimestamps[it.pos]
 }
 
-func (*sampleIterator) Err() error { return nil }
+func (it *sampleIterator) Err() error { return it.err }
 
 // chunkQuerier adapts a sample querier to a chunk querier.
 type chunkQuerier struct {
@@ -539,6 +631,8 @@ var (
 	_ storage.SeriesSet                 = (*seriesSet)(nil)
 	_ storage.Series                    = (*series)(nil)
 	_ chunkenc.Iterator                 = (*sampleIterator)(nil)
+	_ storage.BatchIterator             = (*sampleIterator)(nil)
+	_ storage.RangeBatchIterator        = (*sampleIterator)(nil)
 	_ storage.ChunkSeriesSet            = chunkSeriesSet{}
 	_ storage.ChunkSeries               = chunkSeries{}
 	_ chunks.Iterator                   = (*chunkIterator)(nil)

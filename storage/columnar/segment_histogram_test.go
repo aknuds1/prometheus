@@ -125,6 +125,28 @@ func TestTypedHistogramSegmentExactRoundTrips(t *testing.T) {
 	}
 }
 
+func TestHistogramGaugeToCounterTransitionHints(t *testing.T) {
+	s, err := NewStorage(t.TempDir(), StorageOptions{FlushSamples: 100, DisableNativeMetadata: true, DisableWAL: true})
+	require.NoError(t, err)
+	defer s.Close()
+	ls := labels.FromStrings(labels.MetricName, "gauge_transition")
+	app := s.Appender(t.Context())
+	_, err = app.AppendHistogram(0, ls, 100, &modelhistogram.Histogram{Count: 4, Sum: 4, CounterResetHint: modelhistogram.GaugeType}, nil)
+	require.NoError(t, err)
+	_, err = app.AppendHistogram(0, ls, 200, &modelhistogram.Histogram{Count: 5, Sum: 5}, nil)
+	require.NoError(t, err)
+	require.NoError(t, app.Commit())
+	series, err := s.SelectSeries(t.Context(), 0, 200, nil, 0)
+	require.NoError(t, err)
+	require.Len(t, series, 1)
+	first, _, err := series[0].HistogramAt(0)
+	require.NoError(t, err)
+	second, _, err := series[0].HistogramAt(1)
+	require.NoError(t, err)
+	require.Equal(t, modelhistogram.GaugeType, first.CounterResetHint)
+	require.Equal(t, modelhistogram.UnknownCounterReset, second.CounterResetHint)
+}
+
 func TestTypedHistogramRejectsNegativeBucketCount(t *testing.T) {
 	hp := prompb.Histogram{Count: &prompb.Histogram_CountInt{CountInt: 1}, PositiveSpans: []prompb.BucketSpan{{Length: 1}}, PositiveDeltas: []int64{1}}
 	payload := typedHistogramPayload(t, hp)

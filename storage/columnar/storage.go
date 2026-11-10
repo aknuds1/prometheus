@@ -488,7 +488,9 @@ func withInferredResetHint(prev sampleHintState, h *histogram.Histogram, fh *his
 	case hint == histogram.GaugeType:
 		return h, fh
 	case prev.gauge:
-		target = histogram.GaugeType
+		// TSDB starts a new chunk at the gauge-to-counter transition. Its first
+		// non-gauge sample is conservatively unknown, not still a gauge.
+		target = histogram.UnknownCounterReset
 	case prev.first, prev.reset, hint == histogram.CounterReset:
 		target = histogram.UnknownCounterReset
 	default:

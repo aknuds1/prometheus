@@ -24,6 +24,7 @@ type ReadStats struct {
 	MetadataPayloadOpens    uint64
 	RowGroupsRead           uint64
 	SampleRowsDecoded       uint64
+	SampleBatchesRead       uint64
 	LabelRowsVisited        uint64
 	MetadataIndexCandidates uint64
 	MetadataIndexFallbacks  uint64
@@ -35,6 +36,7 @@ type readStats struct {
 	metadata           atomic.Uint64
 	rowGroups          atomic.Uint64
 	sampleRows         atomic.Uint64
+	sampleBatches      atomic.Uint64
 	labelRows          atomic.Uint64
 	metadataCandidates atomic.Uint64
 	metadataFallbacks  atomic.Uint64
@@ -47,6 +49,7 @@ func (s *Storage) ReadStats() ReadStats {
 		MetadataPayloadOpens:    s.reads.metadata.Load(),
 		RowGroupsRead:           s.reads.rowGroups.Load(),
 		SampleRowsDecoded:       s.reads.sampleRows.Load(),
+		SampleBatchesRead:       s.reads.sampleBatches.Load(),
 		LabelRowsVisited:        s.reads.labelRows.Load(),
 		MetadataIndexCandidates: s.reads.metadataCandidates.Load(),
 		MetadataIndexFallbacks:  s.reads.metadataFallbacks.Load(),
@@ -61,6 +64,7 @@ func (r *readStats) reset() {
 	r.metadata.Store(0)
 	r.rowGroups.Store(0)
 	r.sampleRows.Store(0)
+	r.sampleBatches.Store(0)
 	r.labelRows.Store(0)
 	r.metadataCandidates.Store(0)
 	r.metadataFallbacks.Store(0)

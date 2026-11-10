@@ -3685,6 +3685,10 @@ func (ev *evaluator) matrixIterSlice(
 		return floats, histograms, startTimestamps
 	}
 
+	if it.rangeBatch != nil {
+		return ev.matrixRangeBatchSlice(it, mintFloats, mintHistograms, maxt, floats, histograms, startTimestamps, readStep)
+	}
+
 	soughtValueType := it.seek(mintFloats, mintHistograms, maxt)
 	if soughtValueType == chunkenc.ValNone {
 		if it.Err() != nil {
@@ -3800,6 +3804,79 @@ loop:
 
 			if startTimestamps != nil {
 				startTimestamps.Floats = append(startTimestamps.Floats, it.AtST())
+			}
+		}
+	}
+	it.checkContext()
+	ev.samplesStats.UpdatePeak(ev.currentSamples)
+	return floats, histograms, startTimestamps
+}
+
+// matrixRangeBatchSlice consumes timestamp-bounded typed arrays for a single
+// series. No rate/aggregation semantics move here: this is only the same point
+// projection and accounting performed by the scalar matrix iterator.
+func (ev *evaluator) matrixRangeBatchSlice(
+	it *matrixIterator, mintFloats, mintHistograms, maxt int64,
+	floats []FPoint, histograms []HPoint, startTimestamps *StartTimestamps, readStep int,
+) ([]FPoint, []HPoint, *StartTimestamps) {
+	for {
+		it.checkContext()
+		if !it.rangeBatch.NextBatchUntil(256, maxt) {
+			if err := it.rangeBatch.Err(); err != nil {
+				ev.error(err)
+			}
+			break
+		}
+		batch := it.rangeBatch.Batch()
+		for i := range batch.Len() {
+			t := batch.Timestamps[i]
+			switch batch.ValueType(i) {
+			case chunkenc.ValFloat:
+				f := batch.Values[i]
+				if value.IsStaleNaN(f) || t <= mintFloats {
+					continue
+				}
+				ev.consumeMatrixSamples(1, readStep)
+				ev.currentSamples++
+				if ev.currentSamples > ev.maxSamples {
+					ev.error(ErrTooManySamples(env))
+				}
+				if floats == nil {
+					floats = getFPointSlice(16)
+				}
+				floats = append(floats, FPoint{T: t, F: f})
+				if startTimestamps != nil {
+					startTimestamps.Floats = append(startTimestamps.Floats, batch.StartTimestamp(i))
+				}
+			case chunkenc.ValHistogram, chunkenc.ValFloatHistogram:
+				if t <= mintHistograms {
+					continue
+				}
+				var fh *histogram.FloatHistogram
+				if batch.ValueType(i) == chunkenc.ValHistogram {
+					fh = batch.Histograms[i].ToFloat(nil)
+				} else {
+					fh = batch.FloatHistograms[i]
+				}
+				if value.IsStaleNaN(fh.Sum) {
+					continue
+				}
+				point := HPoint{T: t, H: fh}
+				pointSize := point.size()
+				ev.consumeMatrixSamples(int64(pointSize), readStep)
+				ev.currentSamples += pointSize
+				if ev.currentSamples > ev.maxSamples {
+					ev.error(ErrTooManySamples(env))
+				}
+				if histograms == nil {
+					histograms = getMatrixSelectorHPoints()
+				}
+				histograms = append(histograms, point)
+				if startTimestamps != nil {
+					startTimestamps.Histograms = append(startTimestamps.Histograms, batch.StartTimestamp(i))
+				}
+			default:
+				ev.errorf("unsupported batch sample type")
 			}
 		}
 	}
