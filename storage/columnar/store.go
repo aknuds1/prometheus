@@ -231,6 +231,19 @@ func openBlock(dir string, suppliedCatalog *blockCatalog) (*Block, error) {
 // Dir returns the block directory.
 func (b *Block) Dir() string { return b.dir }
 
+// BlockMetas returns copies of the currently published block manifests. It is
+// metadata for experimental inspection, not a TSDB lifecycle/compaction API.
+func (s *Storage) BlockMetas() []Meta {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	out := make([]Meta, len(s.blocks))
+	for i, block := range s.blocks {
+		out[i] = block.meta
+		out[i].Replaces = slices.Clone(block.meta.Replaces)
+	}
+	return out
+}
+
 // Meta returns the block manifest.
 func (b *Block) Meta() Meta { return b.meta }
 

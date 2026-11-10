@@ -209,11 +209,13 @@ metadata ingestion path rather than creating Resource ownership for a plaintext
 scrape by assumption. Restart/format migration, retention and lifecycle coverage
 remain explicitly experimental.
 
-When the prototype is enabled, normal Prometheus queries, federation, UI
-queries and rule evaluation use columnar storage directly. TSDB remains the
-primary ingestion store. Set `--web.disable-columnar-query` to keep those reads
-on TSDB for comparison. The Arrow/PromQL/metadata endpoint at
-`--web.columnar-address` remains columnar-specific in either mode.
+When the prototype is enabled, columnar storage is the only ingested and queried
+backend, including rules, federation and UI reads. TSDB is not started in this
+mode. The Arrow/PromQL/metadata endpoint at `--web.columnar-address` uses the same
+store, not a side-channel duplicate. Ordinary administrative operations specific
+to TSDB are limited: block manifests and basic series/time statistics are exposed
+as available, while arbitrary range delete and snapshot are unsupported. WAL,
+format migration, compaction and retention are experimental and synchronous.
 
 This exists to measure two questions with numbers rather than assertions: whether
 an Arrow-native ingestion path is cheaper than the row-oriented one, and whether

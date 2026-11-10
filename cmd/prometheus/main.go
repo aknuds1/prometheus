@@ -214,7 +214,6 @@ type flagConfig struct {
 
 	enableColumnarPrototype bool
 	columnarAddress         string
-	disableColumnarQuery    bool
 
 	maxprocsEnable          bool
 	memlimitEnable          bool
@@ -509,8 +508,6 @@ func main() {
 
 	serverOnlyFlag(a, "web.columnar-address", "Address on which the experimental columnar prototype serves its Arrow endpoint (--enable-feature=columnar-prototype).").
 		Default("localhost:9091").StringVar(&cfg.columnarAddress)
-	serverOnlyFlag(a, "web.disable-columnar-query", "Keep standard Prometheus queries and rule evaluation on TSDB when the columnar prototype is enabled.").
-		Default("false").BoolVar(&cfg.disableColumnarQuery)
 
 	a.Flag("web.enable-otap-receiver", fmt.Sprintf("Enable the experimental gRPC endpoint accepting OTAP write requests, listening on the address configured by otap.listen_address (default %q). OTAP support is experimental: the wire format is a draft, and the receiver accepts metrics only, without TLS or authentication.", config.DefaultOTAPConfig.ListenAddress)).
 		Default("false").BoolVar(&cfg.web.EnableOTAPReceiver)
@@ -1009,9 +1006,9 @@ func main() {
 
 	var columnarStorage *columnar.Storage
 	if cfg.enableColumnarPrototype {
-		// Open the secondary before the scrape/rule appenders are constructed.
+		// Open the sole prototype backend before the scrape/rule appenders are constructed.
 		// Their fanout is intentionally fixed at construction; attaching late
-		// would leave ordinary scrapes out of the prototype entirely.
+		// so late attachment would bypass real ingestion entirely.
 		columnarDir := filepath.Join(localStoragePath, "columnar")
 		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{})
 		if err != nil {
@@ -1019,14 +1016,13 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	secondaries := []storage.Storage{remoteStorage}
 	if columnarStorage != nil {
-		secondaries = append(secondaries, columnarStorage)
+		localStorage.Set(columnarStorage, 0)
 	}
-	fanoutStorage = storage.NewFanout(logger, localStorage, secondaries...)
-	queryStorage := selectQueryStorage(fanoutStorage, columnarStorage, cfg.disableColumnarQuery)
-	if columnarStorage != nil && !cfg.disableColumnarQuery {
-		logger.Warn("Standard Prometheus reads and rule evaluation use the experimental columnar store; TSDB remains the primary write store. Use --web.disable-columnar-query to read TSDB instead")
+	fanoutStorage = storage.NewFanout(logger, localStorage, remoteStorage)
+	queryStorage := selectQueryStorage(fanoutStorage, columnarStorage)
+	if columnarStorage != nil {
+		logger.Warn("Experimental columnar-only ingestion, WAL and reads enabled; TSDB is not started")
 	}
 
 	var (
@@ -1157,7 +1153,7 @@ func main() {
 	cfg.web.TSDBMaxBytes = cfg.tsdb.MaxBytes
 	cfg.web.TSDBMaxPercentage = cfg.tsdb.MaxPercentage
 	cfg.web.TSDBDir = localStoragePath
-	cfg.web.LocalStorage = localStorage
+	cfg.web.LocalStorage = localStorage.localStorage()
 	cfg.web.Storage = fanoutStorage
 	cfg.web.QueryStorage = queryStorage
 	cfg.web.ExemplarStorage = localStorage
@@ -1439,6 +1435,11 @@ func main() {
 		)
 	}
 
+	if cfg.enableColumnarPrototype {
+		// There is no TSDB open operation in prototype mode. Publish its equivalent
+		// backend-open/readiness signal instead of waiting forever.
+		close(dbOpen)
+	}
 	var g run.Group
 	{
 		// Termination handler.
@@ -1664,8 +1665,8 @@ func main() {
 			},
 		)
 	}
-	if !agentMode {
-		// TSDB.
+	if !agentMode && !cfg.enableColumnarPrototype {
+		// Ordinary Prometheus uses TSDB; columnar-only mode owns storage itself.
 		opts := cfg.tsdb.ToTSDBOptions()
 		cancel := make(chan struct{})
 		g.Add(
@@ -1888,8 +1889,8 @@ func main() {
 
 // selectQueryStorage selects the direct prototype store unless explicitly
 // disabled or absent. It never changes the primary ingestion fanout.
-func selectQueryStorage(primary storage.Storage, candidate *columnar.Storage, disabled bool) storage.Storage {
-	if candidate != nil && !disabled {
+func selectQueryStorage(primary storage.Storage, candidate *columnar.Storage) storage.Storage {
+	if candidate != nil {
 		return candidate
 	}
 	return primary
@@ -2171,6 +2172,15 @@ func (s *readyStorage) getStats() *tsdb.DBStats {
 	return x
 }
 
+// localStorage supplies a truthful admin adapter when the delegate is the
+// columnar prototype. Ordinary TSDB and agent modes retain readyStorage.
+func (s *readyStorage) localStorage() web.LocalStorage {
+	if delegate, ok := s.get().(*columnar.Storage); ok {
+		return &columnarLocalStorage{Storage: delegate}
+	}
+	return s
+}
+
 // StartTime implements the Storage interface.
 func (s *readyStorage) StartTime() (int64, error) {
 	if x := s.get(); x != nil {
@@ -2187,7 +2197,7 @@ func (s *readyStorage) StartTime() (int64, error) {
 		case *agent.DB:
 			return db.StartTime()
 		default:
-			panic(fmt.Sprintf("unknown storage type %T", db))
+			return x.StartTime()
 		}
 	}
 
@@ -2227,7 +2237,7 @@ func (s *readyStorage) ExemplarQuerier(ctx context.Context) (storage.ExemplarQue
 		case *agent.DB:
 			return nil, agent.ErrUnsupported
 		default:
-			panic(fmt.Sprintf("unknown storage type %T", db))
+			return nil, agent.ErrUnsupported
 		}
 	}
 	return nil, tsdb.ErrNotReady

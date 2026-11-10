@@ -70,24 +70,52 @@ func TestSelectQueryStorage(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		candidate *columnar.Storage
-		disabled  bool
 		expected  storage.Storage
 	}{
 		{name: "prototype disabled", expected: primary},
 		{name: "direct columnar", candidate: candidate, expected: candidate},
-		{name: "explicit TSDB opt-out", candidate: candidate, disabled: true, expected: primary},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			selected := selectQueryStorage(primary, tc.candidate, tc.disabled)
+			selected := selectQueryStorage(primary, tc.candidate)
 			require.Equal(t, tc.expected, selected)
 		})
 	}
-	q, err := selectQueryStorage(primary, candidate, false).Querier(0, 1000)
+	q, err := selectQueryStorage(primary, candidate).Querier(0, 1000)
 	require.NoError(t, err)
 	defer q.Close()
 	names, _, err := q.LabelNames(t.Context(), nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{labels.MetricName}, names)
+}
+
+func TestColumnarLocalStorageAdminSemantics(t *testing.T) {
+	s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{DisableWAL: true})
+	require.NoError(t, err)
+	defer s.Close()
+	ls := labels.FromStrings(labels.MetricName, "columnar_only")
+	require.NoError(t, s.AppendBatch(t.Context(), columnar.Batch{Series: []columnar.BatchSeries{{
+		Labels: ls, Timestamps: []int64{100, 200}, Kinds: []columnar.SampleKind{columnar.SampleFloat, columnar.SampleFloat}, Values: []float64{1, 2},
+	}}}))
+	require.NoError(t, s.Flush())
+	for _, meta := range s.BlockMetas() {
+		t.Logf("published manifest: %+v", meta)
+	}
+	adapter := columnarLocalStorage{Storage: s}
+	stats, err := adapter.Stats(labels.MetricName, 0)
+	require.NoError(t, err)
+	t.Logf("columnar stats: %+v", stats)
+	require.Equal(t, uint64(1), stats.NumSeries)
+	require.Equal(t, int64(100), stats.MinTime)
+	require.Equal(t, int64(201), stats.MaxTime)
+	metas, err := adapter.BlockMetas()
+	require.NoError(t, err)
+	require.Len(t, metas, 1)
+	require.Equal(t, uint64(2), metas[0].Stats.NumSamples)
+	require.ErrorIs(t, adapter.Delete(t.Context(), 0, 100), errColumnarAdminUnsupported)
+	require.ErrorIs(t, adapter.Snapshot(t.TempDir(), true), errColumnarAdminUnsupported)
+	_, err = adapter.WALReplayStatus()
+	require.ErrorIs(t, err, errColumnarAdminUnsupported)
+	require.NoError(t, adapter.CleanTombstones())
 }
 
 func TestReadyStorageCostSamplingQueryable(t *testing.T) {
