@@ -83,7 +83,8 @@ func (s *metadataStore) clone() (*metadataStore, error) {
 	clone := newMetadataStore(s.versionCap)
 	clone.indexedResourceAttrs = maps.Clone(s.indexedResourceAttrs)
 	clone.reads = s.reads
-	clone.canonicalVersions = maps.Clone(s.canonicalVersions)
+	// canonicalVersions is a safe append-only cache: stale entries are harmless.
+	// Starting empty avoids cloning the largest map; entries repopulate on demand.
 	clone.byOwner = maps.Clone(s.byOwner)
 	for owner, history := range s.byOwner {
 		// A copy-on-write history may already have been published. Its marker

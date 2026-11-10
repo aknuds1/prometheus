@@ -38,35 +38,43 @@ func (r metadataRelations) pendingSince(previous *metadataRelations) metadataRel
 	if previous != nil {
 		previousRelations = *previous
 	}
+	// Look up published state directly by key. Both owner slices are sorted by
+	// (kind, ID), so a merge-style walk avoids building full ID-keyed tables.
 	oldOwnersByKey, oldContents := previousRelations.lookupTables()
 	_, newContents := r.lookupTables()
-	oldOwnerIDs := previousRelations.ownersByID()
-	newOwnerIDs := r.ownersByID()
 	oldVersions := previousRelations.versionsByOwner()
-	newVersions := r.versionsByOwner()
 
 	selectedOwners := map[uint64]metadataOwnerRow{}
 	var selectedVersions []metadataVersionRow
-	var selectedMemberships []metadataMembershipRow
 	for _, newOwner := range r.owners {
 		oldOwner, existed := oldOwnersByKey[newOwner.key]
-		var replacement bool
-		var versions []metadataVersionRow
 		if !existed {
-			versions = newVersions[newOwner.id]
-		} else {
-			old := oldVersions[oldOwner.id]
-			latest := newVersions[newOwner.id]
-			prefix := metadataVersionPrefix(old, latest, oldContents, newContents)
-			switch {
-			case prefix && len(old) == len(latest) && oldOwner.truncated == newOwner.truncated:
-				continue
-			case prefix && oldOwner.truncated == newOwner.truncated:
-				versions = latest[len(old):]
-			default:
-				replacement = true
-				versions = latest
+			selectedOwners[newOwner.id] = newOwner
+			for _, version := range r.versions {
+				if version.ownerID == newOwner.id {
+					selectedVersions = append(selectedVersions, version)
+				}
 			}
+			continue
+		}
+		old := oldVersions[oldOwner.id]
+		var latest []metadataVersionRow
+		for _, version := range r.versions {
+			if version.ownerID == newOwner.id {
+				latest = append(latest, version)
+			}
+		}
+		prefix := metadataVersionPrefix(old, latest, oldContents, newContents)
+		var versions []metadataVersionRow
+		var replacement bool
+		switch {
+		case prefix && len(old) == len(latest) && oldOwner.truncated == newOwner.truncated:
+			continue
+		case prefix && oldOwner.truncated == newOwner.truncated:
+			versions = latest[len(old):]
+		default:
+			replacement = true
+			versions = latest
 		}
 		if len(versions) == 0 && !replacement {
 			continue
@@ -76,10 +84,15 @@ func (r metadataRelations) pendingSince(previous *metadataRelations) metadataRel
 		selectedVersions = append(selectedVersions, versions...)
 	}
 
-	oldMemberships := previousRelations.membershipsBySeriesKind(oldOwnerIDs)
-	newMemberships := r.membershipsBySeriesKind(newOwnerIDs)
-	for group, latest := range newMemberships {
-		old := oldMemberships[group]
+	// Compare memberships directly by (series, kind) without grouping all rows.
+	// Build owner-by-ID maps exactly once; they are reused across all comparisons.
+	oldOwnerIDs := previousRelations.ownersByID()
+	newOwnerIDs := r.ownersByID()
+	oldMembershipsByGroup := previousRelations.membershipsBySeriesKind(oldOwnerIDs)
+	newMembershipsByGroup := r.membershipsBySeriesKind(newOwnerIDs)
+	var selectedMemberships []metadataMembershipRow
+	for group, latest := range newMembershipsByGroup {
+		old := oldMembershipsByGroup[group]
 		prefix := metadataMembershipPrefix(old, latest, oldOwnerIDs, newOwnerIDs)
 		var memberships []metadataMembershipRow
 		var replacement bool
@@ -195,7 +208,21 @@ func metadataVersionPrefix(old, latest []metadataVersionRow, oldContents, newCon
 		return false
 	}
 	for i := range old {
-		if old[i].effectiveFrom != latest[i].effectiveFrom || oldContents[old[i].contentID].Canonical() != newContents[latest[i].contentID].Canonical() {
+		if old[i].effectiveFrom != latest[i].effectiveFrom || !contentAttributesEqual(oldContents[old[i].contentID], newContents[latest[i].contentID]) {
+			return false
+		}
+	}
+	return true
+}
+
+// contentAttributesEqual reports content equality without JSON canonicalization.
+// It is equivalent to a.Canonical() == b.Canonical() but avoids marshaling.
+func contentAttributesEqual(a, b Content) bool {
+	if len(a.Attributes) != len(b.Attributes) {
+		return false
+	}
+	for name, value := range a.Attributes {
+		if bValue, ok := b.Attributes[name]; !ok || bValue != value {
 			return false
 		}
 	}

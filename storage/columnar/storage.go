@@ -406,6 +406,11 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 	return refFor(ls), nil
 }
 
+// headSeriesPool reuses per-transaction headSeries objects. Labels are always
+// overwritten before use, and sample slices are either fresh or pooled by
+// appendTypedSeries.
+var headSeriesPool = sync.Pool{New: func() any { return new(headSeries) }}
+
 // seriesFor returns the transaction's series.
 func (a *appender) seriesFor(ls labels.Labels) (*headSeries, error) {
 	hash := stableSeriesHash(ls)
@@ -415,7 +420,8 @@ func (a *appender) seriesFor(ls labels.Labels) (*headSeries, error) {
 		}
 		return hs, nil
 	}
-	hs := &headSeries{labels: ls}
+	hs := headSeriesPool.Get().(*headSeries)
+	*hs = headSeries{labels: ls}
 	a.txs[hash] = hs
 	a.order = append(a.order, hash)
 	return hs, nil
@@ -433,13 +439,18 @@ func (a *appender) Commit() error {
 	for _, hash := range a.order {
 		tx := a.txs[hash]
 		if len(tx.ts) == 0 {
+			headSeriesPool.Put(tx)
 			continue
 		}
 		batch.Series = append(batch.Series, BatchSeries{
 			Labels: tx.labels, Timestamps: tx.ts, StartTimestamps: tx.st,
 			Kinds: tx.kind, Values: tx.v, Histograms: tx.hist,
 		})
+		// The batch captured the slice headers and labels by value; the struct
+		// itself can be recycled for the next transaction.
+		headSeriesPool.Put(tx)
 	}
+	a.txs, a.order, a.meta = nil, nil, nil
 	return a.s.AppendBatch(context.Background(), batch)
 }
 
@@ -449,6 +460,12 @@ func (a *appender) Rollback() error {
 		return errors.New("columnar: appender used after Commit or Rollback")
 	}
 	a.done = true
+	for _, hash := range a.order {
+		if tx, ok := a.txs[hash]; ok {
+			*tx = headSeries{}
+			headSeriesPool.Put(tx)
+		}
+	}
 	a.txs, a.order, a.meta = nil, nil, nil
 	return nil
 }

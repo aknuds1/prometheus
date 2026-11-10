@@ -20,6 +20,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -71,6 +72,10 @@ func PageSchema() *arrow.Schema {
 // writePageFile writes one record and therefore one Parquet row group per
 // cohort. No labels are repeated in the sample payload; the block catalog owns
 // the series dictionary and all row/cohort offsets.
+// pageBuilderPool reuses Arrow RecordBuilders across cohorts and flushes.
+// NewRecordBatch resets the builder, so a returned builder is clean for reuse.
+var pageBuilderPool = sync.Pool{New: func() any { return array.NewRecordBuilder(memory.NewGoAllocator(), PageSchema()) }}
+
 func writePageFile(path string, series []Series, catalog blockCatalog, opts WriteOptions) (err error) {
 	f, err := os.Create(path)
 	if err != nil {
@@ -129,9 +134,12 @@ func writePageFile(path string, series []Series, catalog blockCatalog, opts Writ
 	return nil
 }
 
-func buildCohortRecord(mem memory.Allocator, cohort blockCohortEntry, members []Series) (arrow.RecordBatch, error) {
-	builder := array.NewRecordBuilder(mem, PageSchema())
-	defer builder.Release()
+func buildCohortRecord(_ memory.Allocator, cohort blockCohortEntry, members []Series) (arrow.RecordBatch, error) {
+	builder := pageBuilderPool.Get().(*array.RecordBuilder)
+	defer func() {
+		// NewRecordBatch already reset the builder; just return it to the pool.
+		pageBuilderPool.Put(builder)
+	}()
 	cohorts := builder.Field(pageCohortColumn).(*array.Uint64Builder)
 	segmentIndexes := builder.Field(pageSegmentColumn).(*array.Uint32Builder)
 	counts := builder.Field(pageCountColumn).(*array.Uint64Builder)

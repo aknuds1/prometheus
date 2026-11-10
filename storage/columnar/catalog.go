@@ -14,10 +14,11 @@
 package columnar
 
 import (
-	"bytes"
-	"encoding/gob"
+	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -48,36 +49,6 @@ type blockSeriesEntry struct {
 	ID       uint64
 	Labels   labels.Labels
 	Segments []blockSegmentRef
-}
-
-// GobEncode uses an explicit slice because the default labels.Labels
-// representation deliberately hides its fields.
-func (e blockSeriesEntry) GobEncode() ([]byte, error) {
-	var pairs []labels.Label
-	e.Labels.Range(func(l labels.Label) { pairs = append(pairs, l) })
-	wire := struct {
-		ID       uint64
-		Labels   []labels.Label
-		Segments []blockSegmentRef
-	}{e.ID, pairs, e.Segments}
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(wire); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func (e *blockSeriesEntry) GobDecode(data []byte) error {
-	var wire struct {
-		ID       uint64
-		Labels   []labels.Label
-		Segments []blockSegmentRef
-	}
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&wire); err != nil {
-		return err
-	}
-	e.ID, e.Labels, e.Segments = wire.ID, labels.New(wire.Labels...), wire.Segments
-	return nil
 }
 
 type blockPosting struct {
@@ -272,16 +243,131 @@ func sortSearchSeries(entries []blockSeriesEntry, id uint64) int {
 	return i
 }
 
-func writeBlockCatalog(dir string, catalog blockCatalog) error {
+// Catalog binary format (all integers little-endian):
+//
+// magic: uint32 = catalogBinaryMagic
+// version: uint32
+// numSeries: uint32
+// per series: id uint64, numLabels uint32, per label: nameLen uint32, name,
+//
+//	valueLen uint32, value, numSegments uint32,
+//	per segment: rowGroup int32, row int32, offset int32, minTime int64, maxTime int64
+//
+// numPostings: uint32
+// per posting: nameLen uint32, name, valueLen uint32, value, numIDs uint32, ids...
+// numCohorts: uint32
+// per cohort: id uint64, rowGroup int32, numSegments int32, numSeries int32,
+//
+//	numSeriesIDs uint32, seriesIDs..., minTime int64, maxTime int64
+const catalogBinaryMagic = uint32(0x43424331) // "CBC1"
+
+func writeBlockCatalog(dir string, catalog blockCatalog) (err error) {
 	f, err := os.Create(filepath.Join(dir, catalogFileName))
 	if err != nil {
 		return err
 	}
-	if err := gob.NewEncoder(f).Encode(catalog); err != nil {
-		f.Close()
-		return err
+	bw := bufio.NewWriterSize(f, 64*1024)
+	w := &catalogWriter{w: bw}
+	defer func() {
+		if flushErr := bw.Flush(); err == nil {
+			err = flushErr
+		}
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}()
+	w.u32(catalogBinaryMagic)
+	w.u32(uint32(catalog.Version))
+	w.u32(uint32(len(catalog.Series)))
+	for _, entry := range catalog.Series {
+		w.u64(entry.ID)
+		// Labels are stored as a raw count of label pairs followed by
+		// (name, value) string pairs; order is already sorted.
+		var pairs []labels.Label
+		entry.Labels.Range(func(l labels.Label) { pairs = append(pairs, l) })
+		w.u32(uint32(len(pairs)))
+		for _, l := range pairs {
+			w.str(l.Name)
+			w.str(l.Value)
+		}
+		w.u32(uint32(len(entry.Segments)))
+		for _, seg := range entry.Segments {
+			w.i32(seg.RowGroup)
+			w.i32(seg.Row)
+			w.i32(seg.Offset)
+			w.i64(seg.MinTime)
+			w.i64(seg.MaxTime)
+		}
 	}
-	return f.Close()
+	w.u32(uint32(len(catalog.Postings)))
+	for _, posting := range catalog.Postings {
+		w.str(posting.Name)
+		w.str(posting.Value)
+		w.u32(uint32(len(posting.IDs)))
+		for _, id := range posting.IDs {
+			w.u64(id)
+		}
+	}
+	w.u32(uint32(len(catalog.Cohorts)))
+	for _, cohort := range catalog.Cohorts {
+		w.u64(cohort.ID)
+		w.i32(cohort.RowGroup)
+		w.i32(cohort.NumSegments)
+		w.i32(cohort.NumSeries)
+		w.u32(uint32(len(cohort.SeriesIDs)))
+		for _, id := range cohort.SeriesIDs {
+			w.u64(id)
+		}
+		w.i64(cohort.MinTime)
+		w.i64(cohort.MaxTime)
+	}
+	return w.err
+}
+
+type catalogWriter struct {
+	w   io.Writer
+	err error
+	buf [8]byte
+}
+
+func (w *catalogWriter) u32(v uint32) {
+	if w.err != nil {
+		return
+	}
+	binary.LittleEndian.PutUint32(w.buf[:4], v)
+	_, w.err = w.w.Write(w.buf[:4])
+}
+
+func (w *catalogWriter) u64(v uint64) {
+	if w.err != nil {
+		return
+	}
+	binary.LittleEndian.PutUint64(w.buf[:8], v)
+	_, w.err = w.w.Write(w.buf[:8])
+}
+
+func (w *catalogWriter) i32(v int) {
+	if w.err != nil {
+		return
+	}
+	binary.LittleEndian.PutUint32(w.buf[:4], uint32(int32(v)))
+	_, w.err = w.w.Write(w.buf[:4])
+}
+
+func (w *catalogWriter) i64(v int64) {
+	if w.err != nil {
+		return
+	}
+	binary.LittleEndian.PutUint64(w.buf[:8], uint64(v))
+	_, w.err = w.w.Write(w.buf[:8])
+}
+
+func (w *catalogWriter) str(s string) {
+	w.u32(uint32(len(s)))
+	if w.err != nil || s == "" {
+		return
+	}
+	_, w.err = io.WriteString(w.w, s)
 }
 
 func readBlockCatalog(dir string, meta Meta) (blockCatalog, error) {
@@ -290,11 +376,134 @@ func readBlockCatalog(dir string, meta Meta) (blockCatalog, error) {
 		return blockCatalog{}, err
 	}
 	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return blockCatalog{}, err
+	}
+	if len(data) < 12 {
+		return blockCatalog{}, errors.New("short block catalog")
+	}
+	if binary.LittleEndian.Uint32(data[0:4]) != catalogBinaryMagic {
+		return blockCatalog{}, errors.New("invalid block catalog magic")
+	}
+	r := &catalogReader{data: data, pos: 4}
 	var catalog blockCatalog
-	if err := gob.NewDecoder(f).Decode(&catalog); err != nil {
-		return blockCatalog{}, fmt.Errorf("decoding block catalog: %w", err)
+	catalog.Version = int(r.u32())
+	numSeries := r.u32()
+	catalog.Series = make([]blockSeriesEntry, 0, numSeries)
+	for range numSeries {
+		var entry blockSeriesEntry
+		entry.ID = r.u64()
+		numLabels := r.u32()
+		pairs := make([]labels.Label, 0, numLabels)
+		for range numLabels {
+			name := r.str()
+			value := r.str()
+			pairs = append(pairs, labels.Label{Name: name, Value: value})
+		}
+		entry.Labels = labels.New(pairs...)
+		numSegments := r.u32()
+		entry.Segments = make([]blockSegmentRef, 0, numSegments)
+		for range numSegments {
+			var seg blockSegmentRef
+			seg.RowGroup = int(r.i32())
+			seg.Row = r.i32()
+			seg.Offset = r.i32()
+			seg.MinTime = r.i64()
+			seg.MaxTime = r.i64()
+			entry.Segments = append(entry.Segments, seg)
+		}
+		catalog.Series = append(catalog.Series, entry)
+	}
+	numPostings := r.u32()
+	catalog.Postings = make([]blockPosting, 0, numPostings)
+	for range numPostings {
+		var posting blockPosting
+		posting.Name = r.str()
+		posting.Value = r.str()
+		numIDs := r.u32()
+		posting.IDs = make([]uint64, 0, numIDs)
+		for range numIDs {
+			posting.IDs = append(posting.IDs, r.u64())
+		}
+		catalog.Postings = append(catalog.Postings, posting)
+	}
+	numCohorts := r.u32()
+	catalog.Cohorts = make([]blockCohortEntry, 0, numCohorts)
+	for range numCohorts {
+		var cohort blockCohortEntry
+		cohort.ID = r.u64()
+		cohort.RowGroup = int(r.i32())
+		cohort.NumSegments = r.i32()
+		cohort.NumSeries = r.i32()
+		numSeriesIDs := r.u32()
+		cohort.SeriesIDs = make([]uint64, 0, numSeriesIDs)
+		for range numSeriesIDs {
+			cohort.SeriesIDs = append(cohort.SeriesIDs, r.u64())
+		}
+		cohort.MinTime = r.i64()
+		cohort.MaxTime = r.i64()
+		catalog.Cohorts = append(catalog.Cohorts, cohort)
+	}
+	if r.err != nil {
+		return blockCatalog{}, r.err
+	}
+	if r.pos != len(data) {
+		return blockCatalog{}, errors.New("trailing bytes in block catalog")
 	}
 	return validateBlockCatalog(catalog, meta)
+}
+
+type catalogReader struct {
+	data []byte
+	pos  int
+	err  error
+}
+
+func (r *catalogReader) u32() uint32 {
+	if r.err != nil || r.pos+4 > len(r.data) {
+		if r.err == nil {
+			r.err = errors.New("short block catalog read")
+		}
+		return 0
+	}
+	v := binary.LittleEndian.Uint32(r.data[r.pos:])
+	r.pos += 4
+	return v
+}
+
+func (r *catalogReader) u64() uint64 {
+	if r.err != nil || r.pos+8 > len(r.data) {
+		if r.err == nil {
+			r.err = errors.New("short block catalog read")
+		}
+		return 0
+	}
+	v := binary.LittleEndian.Uint64(r.data[r.pos:])
+	r.pos += 8
+	return v
+}
+
+func (r *catalogReader) i32() int {
+	return int(int32(r.u32()))
+}
+
+func (r *catalogReader) i64() int64 {
+	return int64(r.u64())
+}
+
+func (r *catalogReader) str() string {
+	length := int(r.u32())
+	if r.err != nil {
+		return ""
+	}
+	if r.pos+length > len(r.data) {
+		r.err = errors.New("short block catalog string")
+		return ""
+	}
+	s := string(r.data[r.pos : r.pos+length])
+	r.pos += length
+	return s
 }
 
 func validateBlockCatalog(catalog blockCatalog, meta Meta) (blockCatalog, error) {
