@@ -56,6 +56,10 @@ type StorageOptions struct {
 	// for churn experiments and must not be used as a durable default.
 	MetadataVersionCap int
 
+	// EnableQueryTimings attributes query time to phases. It is a measurement
+	// switch, not a behaviour change, and is off by default.
+	EnableQueryTimings bool
+
 	// DisableWAL leaves unflushed batches without a segment log and creates no
 	// WAL directory. It is intended for explicit experiments, not safe defaults.
 	DisableWAL bool
@@ -152,8 +156,9 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 		bufferMin:    math.MaxInt64,
 		bufferMax:    math.MinInt64,
 		minValidTime: math.MinInt64,
-		reads:        &readStats{},
+		reads:        &readStats{timings: &queryTimings{}},
 	}
+	s.reads.timings.enabled.Store(opts.EnableQueryTimings)
 	if !opts.DisableNativeMetadata {
 		s.metadata = newMetadataStore(opts.MetadataVersionCap)
 		s.metadata.reads = s.reads

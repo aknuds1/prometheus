@@ -214,6 +214,7 @@ type flagConfig struct {
 
 	enableColumnarPrototype bool
 	columnarAddress         string
+	columnarQueryTimings    bool
 
 	maxprocsEnable          bool
 	memlimitEnable          bool
@@ -508,6 +509,8 @@ func main() {
 
 	serverOnlyFlag(a, "web.columnar-address", "Address on which the experimental columnar prototype serves its Arrow endpoint (--enable-feature=columnar-prototype).").
 		Default("localhost:9091").StringVar(&cfg.columnarAddress)
+	a.Flag("storage.columnar-query-timings", "Attribute columnar query time to phases for the cost model (--enable-feature=columnar-prototype). Measurement switch: adds clock reads to the query path and does not change behaviour.").
+		Hidden().Default("false").BoolVar(&cfg.columnarQueryTimings)
 
 	a.Flag("web.enable-otap-receiver", fmt.Sprintf("Enable the experimental gRPC endpoint accepting OTAP write requests, listening on the address configured by otap.listen_address (default %q). OTAP support is experimental: the wire format is a draft, and the receiver accepts metrics only, without TLS or authentication.", config.DefaultOTAPConfig.ListenAddress)).
 		Default("false").BoolVar(&cfg.web.EnableOTAPReceiver)
@@ -1010,7 +1013,7 @@ func main() {
 		// Their fanout is intentionally fixed at construction; attaching late
 		// so late attachment would bypass real ingestion entirely.
 		columnarDir := filepath.Join(localStoragePath, "columnar")
-		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{})
+		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{EnableQueryTimings: cfg.columnarQueryTimings})
 		if err != nil {
 			logger.Error("Unable to open the experimental columnar storage", "dir", columnarDir, "err", err)
 			os.Exit(1)
@@ -1370,6 +1373,7 @@ func main() {
 		mux.Handle("/resources", metadataHandler)
 		mux.Handle("/resources/series", metadataHandler)
 		mux.Handle("/resources/diff", metadataHandler)
+		mux.Handle("/debug/readstats", columnar.NewReadStatsHandler(columnarStorage))
 		mux.Handle("/arrow", columnar.NewArrowHandler(columnarStorage, logger.With("component", "columnar"), columnar.ArrowOptions{}))
 		mux.Handle("/query_range", columnar.NewQueryHandler(queryEngine, columnarStorage, logger.With("component", "columnar")))
 

@@ -73,6 +73,11 @@ func (b *Block) readSelectedSeries(ctx context.Context, selections []selectedBlo
 	}
 	sort.Slice(order, func(a, b int) bool { return items[order[a]].ref.Offset < items[order[b]].ref.Offset })
 
+	var timings *queryTimings
+	if b.reads != nil {
+		timings = b.reads.timings
+	}
+	readStart := timings.now()
 	workers := min(len(items), 8)
 	next := make(chan int)
 	errs := make(chan error, workers)
@@ -107,6 +112,8 @@ func (b *Block) readSelectedSeries(ctx context.Context, selections []selectedBlo
 		return nil, err
 	}
 
+	timings.add(phaseRead, readStart)
+	decodeStart := timings.now()
 	timestampsByCohort := make(map[int][]int64, 8)
 	for idx := range items {
 		item := &items[idx]
@@ -144,6 +151,7 @@ func (b *Block) readSelectedSeries(ctx context.Context, selections []selectedBlo
 		}
 		appendDecodedPage(&out[item.selection], page)
 	}
+	timings.add(phaseDecode, decodeStart)
 	for i := range out {
 		if err := out[i].Validate(); err != nil {
 			return nil, err

@@ -31,10 +31,21 @@ func (b *Block) Select(ctx context.Context, mint, maxt int64, matcherSets [][]*l
 		return nil, nil
 	}
 
+	var timings *queryTimings
+	if b.reads != nil {
+		timings = b.reads.timings
+	}
+	matchStart := timings.now()
 	ids, err := b.resolveMatcherSets(newIDScratch(len(b.catalog.SeriesIDs)), matcherSets)
+	timings.add(phaseMatch, matchStart)
 	if err != nil || len(ids) == 0 {
 		return nil, err
 	}
+	if b.reads != nil {
+		b.reads.seriesMatched.Add(uint64(len(ids)))
+	}
+	planStart := timings.now()
+	var available, planned int
 	selections := make([]selectedBlockSeries, 0, len(ids))
 	for _, id := range ids {
 		i := sortSearchSeries(b.catalog.Series, id)
@@ -48,14 +59,22 @@ func (b *Block) Select(ctx context.Context, mint, maxt int64, matcherSets [][]*l
 				segments = append(segments, ref)
 			}
 		}
+		available += len(entry.Segments)
+		planned += len(segments)
 		if len(segments) > 0 {
 			selections = append(selections, selectedBlockSeries{entry: entry, segments: segments})
 		}
+	}
+	if b.reads != nil {
+		b.reads.segmentsAvailable.Add(uint64(available))
+		b.reads.segmentsPlanned.Add(uint64(planned))
+		b.reads.segmentsOutsideWin.Add(uint64(available - planned))
 	}
 	if len(selections) == 0 {
 		return nil, nil
 	}
 
+	timings.add(phasePlan, planStart)
 	selected, err := b.readSelectedSeries(ctx, selections)
 	if err != nil {
 		return nil, err

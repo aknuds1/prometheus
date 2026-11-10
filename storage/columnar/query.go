@@ -56,6 +56,13 @@ func (s *Storage) Querier(mint, maxt int64) (storage.Querier, error) {
 		queriers = append(queriers, &blockQuerier{block: block, mint: mint, maxt: maxt})
 	}
 
+	// Recorded here because this is the one place that sees the whole plan for a
+	// query: matched series and segments per block are counted downstream.
+	if s.reads != nil {
+		s.reads.queries.Inc()
+		s.reads.blocksOverlapping.Add(uint64(len(queriers)))
+	}
+
 	var q storage.Querier
 	switch len(queriers) {
 	case 0:
@@ -176,6 +183,11 @@ func selectFromHeads(heads []*headSeries, mint, maxt int64, _ bool, hints *stora
 		}
 		selected = append(selected, series)
 	}
+	// Head matches are counted in the same place as block matches so the cost
+	// model attributes per-series work across both sources.
+	if reads != nil {
+		reads.seriesMatched.Add(uint64(len(selected)))
+	}
 	// Always sort inside a single source: merge queriers assume label order.
 	slices.SortFunc(selected, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
 	return newSeriesSet(selected, reads)
@@ -219,7 +231,13 @@ func (*blockQuerier) Close() error { return nil }
 
 func (q *blockQuerier) Select(ctx context.Context, _ bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
 	mint, maxt := relevantRange(q.mint, q.maxt, hints)
+	var timings *queryTimings
+	if q.block.reads != nil {
+		timings = q.block.reads.timings
+	}
+	selectStart := timings.now()
 	series, err := q.block.Select(ctx, mint, maxt, [][]*labels.Matcher{matchers}, 0)
+	timings.add(phaseSelectTotal, selectStart)
 	if err != nil {
 		return storage.ErrSeriesSet(err)
 	}
@@ -405,6 +423,18 @@ func (it *sampleIterator) NextBatch(maxSamples int) bool {
 
 // NextBatchUntil leaves future samples available for subsequent range steps.
 func (it *sampleIterator) NextBatchUntil(maxSamples int, maxt int64) bool {
+	var timings *queryTimings
+	var drainStart int64
+	if it.reads != nil {
+		timings = it.reads.timings
+		drainStart = timings.now()
+		defer func() {
+			timings.add(phaseDrain, drainStart)
+			if drainStart != 0 {
+				timings.drainCalls.Add(1)
+			}
+		}()
+	}
 	start := max(it.pos+1, 0)
 	if it.err != nil || start >= it.series.Len() {
 		it.batch = storage.SampleBatch{}
