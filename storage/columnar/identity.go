@@ -14,30 +14,13 @@
 package columnar
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
-
 	"github.com/prometheus/prometheus/model/labels"
 )
 
-// stableSeriesHash is deterministic across processes and restarts.
-//
-// It is not metadata-identity deduplication by an unchecked Bloom filter or
-// process-local ref. Complete labels are checked before any series/metadata
-// association is recorded. Encoded label strings preserve order and the
-// identity bearing reserved label, including __otel_resource__.
+// stableSeriesHash is the common, stable series key for the head, block catalog
+// and metadata memberships. Complete-label collision checks remain mandatory.
 func stableSeriesHash(ls labels.Labels) uint64 {
-	var raw []byte
-	lenBuf := make([]byte, 4)
-	ls.Range(func(l labels.Label) {
-		for _, value := range []string{l.Name, l.Value} {
-			binary.BigEndian.PutUint32(lenBuf, uint32(len(value)))
-			raw = append(raw, lenBuf...)
-			raw = append(raw, value...)
-		}
-	})
-	digest := sha256.Sum256(raw)
-	return binary.BigEndian.Uint64(digest[:8])
+	return labels.StableHash(ls)
 }
 
 // resourceLabel returns the exact label used in OTLP-derived metric series.
@@ -47,3 +30,43 @@ func resourceLabel(owner OwnerKey) labels.Label {
 
 // metadataSeriesKey is the series identity shared with storage.ResourceQuerier.
 func metadataSeriesKey(ls labels.Labels) uint64 { return labels.StableHash(ls) }
+
+// sharedSeriesLabels returns one immutable label allocation per stable identity.
+// The caller copies an arbitrary input once on first use; every later use checks
+// full labels before reusing the stored allocation. Calls hold Storage.mtx.
+func (s *Storage) sharedSeriesLabels(ls labels.Labels) (labels.Labels, error) {
+	identity := stableSeriesHash(ls)
+	if previous, exists := s.seriesLabels[identity]; exists {
+		if !labels.Equal(previous, ls) {
+			return labels.EmptyLabels(), ErrSeriesHashCollision
+		}
+		return previous, nil
+	}
+	owned := ls.Copy()
+	s.seriesLabels[identity] = owned
+	return owned, nil
+}
+
+// reuseBlockLabels replaces duplicate per-block label allocations with the
+// immutable process cache. It must run before publishing a newly opened block.
+func (s *Storage) reuseBlockLabels(block *Block) error {
+	for i, entry := range block.catalog.Series {
+		ls, err := s.sharedSeriesLabels(entry.Labels)
+		if err != nil {
+			return err
+		}
+		block.catalog.Series[i].Labels = ls
+	}
+	return nil
+}
+
+// rebuildSeriesLabels releases removed series after compaction/retention.
+func (s *Storage) rebuildSeriesLabels() error {
+	s.seriesLabels = map[uint64]labels.Labels{}
+	for _, block := range s.blocks {
+		if err := s.reuseBlockLabels(block); err != nil {
+			return err
+		}
+	}
+	return nil
+}

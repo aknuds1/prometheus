@@ -120,15 +120,29 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 		}
 	}
 
-	if previous := s.ownerIndex[owner]; previous != nil {
+	previous := s.ownerIndex[owner]
+	if s.copyOnWrite {
+		// Shared attribute/value maps are cloned before an owner mutation, for
+		// both conditions being removed and newly introduced conditions. This
+		// happens before old conditions are deleted from the shared maps.
+		toCopy := map[string]struct{}{}
 		for condition := range previous {
-			if _, retained := newConditions[condition]; retained {
-				continue
-			}
-			delete(s.attributeIndex[condition], owner)
-			if len(s.attributeIndex[condition]) == 0 {
-				delete(s.attributeIndex, condition)
-			}
+			toCopy[condition] = struct{}{}
+		}
+		for condition := range newConditions {
+			toCopy[condition] = struct{}{}
+		}
+		for condition := range toCopy {
+			s.attributeIndex[condition] = maps.Clone(s.attributeIndex[condition])
+		}
+	}
+	for condition := range previous {
+		if _, retained := newConditions[condition]; retained {
+			continue
+		}
+		delete(s.attributeIndex[condition], owner)
+		if len(s.attributeIndex[condition]) == 0 {
+			delete(s.attributeIndex, condition)
 		}
 	}
 	for condition, candidate := range newConditions {

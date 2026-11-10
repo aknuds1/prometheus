@@ -69,6 +69,16 @@ func TestBlockPostingsMatchers(t *testing.T) {
 	}
 }
 
+func TestStableSeriesHashSharesMetadataIdentity(t *testing.T) {
+	owner := ResourceOwner(map[string]string{"service.name": "hashing"})
+	for _, ls := range []labels.Labels{
+		labels.FromStrings(labels.MetricName, "named_metric"),
+		labels.FromStrings(labels.MetricName, "resource_metric", OTELResourceLabel, owner.Ref()),
+	} {
+		require.Equal(t, metadataSeriesKey(ls), stableSeriesHash(ls))
+	}
+}
+
 func TestStableSeriesIDSharedWithResourceMembership(t *testing.T) {
 	s, err := NewStorage(t.TempDir(), StorageOptions{DisableWAL: true})
 	require.NoError(t, err)

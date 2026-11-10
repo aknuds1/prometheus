@@ -41,9 +41,10 @@ var (
 
 // metadataOwnerHistory is the mutable head history for one owner.
 type metadataOwnerHistory struct {
-	versions  []Version
-	truncated bool
-	index     map[string]struct{} // inverted attribute index: name/value -> membership lookup
+	versions    []Version
+	truncated   bool
+	index       map[string]struct{} // Inverted attribute index: name/value -> membership lookup.
+	copyTouched bool
 }
 
 // seriesMembershipRow is one owner and its series membership. No attributes are
@@ -70,6 +71,17 @@ type metadataStore struct {
 	ownerIndex           map[OwnerKey]map[string]metadataIndexedRange
 	versionCap           int
 	reads                *readStats
+
+	// copyOnWrite is disabled for normal construction and enabled only on a
+	// cloned transaction before the Storage lock publishes it.
+	copyOnWrite       bool
+	copiedMemberships map[metadataMembershipGroup]struct{}
+	canonicalVersions map[metadataVersionKey]string
+}
+
+type metadataVersionKey struct {
+	owner         OwnerKey
+	effectiveFrom int64
 }
 
 // newMetadataStore returns an operational metadata catalog with an optional
@@ -84,6 +96,7 @@ func newMetadataStore(versionCap int) *metadataStore {
 		attributeIndex:       map[string]map[OwnerKey]metadataIndexedRange{},
 		ownerIndex:           map[OwnerKey]map[string]metadataIndexedRange{},
 		versionCap:           versionCap,
+		canonicalVersions:    map[metadataVersionKey]string{},
 	}
 }
 
@@ -94,7 +107,26 @@ func (s *metadataStore) update(update Update) error {
 	return s.updateHistory(s.ownerHistory(update.Owner), update)
 }
 
+func (s *metadataStore) canonicalVersion(owner OwnerKey, version Version) string {
+	key := metadataVersionKey{owner: owner, effectiveFrom: version.EffectiveFrom}
+	if canonical, ok := s.canonicalVersions[key]; ok {
+		return canonical
+	}
+	canonical := version.Content.Canonical()
+	s.canonicalVersions[key] = canonical
+	return canonical
+}
+
+func (s *metadataStore) deleteCanonicalVersion(owner OwnerKey, effectiveFrom int64) {
+	delete(s.canonicalVersions, metadataVersionKey{owner: owner, effectiveFrom: effectiveFrom})
+}
+
 func (s *metadataStore) deleteOwner(owner OwnerKey) {
+	for key := range s.canonicalVersions {
+		if key.owner == owner {
+			delete(s.canonicalVersions, key)
+		}
+	}
 	for condition := range s.ownerIndex[owner] {
 		delete(s.attributeIndex[condition], owner)
 		if len(s.attributeIndex[condition]) == 0 {
@@ -105,13 +137,42 @@ func (s *metadataStore) deleteOwner(owner OwnerKey) {
 	delete(s.byOwner, owner)
 }
 
+func (s *metadataStore) copyOwnerForWrite(owner OwnerKey, history *metadataOwnerHistory) *metadataOwnerHistory {
+	if !s.copyOnWrite || history.copyTouched {
+		return history
+	}
+	copied := *history
+	copied.versions = slices.Clone(history.versions)
+	copied.index = maps.Clone(history.index)
+	copied.copyTouched = true
+	s.byOwner[owner] = &copied
+	return &copied
+}
+
+func (s *metadataStore) copyMembershipForWrite(seriesHash uint64, kind MetadataKind) {
+	if !s.copyOnWrite {
+		return
+	}
+	group := metadataMembershipGroup{seriesHash: seriesHash, kind: kind}
+	if _, done := s.copiedMemberships[group]; done {
+		return
+	}
+	kinds := s.bySeries[seriesHash]
+	if kinds != nil {
+		kinds = maps.Clone(kinds)
+		kinds[kind] = slices.Clone(kinds[kind])
+		s.bySeries[seriesHash] = kinds
+	}
+	s.copiedMemberships[group] = struct{}{}
+}
+
 func (s *metadataStore) ownerHistory(owner OwnerKey) *metadataOwnerHistory {
 	history, ok := s.byOwner[owner]
 	if !ok {
 		history = &metadataOwnerHistory{index: map[string]struct{}{}}
 		s.byOwner[owner] = history
 	}
-	return history
+	return s.copyOwnerForWrite(owner, history)
 }
 
 // updateHistory applies a version after the batch metadata transaction has
@@ -156,9 +217,13 @@ func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Upda
 		history.versions[i].ObservedFrom = min(history.versions[i].ObservedFrom, next.ObservedFrom)
 		history.versions[i].ObservedUntil = max(history.versions[i].ObservedUntil, next.ObservedUntil)
 		history.versions = slices.Delete(history.versions, i+1, i+2)
+		s.deleteCanonicalVersion(update.Owner, next.EffectiveFrom)
 	}
 	if s.versionCap > 0 && len(history.versions) > s.versionCap {
 		drop := len(history.versions) - s.versionCap
+		for _, evicted := range history.versions[:drop] {
+			s.deleteCanonicalVersion(update.Owner, evicted.EffectiveFrom)
+		}
 		// Drop oldest only after marking the history as intentionally truncated.
 		// This remains observable rather than becoming a silent current-value lookup.
 		// Clone drops references to evicted content in the old backing array.
@@ -210,6 +275,7 @@ func (s *metadataStore) associateWithHistory(seriesHash uint64, ls labels.Labels
 // attachMembership records only an owner relationship. Unlike associate, it
 // never creates an owner version. Restoring rows retains their observation bound.
 func (s *metadataStore) attachMembership(seriesHash uint64, ls labels.Labels, owner OwnerKey, effectiveFrom, observedUntil int64) error {
+	s.copyMembershipForWrite(seriesHash, owner.Kind)
 	if err := s.validateLabels(owner, ls); err != nil {
 		return err
 	}

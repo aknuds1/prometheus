@@ -106,7 +106,7 @@ func (s *metadataStore) snapshot() metadataRelations {
 		out.owners[i].id = owner.id
 		ownerIDs[owner.key] = owner.id
 		for _, version := range s.byOwner[owner.key].versions {
-			canonical := version.Content.Canonical()
+			canonical := s.canonicalVersion(owner.key, version)
 			if _, exists := uniqueContent[canonical]; !exists {
 				uniqueContent[canonical] = version.Content.Clone()
 			}
@@ -128,7 +128,7 @@ func (s *metadataStore) snapshot() metadataRelations {
 		for _, version := range s.byOwner[owner.key].versions {
 			out.versions = append(out.versions, metadataVersionRow{
 				ownerID:       owner.id,
-				contentID:     contentIDs[version.Content.Canonical()],
+				contentID:     contentIDs[s.canonicalVersion(owner.key, version)],
 				effectiveFrom: version.EffectiveFrom,
 				observedFrom:  version.ObservedFrom,
 				observedUntil: version.ObservedUntil,

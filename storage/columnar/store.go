@@ -83,12 +83,12 @@ type Meta struct {
 // maxt are not passed in, because a block that disagrees with its samples is
 // worse than one whose range is derived.
 func WriteBlock(dir string, series []Series, opts WriteOptions) (Meta, error) {
-	return writeBlock(dir, series, nil, opts, 0)
+	return writeBlock(dir, series, nil, opts, 0, nil)
 }
 
 // writeBlock writes samples and an optional metadata snapshot. All relations
 // and their catalog summary enter the temporary block before its atomic rename.
-func writeBlock(dir string, series []Series, metadata *metadataRelations, opts WriteOptions, walSequence uint64) (Meta, error) {
+func writeBlock(dir string, series []Series, metadata *metadataRelations, opts WriteOptions, walSequence uint64, catalogOut *blockCatalog) (Meta, error) {
 	opts = opts.withDefaults()
 
 	series = slices.Clone(series)
@@ -165,6 +165,9 @@ func writeBlock(dir string, series []Series, metadata *metadataRelations, opts W
 	if err := os.Rename(tmpDir, finalDir); err != nil {
 		return Meta{}, err
 	}
+	if catalogOut != nil {
+		*catalogOut = catalog
+	}
 	return meta, nil
 }
 
@@ -183,6 +186,12 @@ type Block struct {
 
 // OpenBlock opens the block in dir.
 func OpenBlock(dir string) (*Block, error) {
+	return openBlock(dir, nil)
+}
+
+// openBlock optionally reuses the catalog produced by this process's block
+// writer. On-disk opens always decode and validate the persisted catalog.
+func openBlock(dir string, suppliedCatalog *blockCatalog) (*Block, error) {
 	raw, err := os.ReadFile(blockMetaPath(dir))
 	if err != nil {
 		return nil, err
@@ -195,9 +204,19 @@ func OpenBlock(dir string) (*Block, error) {
 		return nil, fmt.Errorf("block %s has format version %d, this build reads version %d", dir, meta.FormatVersion, FormatVersion)
 	}
 
-	catalog, err := readBlockCatalog(dir, meta)
-	if err != nil {
-		return nil, fmt.Errorf("reading block catalog: %w", err)
+	catalog := suppliedCatalog
+	if catalog == nil {
+		diskCatalog, err := readBlockCatalog(dir, meta)
+		catalog = &diskCatalog
+		if err != nil {
+			return nil, fmt.Errorf("reading block catalog: %w", err)
+		}
+	} else {
+		validated, err := validateBlockCatalog(*catalog, meta)
+		if err != nil {
+			return nil, fmt.Errorf("validating in-memory block catalog: %w", err)
+		}
+		catalog = &validated
 	}
 
 	return &Block{
@@ -205,7 +224,7 @@ func OpenBlock(dir string) (*Block, error) {
 		meta:      meta,
 		mem:       memory.NewGoAllocator(),
 		rowGroups: meta.NumRowGroups,
-		catalog:   catalog,
+		catalog:   *catalog,
 	}, nil
 }
 

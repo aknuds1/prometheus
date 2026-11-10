@@ -84,6 +84,9 @@ type Storage struct {
 	minValidTime int64
 	blocks       []*Block
 	last         map[uint64]*seriesState
+	// seriesLabels deduplicates immutable label storage across blocks and
+	// recovered/appended samples. Every reuse checks complete labels.
+	seriesLabels map[uint64]labels.Labels
 	closed       bool
 
 	metadata          *metadataStore
@@ -132,6 +135,7 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 		dir:          dir,
 		opts:         opts,
 		last:         map[uint64]*seriesState{},
+		seriesLabels: map[uint64]labels.Labels{},
 		bufferMin:    math.MaxInt64,
 		bufferMax:    math.MinInt64,
 		minValidTime: math.MinInt64,
@@ -154,6 +158,9 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 	hasExplicitIndexConfig := false
 	for _, block := range s.blocks {
 		block.reads = s.reads
+		if err := s.reuseBlockLabels(block); err != nil {
+			return nil, fmt.Errorf("interning series labels from block %s: %w", block.meta.ULID, err)
+		}
 		if err := s.restoreSeriesTail(block); err != nil {
 			return nil, fmt.Errorf("recovering samples from block %s: %w", block.meta.ULID, err)
 		}
@@ -276,15 +283,19 @@ func (s *Storage) flushLocked() error {
 	if len(s.buffer) == 0 && metadata == nil {
 		return nil
 	}
-	meta, err := writeBlock(s.dir, series, metadata, s.opts.WriteOptions, s.walSequence)
+	var catalog blockCatalog
+	meta, err := writeBlock(s.dir, series, metadata, s.opts.WriteOptions, s.walSequence, &catalog)
 	if err != nil {
 		return err
 	}
-	block, err := OpenBlock(filepath.Join(s.dir, meta.ULID))
+	block, err := openBlock(filepath.Join(s.dir, meta.ULID), &catalog)
 	if err != nil {
 		return err
 	}
 	block.reads = s.reads
+	if err := s.reuseBlockLabels(block); err != nil {
+		return err
+	}
 	s.blocks = append(s.blocks, block)
 	s.buffer = nil
 	s.bufferN = 0

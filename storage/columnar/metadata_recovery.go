@@ -74,14 +74,31 @@ func (s *metadataStore) restoreRelations(relations metadataRelations) error {
 	return nil
 }
 
-// clone returns a fully independent semantic store for validating a transaction
-// before publishing it. Content and label backing arrays are copied by snapshot.
+// clone returns a transaction-local view using copy-on-write barriers rather
+// than cloning every owner/content row. Untouched arrays and immutable content
+// may be shared. Mutable owner, membership and index entries are copied before
+// they change. Storage must validate the candidate before publication and hold
+// Storage.mtx for preparation/publication.
 func (s *metadataStore) clone() (*metadataStore, error) {
 	clone := newMetadataStore(s.versionCap)
 	clone.indexedResourceAttrs = maps.Clone(s.indexedResourceAttrs)
 	clone.reads = s.reads
-	if err := clone.restoreRelations(s.snapshot()); err != nil {
-		return nil, err
+	clone.canonicalVersions = maps.Clone(s.canonicalVersions)
+	clone.byOwner = maps.Clone(s.byOwner)
+	for owner, history := range s.byOwner {
+		// A copy-on-write history may already have been published. Its marker
+		// belongs to that transaction's publication lifetime, not to this clone.
+		// Give each new clone its own owner struct so freshness checks never
+		// mutate the prior published struct.
+		local := *history
+		local.copyTouched = false
+		clone.byOwner[owner] = &local
 	}
+	clone.bySeries = maps.Clone(s.bySeries)
+	clone.chains = maps.Clone(s.chains)
+	clone.ownerIndex = maps.Clone(s.ownerIndex)
+	maps.Copy(clone.attributeIndex, s.attributeIndex)
+	clone.copyOnWrite = true
+	clone.copiedMemberships = map[metadataMembershipGroup]struct{}{}
 	return clone, nil
 }

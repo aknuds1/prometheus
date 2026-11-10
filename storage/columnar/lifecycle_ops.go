@@ -142,6 +142,9 @@ func (s *Storage) RetainBefore(ctx context.Context, cutoff int64) (int, error) {
 	}
 	s.blocks = retained
 	s.minValidTime = max(s.minValidTime, cutoff)
+	if err := s.rebuildSeriesLabels(); err != nil {
+		return len(removed), err
+	}
 	previousLast := s.last
 	s.last = map[uint64]*seriesState{}
 	for _, block := range retained {

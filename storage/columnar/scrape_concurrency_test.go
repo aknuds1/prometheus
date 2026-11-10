@@ -33,7 +33,6 @@ func TestConcurrentScalarAppendersShareCommittedTail(t *testing.T) {
 	errs := make(chan error, workers)
 	var wg sync.WaitGroup
 	for worker := range workers {
-		worker := worker
 		wg.Go(func() {
 			ls := labels.FromStrings(labels.MetricName, "concurrent_scrape", "target", strconv.Itoa(worker))
 			app := s.AppenderV2(t.Context())

@@ -86,6 +86,11 @@ type blockPosting struct {
 	IDs   []uint64
 }
 
+type blockPostingKey struct {
+	name  string
+	value string
+}
+
 type blockCohortEntry struct {
 	ID          uint64
 	RowGroup    int
@@ -109,9 +114,15 @@ type blockCatalog struct {
 func buildBlockCatalog(series []Series, opts WriteOptions) (blockCatalog, error) {
 	catalog := blockCatalog{Version: catalogVersion}
 	byID := make(map[uint64]int, len(series))
-	postings := map[string]*blockPosting{}
-	postingKey := func(name, value string) string {
-		return fmt.Sprintf("%d:%s%s", len(name), name, value)
+	postings := map[blockPostingKey]*blockPosting{}
+	postingCounts := map[blockPostingKey]int{}
+	for i := range series {
+		series[i].Labels.Range(func(l labels.Label) {
+			postingCounts[blockPostingKey{name: l.Name, value: l.Value}]++
+		})
+	}
+	for key, count := range postingCounts {
+		postings[key] = &blockPosting{Name: key.name, Value: key.value, IDs: make([]uint64, 0, count)}
 	}
 	for i := range series {
 		id := metadataSeriesKey(series[i].Labels)
@@ -124,7 +135,7 @@ func buildBlockCatalog(series []Series, opts WriteOptions) (blockCatalog, error)
 		byID[id] = len(catalog.Series)
 		catalog.Series = append(catalog.Series, blockSeriesEntry{ID: id, Labels: series[i].Labels.Copy()})
 		series[i].Labels.Range(func(l labels.Label) {
-			key := postingKey(l.Name, l.Value)
+			key := blockPostingKey{name: l.Name, value: l.Value}
 			posting := postings[key]
 			if posting == nil {
 				posting = &blockPosting{Name: l.Name, Value: l.Value}
@@ -283,6 +294,10 @@ func readBlockCatalog(dir string, meta Meta) (blockCatalog, error) {
 	if err := gob.NewDecoder(f).Decode(&catalog); err != nil {
 		return blockCatalog{}, fmt.Errorf("decoding block catalog: %w", err)
 	}
+	return validateBlockCatalog(catalog, meta)
+}
+
+func validateBlockCatalog(catalog blockCatalog, meta Meta) (blockCatalog, error) {
 	if catalog.Version != catalogVersion {
 		return blockCatalog{}, fmt.Errorf("block catalog has version %d, this build reads version %d", catalog.Version, catalogVersion)
 	}

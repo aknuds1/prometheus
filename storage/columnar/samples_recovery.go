@@ -39,7 +39,7 @@ func (s *Storage) restoreSeriesTail(block *Block) error {
 		lastSample := item.Len() - 1
 		state := &seriesState{
 			labels: item.Labels.Copy(), t: item.Timestamps[lastSample],
-			count: item.Len(),
+			count: 1,
 		}
 		if len(item.StartTimestamps) > 0 {
 			state.st = item.StartTimestamps[lastSample]

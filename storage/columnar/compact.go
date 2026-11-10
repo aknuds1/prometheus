@@ -30,7 +30,7 @@ var ErrHeadNotFlushed = errors.New("columnar: flush the head before lifecycle pu
 
 // compactBlockSnapshot reads and merges a fixed immutable block set. CompactTo
 // uses this for separate output; Compact then publishes exactly this snapshot.
-func (s *Storage) compactBlockSnapshot(ctx context.Context, blocks []*Block, dest string) (Meta, *metadataStore, error) {
+func (s *Storage) compactBlockSnapshot(ctx context.Context, blocks []*Block, dest string) (Meta, *metadataStore, blockCatalog, error) {
 	var samples []Series
 	var compacted *metadataStore
 	if s.metadata != nil {
@@ -39,23 +39,23 @@ func (s *Storage) compactBlockSnapshot(ctx context.Context, blocks []*Block, des
 	var walSequence uint64
 	for _, block := range blocks {
 		if err := ctx.Err(); err != nil {
-			return Meta{}, nil, err
+			return Meta{}, nil, blockCatalog{}, err
 		}
 		walSequence = max(walSequence, block.meta.WALSequence)
 		if block.meta.NumSamples > 0 {
 			series, err := block.Series(ctx)
 			if err != nil {
-				return Meta{}, nil, err
+				return Meta{}, nil, blockCatalog{}, err
 			}
 			samples = append(samples, series...)
 		}
 		if compacted != nil && block.meta.Metadata != nil {
 			relations, err := block.readMetadataRelations(ctx)
 			if err != nil {
-				return Meta{}, nil, err
+				return Meta{}, nil, blockCatalog{}, err
 			}
 			if err := compacted.restoreRelations(relations); err != nil {
-				return Meta{}, nil, fmt.Errorf("compacting metadata from block %s: %w", block.meta.ULID, err)
+				return Meta{}, nil, blockCatalog{}, fmt.Errorf("compacting metadata from block %s: %w", block.meta.ULID, err)
 			}
 		}
 	}
@@ -66,8 +66,9 @@ func (s *Storage) compactBlockSnapshot(ctx context.Context, blocks []*Block, des
 			metadata = &relations
 		}
 	}
-	meta, err := writeBlock(dest, mergeSeries(samples), metadata, s.opts.WriteOptions, walSequence)
-	return meta, compacted, err
+	var catalog blockCatalog
+	meta, err := writeBlock(dest, mergeSeries(samples), metadata, s.opts.WriteOptions, walSequence, &catalog)
+	return meta, compacted, catalog, err
 }
 
 // CompactTo merges the current immutable blocks into one block at dest. It does
@@ -83,7 +84,7 @@ func (s *Storage) CompactTo(ctx context.Context, dest string) (Meta, error) {
 	if filepath.Clean(dest) == filepath.Clean(s.dir) {
 		return Meta{}, errors.New("columnar: compaction output must use a separate directory")
 	}
-	meta, _, err := s.compactBlockSnapshot(ctx, s.blocks, dest)
+	meta, _, _, err := s.compactBlockSnapshot(ctx, s.blocks, dest)
 	return meta, err
 }
 
@@ -110,7 +111,7 @@ func (s *Storage) Compact(ctx context.Context) (Meta, error) {
 
 	staging := filepath.Join(s.dir, ".compaction-"+ulid.Make().String()+tmpDirSuffix)
 	defer os.RemoveAll(staging)
-	meta, compactedMetadata, err := s.compactBlockSnapshot(ctx, s.blocks, staging)
+	meta, compactedMetadata, catalog, err := s.compactBlockSnapshot(ctx, s.blocks, staging)
 	if err != nil {
 		return Meta{}, err
 	}
@@ -126,7 +127,7 @@ func (s *Storage) Compact(ctx context.Context) (Meta, error) {
 	if err := os.Rename(filepath.Join(staging, meta.ULID), publishedPath); err != nil {
 		return Meta{}, err
 	}
-	published, err := OpenBlock(publishedPath)
+	published, err := openBlock(publishedPath, &catalog)
 	if err != nil {
 		return Meta{}, fmt.Errorf("opening published compaction %s: %w", meta.ULID, err)
 	}
@@ -136,6 +137,9 @@ func (s *Storage) Compact(ctx context.Context) (Meta, error) {
 	// new block is still complete and ListBlocks suppresses its named parents on
 	// reopening. The returned error makes the residual disk cost explicit.
 	s.blocks = []*Block{published}
+	if err := s.rebuildSeriesLabels(); err != nil {
+		return meta, err
+	}
 	if s.metadata != nil {
 		compactedMetadata.reads = s.reads
 		s.metadata = compactedMetadata

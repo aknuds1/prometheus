@@ -203,7 +203,9 @@ func (b *Block) readSelectedSeries(ctx context.Context, selections []selectedBlo
 	groups := map[int]struct{}{}
 	offsetsByGroup := map[int]map[int]map[int]int{}
 	for i, selection := range selections {
-		out[i].Labels = selection.entry.Labels.Copy()
+		// The block entry is immutable and belongs to the storage lifetime.
+		// Consumers may construct independent mutable copies if needed.
+		out[i].Labels = selection.entry.Labels
 		for _, ref := range selection.segments {
 			groups[ref.RowGroup] = struct{}{}
 			if offsetsByGroup[ref.RowGroup] == nil {
