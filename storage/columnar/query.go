@@ -39,9 +39,6 @@ func (s *Storage) Querier(mint, maxt int64) (storage.Querier, error) {
 	defer s.mtx.Unlock()
 
 	var queriers []storage.Querier
-	// Ranges are collected in querier order so a concatenating merge can rely on
-	// it instead of sorting series itself.
-	var ranges []sourceTimeRange
 	if len(s.buffer) > 0 {
 		// Retain only pointers here. Materialising a Series per buffered series on
 		// every query dominated query allocation, and most are filtered out by the
@@ -51,31 +48,12 @@ func (s *Storage) Querier(mint, maxt int64) (storage.Querier, error) {
 			heads = append(heads, hs)
 		}
 		queriers = append(queriers, &memQuerier{heads: heads, mint: mint, maxt: maxt, reads: s.reads})
-		ranges = append(ranges, sourceTimeRange{minTime: s.bufferMin, maxTime: s.bufferMax})
 	}
 	for _, block := range s.blocks {
 		if !block.Overlaps(mint, maxt) {
 			continue
 		}
 		queriers = append(queriers, &blockQuerier{block: block, mint: mint, maxt: maxt})
-		ranges = append(ranges, sourceTimeRange{minTime: block.meta.MinTime, maxTime: block.meta.MaxTime})
-	}
-
-	// Sources must be in time order for a concatenating merge, and block ordering
-	// on disk is not guaranteed to be.
-	if len(queriers) > 1 {
-		order := make([]int, len(queriers))
-		for i := range order {
-			order[i] = i
-		}
-		sort.SliceStable(order, func(a, b int) bool { return ranges[order[a]].minTime < ranges[order[b]].minTime })
-		sortedQueriers := make([]storage.Querier, len(queriers))
-		sortedRanges := make([]sourceTimeRange, len(ranges))
-		for i, j := range order {
-			sortedQueriers[i] = queriers[j]
-			sortedRanges[i] = ranges[j]
-		}
-		queriers, ranges = sortedQueriers, sortedRanges
 	}
 
 	var q storage.Querier
@@ -85,15 +63,7 @@ func (s *Storage) Querier(mint, maxt int64) (storage.Querier, error) {
 	case 1:
 		q = queriers[0]
 	default:
-		// The head buffer holds samples newer than every block, so the sources are
-		// normally time-disjoint. Concatenating them keeps the batch interface that
-		// a sample-at-a-time merge would discard, and falls back to the merge when
-		// the ranges do overlap.
-		mergeFn := storage.ChainedSeriesMerge
-		if disjointSources(ranges) {
-			mergeFn = concatSeriesFunc
-		}
-		q = storage.NewMergeQuerier(queriers, nil, mergeFn)
+		q = storage.NewMergeQuerier(queriers, nil, storage.ChainedSeriesMerge)
 	}
 	return &resourceQuerier{Querier: q, storage: s}, nil
 }
@@ -401,15 +371,6 @@ type series struct {
 
 func (s *series) Labels() labels.Labels { return s.s.Labels }
 
-// timeRange reports the span of the samples this series holds.
-func (s *series) timeRange() (int64, int64) {
-	ts := s.s.Timestamps
-	if len(ts) == 0 {
-		return math.MaxInt64, math.MinInt64
-	}
-	return ts[0], ts[len(ts)-1]
-}
-
 func (s *series) Iterator(reuse chunkenc.Iterator) chunkenc.Iterator {
 	// Honour the reuse contract: the query engine passes one iterator back per
 	// series, so reusing it removes an allocation per series per query.
@@ -520,10 +481,6 @@ func (it *sampleIterator) NextBatchUntil(maxSamples int, maxt int64) bool {
 }
 
 func (it *sampleIterator) Batch() storage.SampleBatch { return it.batch }
-
-// exhausted reports whether every sample has been handed out. Concatenation
-// uses it to distinguish a maxt truncation from a spent part.
-func (it *sampleIterator) exhausted() bool { return it.pos+1 >= it.series.Len() }
 
 func (it *sampleIterator) Next() chunkenc.ValueType {
 	if it.pos+1 >= it.series.Len() {
