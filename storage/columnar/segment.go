@@ -145,7 +145,18 @@ func (s SampleSegment) DecodeInto(ls labels.Labels, page *TypedPage) error {
 	}
 	var err error
 	page.Labels = ls
-	if page.Timestamps, err = decodeIntegerColumnInto(s.timestamps, s.Count, s.timestampCodec, page.Timestamps); err != nil {
+	if s.timestampCodec == integerConstantInterval {
+		page.Timestamps = reuseInt64s(page.Timestamps, s.Count)
+		if s.Count > 0 {
+			page.Timestamps[0] = s.MinTime
+		}
+		if s.Count > 1 {
+			interval := (s.MaxTime - s.MinTime) / int64(s.Count-1)
+			for i := 1; i < s.Count; i++ {
+				page.Timestamps[i] = page.Timestamps[i-1] + interval
+			}
+		}
+	} else if page.Timestamps, err = decodeIntegerColumnInto(s.timestamps, s.Count, s.timestampCodec, page.Timestamps); err != nil {
 		return fmt.Errorf("decoding timestamps: %w", err)
 	}
 	if len(s.startTimes) > 0 {

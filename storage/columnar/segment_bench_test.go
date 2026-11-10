@@ -25,8 +25,13 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
 
+// decodedValueSum prevents benchmark-only dead-result paths. The writer is set
+// by each decoder arm after the comparison; tests and production code never share it.
+var decodedValueSum float64
+
 // BenchmarkSegmentCodecsStageG1 compares encoding and whole-page decoding with
-// the equivalent XOR2 chunk, including timestamps and exact values.
+// the equivalent XOR2 chunk, including timestamps and exact values. Both decoders
+// consume every value in original series order.
 func BenchmarkSegmentCodecsStageG1(b *testing.B) {
 	timestamps := make([]int64, 100)
 	values := make([]float64, 100)
@@ -70,6 +75,11 @@ func BenchmarkSegmentCodecsStageG1(b *testing.B) {
 			if page.Len() != len(values) {
 				b.Fatalf("decoded %d samples, want %d", page.Len(), len(values))
 			}
+			sum := 0.0
+			for _, value := range page.Values {
+				sum += value
+			}
+			decodedValueSum = sum
 			if err := iterator.Close(); err != nil {
 				b.Fatal(err)
 			}
@@ -82,8 +92,10 @@ func BenchmarkSegmentCodecsStageG1(b *testing.B) {
 		for range b.N {
 			iterator := control.Iterator(nil)
 			count := 0
+			sum := 0.0
 			for iterator.Next() == chunkenc.ValFloat {
-				iterator.At()
+				_, value := iterator.At()
+				sum += value
 				count++
 			}
 			if err := iterator.Err(); err != nil {
@@ -92,6 +104,7 @@ func BenchmarkSegmentCodecsStageG1(b *testing.B) {
 			if count != len(values) {
 				b.Fatalf("decoded %d samples, want %d", count, len(values))
 			}
+			decodedValueSum = sum
 		}
 	})
 }
