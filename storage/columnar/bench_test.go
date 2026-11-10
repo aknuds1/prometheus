@@ -180,6 +180,48 @@ func BenchmarkQueryRateTSDB(b *testing.B) {
 	benchmarkQuery(b, tsdbBench)
 }
 
+// BenchmarkQueryRateColumnarMultiSource measures the same query over a layout
+// with several time-disjoint blocks plus a head buffer. BenchmarkQueryRateColumnar
+// ingests series-major, so its flushes split by series and collapse into a single
+// block: it never reaches the merge path and cannot compare merge strategies.
+func BenchmarkQueryRateColumnarMultiSource(b *testing.B) {
+	st, cleanup := ingestedColumnarByTime(b)
+	defer cleanup()
+	benchmarkQuery(b, st)
+}
+
+// ingestedColumnarByTime ingests time-major and commits in groups, so that the
+// sample-count flush splits blocks by time. FlushSamples only takes effect at a
+// commit boundary, so a single transaction would still collapse into one block.
+// The result is two time-disjoint blocks plus a tail buffer: the layout a running
+// server actually queries, and the only one that reaches the merge path.
+func ingestedColumnarByTime(b *testing.B) (*columnar.Storage, func()) {
+	b.Helper()
+
+	const series, samples, group = 500, 100, 10
+	allLabels, timestamps, values := syntheticSeries(series, samples)
+
+	// Two flushes of 20000 samples, then 10000 left buffered.
+	st, err := columnar.NewStorage(b.TempDir(), columnar.StorageOptions{FlushSamples: group * series * 4})
+	require.NoError(b, err)
+
+	app := st.AppenderV2(b.Context())
+	for j := range samples {
+		for i := range series {
+			require.NoError(b, func() error {
+				_, err := app.Append(0, allLabels[i], 0, timestamps[i][j], values[i][j], nil, nil, storage.AOptions{})
+				return err
+			}())
+		}
+		if (j+1)%group == 0 {
+			require.NoError(b, app.Commit())
+			app = st.AppenderV2(b.Context())
+		}
+	}
+	require.NoError(b, app.Commit())
+	return st, func() { _ = st.Close() }
+}
+
 func benchmarkQuery(b *testing.B, q storage.Queryable) {
 	b.Helper()
 
