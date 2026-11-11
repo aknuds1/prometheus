@@ -54,6 +54,8 @@ type QueryTimingStats struct {
 	ReadNanos   int64
 	DecodeNanos int64
 	DrainNanos  int64
+	HeadNanos   int64
+	ScalarNanos int64
 	DrainCalls  uint64
 	Enabled     bool
 }
@@ -112,6 +114,8 @@ func (s *Storage) ReadTimings() QueryTimingStats {
 		ReadNanos:   t.read.Load(),
 		DecodeNanos: t.decode.Load(),
 		DrainNanos:  t.drain.Load(),
+		HeadNanos:   t.headSelect.Load(),
+		ScalarNanos: t.scalar.Load(),
 		DrainCalls:  t.drainCalls.Load(),
 		Enabled:     t.Enabled(),
 	}

@@ -31,6 +31,8 @@ type queryTimings struct {
 	decode      atomic.Int64
 	drain       atomic.Int64
 	selectTotal atomic.Int64
+	headSelect  atomic.Int64
+	scalar      atomic.Int64
 
 	drainCalls atomic.Uint64
 }
@@ -56,6 +58,8 @@ const (
 	phaseDecode
 	phaseDrain
 	phaseSelectTotal
+	phaseHeadSelect
+	phaseScalar
 )
 
 // add accumulates the time elapsed since start, ignoring disabled samples.
@@ -77,6 +81,10 @@ func (t *queryTimings) add(p phase, start int64) {
 		t.drain.Add(d)
 	case phaseSelectTotal:
 		t.selectTotal.Add(d)
+	case phaseHeadSelect:
+		t.headSelect.Add(d)
+	case phaseScalar:
+		t.scalar.Add(d)
 	}
 }
 

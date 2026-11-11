@@ -19,6 +19,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
@@ -153,7 +154,14 @@ type memQuerier struct {
 func (*memQuerier) Close() error { return nil }
 
 func (q *memQuerier) Select(_ context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-	return selectFromHeads(q.heads, q.mint, q.maxt, sortSeries, hints, q.reads, matchers)
+	var timings *queryTimings
+	if q.reads != nil {
+		timings = q.reads.timings
+	}
+	start := timings.now()
+	set := selectFromHeads(q.heads, q.mint, q.maxt, sortSeries, hints, q.reads, matchers)
+	timings.add(phaseHeadSelect, start)
+	return set
 }
 
 // selectFromHeads filters buffered series by matcher before materialising any
@@ -513,6 +521,17 @@ func (it *sampleIterator) NextBatchUntil(maxSamples int, maxt int64) bool {
 func (it *sampleIterator) Batch() storage.SampleBatch { return it.batch }
 
 func (it *sampleIterator) Next() chunkenc.ValueType {
+	if it.reads == nil || !it.reads.timings.Enabled() {
+		return it.next()
+	}
+	start := time.Now().UnixNano()
+	vt := it.next()
+	it.reads.timings.add(phaseScalar, start)
+	return vt
+}
+
+// next is the untimed scalar advance.
+func (it *sampleIterator) next() chunkenc.ValueType {
 	if it.pos+1 >= it.series.Len() {
 		it.pos = it.series.Len()
 		return chunkenc.ValNone
