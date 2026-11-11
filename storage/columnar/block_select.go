@@ -190,6 +190,11 @@ func (b *Block) positiveMatcherIDs(matcher *labels.Matcher) ([]uint64, error) {
 		timings = b.reads.timings
 		b.reads.matcherCalls.Inc()
 	}
+	// present is only consumed when the matcher can match the empty string, which is
+	// how an absent label is handled. Computing it otherwise unions every posting of
+	// the name for nothing: on a corpus with hundreds of metric names that dominated
+	// the whole resolution, measured at 16.9 ms against 0.06 ms of regex matching.
+	needPresent := matcher.Matches("")
 	var matching, present []uint64
 	for _, posting := range b.catalog.Postings {
 		scanned++
@@ -197,9 +202,12 @@ func (b *Block) positiveMatcherIDs(matcher *labels.Matcher) ([]uint64, error) {
 			continue
 		}
 		byName++
+		if needPresent {
+			start := timings.now()
+			present = unionSortedIDs(present, posting.IDs)
+			timings.add(phaseUnion, start)
+		}
 		start := timings.now()
-		present = unionSortedIDs(present, posting.IDs)
-		timings.add(phaseUnion, start)
 		start = timings.now()
 		hit := matcher.Matches(posting.Value)
 		timings.add(phaseMatcherMatch, start)
@@ -214,8 +222,10 @@ func (b *Block) positiveMatcherIDs(matcher *labels.Matcher) ([]uint64, error) {
 		b.reads.postingsByName.Add(byName)
 	}
 	// PromQL label matchers also apply to an absent label, whose value is empty.
-	if matcher.Matches("") {
+	if needPresent {
+		start := timings.now()
 		matching = unionSortedIDs(matching, subtractSortedIDs(b.allSeriesIDs(), present))
+		timings.add(phaseUnion, start)
 	}
 	return matching, nil
 }
