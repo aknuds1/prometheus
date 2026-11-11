@@ -27,9 +27,10 @@ package columnar_test
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
-	"runtime"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -47,10 +48,7 @@ import (
 // fxSample implements chunks.Sample so the fixture can feed both engines.
 var _ chunks.Sample = fxSample{}
 
-const (
-	scrapeIntervalMs = 15_000
-	samplesPerSeries = 60
-)
+const scrapeIntervalMs = 15_000
 
 type fxSample struct {
 	t int64
@@ -66,15 +64,16 @@ func (s fxSample) Type() chunkenc.ValueType      { return chunkenc.ValFloat }
 func (s fxSample) Copy() chunks.Sample           { return s }
 
 type fixture struct {
-	labels  []labels.Labels
-	samples [][]chunks.Sample
-	mint    int64
-	maxt    int64
+	nSamples int
+	labels   []labels.Labels
+	samples  [][]chunks.Sample
+	mint     int64
+	maxt     int64
 }
 
 // newFixture builds node_exporter-shaped series so matcher selectivity behaves
 // like the real corpus rather than like synthetic noise.
-func newFixture(series int) *fixture {
+func newFixture(series, samplesPerSeries int) *fixture {
 	const start = int64(1_700_000_000_000)
 	f := &fixture{
 		labels:  make([]labels.Labels, series),
@@ -96,11 +95,13 @@ func newFixture(series int) *fixture {
 		}
 		f.samples[i] = s
 	}
+	f.nSamples = samplesPerSeries
 	return f
 }
 
 type engine struct {
 	name  string
+	root  string
 	query func(tb testing.TB, mint, maxt int64) storage.Querier
 	close func()
 }
@@ -111,7 +112,7 @@ func columnarEngine(tb testing.TB, f *fixture) *engine {
 	// One block: the threshold must exceed the whole fixture or the study measures
 	// block overlap instead of scaling.
 	st, err := columnar.NewStorage(dir, columnar.StorageOptions{
-		FlushSamples: len(f.labels) * samplesPerSeries * 2,
+		FlushSamples: len(f.labels) * f.nSamples * 2,
 		DisableWAL:   true,
 	})
 	if err != nil {
@@ -136,6 +137,7 @@ func columnarEngine(tb testing.TB, f *fixture) *engine {
 	}
 	return &engine{
 		name: "columnar",
+		root: dir,
 		query: func(tb testing.TB, mint, maxt int64) storage.Querier {
 			q, err := st.Querier(mint, maxt)
 			if err != nil {
@@ -156,7 +158,13 @@ func tsdbEngine(tb testing.TB, f *fixture) *engine {
 		series[i] = storage.NewListSeries(f.labels[i], f.samples[i])
 	}
 	blockDir := tb.TempDir()
-	if _, err := tsdb.CreateBlock(series, blockDir, 2*time.Hour.Milliseconds(), logger); err != nil {
+	// The chunk range must cover the fixture span or CreateBlock rejects samples
+	// as out of bounds, which silently limits how long a series can be.
+	chunkRange := f.maxt - f.mint + scrapeIntervalMs
+	if chunkRange < 2*time.Hour.Milliseconds() {
+		chunkRange = 2 * time.Hour.Milliseconds()
+	}
+	if _, err := tsdb.CreateBlock(series, blockDir, chunkRange, logger); err != nil {
 		tb.Fatal(err)
 	}
 	db, err := tsdb.Open(dir, logger, nil, tsdb.DefaultOptions(), nil)
@@ -183,6 +191,7 @@ func tsdbEngine(tb testing.TB, f *fixture) *engine {
 	}
 	return &engine{
 		name: "tsdb",
+		root: dir,
 		query: func(tb testing.TB, mint, maxt int64) storage.Querier {
 			q, err := db.Querier(mint, maxt)
 			if err != nil {
@@ -192,6 +201,30 @@ func tsdbEngine(tb testing.TB, f *fixture) *engine {
 		},
 		close: func() { _ = db.Close() },
 	}
+}
+
+// dirSizes splits sealed block bytes into totals and data-only, excluding the
+// index/catalog so that segment framing can be compared without the per-series
+// metadata that scales with series count rather than with segment size.
+func dirSizes(root string) (total, data int64) {
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		n := info.Size()
+		total += n
+		switch filepath.Base(p) {
+		case "catalog.bin", "index", "lock", "queries.active":
+		default:
+			data += n
+		}
+		return nil
+	})
+	return total, data
 }
 
 var scalingShapes = []struct {
@@ -223,49 +256,34 @@ func peakRSSMiB() int {
 }
 
 func BenchmarkScaling(b *testing.B) {
-	seriesList := []int{10_000, 100_000}
-	if v := os.Getenv("SCALING_SERIES"); v != "" {
-		seriesList = nil
+	// Series count is fixed so that label cardinality, catalog entries and index
+	// postings are constant; only samples per series changes, which is the only
+	// thing that changes segment and chunk size.
+	const series = 10_000
+	densities := []int{60, 600}
+	if v := os.Getenv("SCALING_DENSITIES"); v != "" {
+		densities = nil
 		for _, p := range strings.Split(v, ",") {
 			n, err := strconv.Atoi(strings.TrimSpace(p))
 			if err != nil {
 				b.Fatal(err)
 			}
-			seriesList = append(seriesList, n)
+			densities = append(densities, n)
 		}
 	}
-	for _, n := range seriesList {
-		f := newFixture(n)
+	for _, perSeries := range densities {
+		f := newFixture(series, perSeries)
+		want := int64(series * perSeries)
 		for _, mk := range []func(testing.TB, *fixture) *engine{columnarEngine, tsdbEngine} {
 			eng := mk(b, f)
-			b.Run(fmt.Sprintf("series=%d/engine=%s/build", n, eng.name), func(b *testing.B) {
-				for i := 0; i < b.N; i++ {
-					e2 := mk(b, f)
-					e2.close()
-				}
-				runtime.GC()
-				b.ReportMetric(float64(peakRSSMiB()), "peakRSS-MiB")
+			total, data := dirSizes(eng.root)
+			b.Run(fmt.Sprintf("perSeries=%d/engine=%s/size", perSeries, eng.name), func(b *testing.B) {
+				b.ReportMetric(float64(total)/float64(want), "total-B/sample")
+				b.ReportMetric(float64(data)/float64(want), "data-B/sample")
+				b.ReportMetric(float64(total)/float64(series), "total-B/series")
 			})
-			for _, shape := range scalingShapes {
-				matched := countMatched(b, eng, f, shape.matchers)
-				q := eng.query(b, f.mint, f.maxt)
-				q.Close()
-				b.Run(fmt.Sprintf("series=%d/engine=%s/%s", n, eng.name, shape.name), func(b *testing.B) {
-					b.ResetTimer()
-					for i := 0; i < b.N; i++ {
-						q, err := selectAndDrain(b, eng, f, shape.matchers)
-						if err != nil {
-							b.Fatal(err)
-						}
-						q.Close()
-					}
-					b.StopTimer()
-					b.ReportMetric(float64(matched), "matched")
-				})
-			}
 			eng.close()
 		}
-		b.Run(fmt.Sprintf("series=%d/rss", n), func(b *testing.B) { b.ReportMetric(float64(peakRSSMiB()), "peakRSS-MiB") })
 	}
 }
 
