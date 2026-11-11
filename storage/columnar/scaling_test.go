@@ -199,6 +199,9 @@ var scalingShapes = []struct {
 	matchers []*labels.Matcher
 }{
 	{"selective", []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "instance", "host-1:9100")}},
+	{"cpu0", []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "cpu", "0")}},
+	{"cpu01regex", []*labels.Matcher{labels.MustNewMatcher(labels.MatchRegexp, "cpu", "[01]")}},
+	{"mode_idle", []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "mode", "idle")}},
 	{"wide", []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "node_cpu_seconds_total")}},
 }
 
