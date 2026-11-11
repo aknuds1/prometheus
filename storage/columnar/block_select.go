@@ -36,7 +36,7 @@ func (b *Block) Select(ctx context.Context, mint, maxt int64, matcherSets [][]*l
 		timings = b.reads.timings
 	}
 	matchStart := timings.now()
-	ids, err := b.resolveMatcherSets(newIDScratch(len(b.catalog.SeriesIDs)), matcherSets)
+	ids, err := b.resolveMatcherSets(newIDScratch(idScratchInitial), matcherSets)
 	timings.add(phaseMatch, matchStart)
 	if err != nil || len(ids) == 0 {
 		return nil, err
@@ -101,6 +101,11 @@ func (b *Block) Select(ctx context.Context, mint, maxt int64, matcherSets [][]*l
 
 // resolveMatcherSets applies sorted-list union and intersection over block-local
 // stable series IDs. It never opens either labels or samples from Parquet.
+// idScratchInitial bounds the scratch buffers' initial capacity. Sizing them to
+// the block made every query allocate and zero memory proportional to block size,
+// including queries matching a handful of series.
+const idScratchInitial = 1024
+
 // idScratch reuses the intermediate ID buffers of matcher resolution. Every
 // union and intersection allocated a fresh slice, per block, per query.
 //

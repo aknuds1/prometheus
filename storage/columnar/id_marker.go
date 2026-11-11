@@ -53,7 +53,16 @@ func (m *idMarker) reset(size int) {
 	}
 }
 
-func (m *idMarker) add(id uint64) { m.bits[id>>6] |= 1 << (id & 63) }
+// add grows the bitset on demand. Sizing it up front required scanning every
+// series ID in the block on each query, which made a selective query O(block size)
+// regardless of how few series it matched.
+func (m *idMarker) add(id uint64) {
+	word := id >> 6
+	for word >= uint64(len(m.bits)) {
+		m.bits = append(m.bits, 0)
+	}
+	m.bits[word] |= 1 << (id & 63)
+}
 
 func (m *idMarker) has(id uint64) bool { return m.bits[id>>6]&(1<<(id&63)) != 0 }
 
