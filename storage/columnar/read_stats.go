@@ -50,6 +50,7 @@ type ReadStats struct {
 	PostingsScanned         uint64
 	PostingsNameMatched     uint64
 	MatcherCalls            uint64
+	PostingsValueMatched    uint64
 	SelectCalls             uint64
 	Queries                 uint64
 	LabelRowsVisited        uint64
@@ -94,6 +95,7 @@ type readStats struct {
 	postingsScanned    atomic.Uint64
 	postingsByName     atomic.Uint64
 	matcherCalls       atomic.Uint64
+	postingsValueMatch atomic.Uint64
 	selectCalls        atomic.Uint64
 	queries            atomic.Uint64
 	labelRows          atomic.Uint64
@@ -121,6 +123,7 @@ func (s *Storage) ReadStats() ReadStats {
 		PostingsScanned:         s.reads.postingsScanned.Load(),
 		PostingsNameMatched:     s.reads.postingsByName.Load(),
 		MatcherCalls:            s.reads.matcherCalls.Load(),
+		PostingsValueMatched:    s.reads.postingsValueMatch.Load(),
 		SelectCalls:             s.reads.selectCalls.Load(),
 		Queries:                 s.reads.queries.Load(),
 		Timings:                 s.ReadTimings(),
@@ -170,6 +173,7 @@ func (r *readStats) reset() {
 	r.postingsScanned.Store(0)
 	r.postingsByName.Store(0)
 	r.matcherCalls.Store(0)
+	r.postingsValueMatch.Store(0)
 	r.selectCalls.Store(0)
 	r.queries.Store(0)
 	r.labelRows.Store(0)
