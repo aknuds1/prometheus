@@ -16,6 +16,8 @@ package columnar_test
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -106,4 +108,57 @@ func TestReadStatsHandlerServesCostModel(t *testing.T) {
 	for _, key := range []string{"SeriesMatched", "SegmentsAvailable", "SegmentsPlanned", "SegmentsOutsideWindow", "BlocksOverlapping", "Queries", "Timings"} {
 		require.Contains(t, got, key)
 	}
+}
+
+func TestHeadIndexNarrowsScanToMetricName(t *testing.T) {
+	st, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{FlushSamples: 1_000_000, DisableWAL: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	// Three metric names with distinguishable cardinality, all left in the head.
+	shapes := map[string]int{"alpha_total": 40, "beta_total": 7, "gamma_total": 3}
+	app := st.AppenderV2(t.Context())
+	for name, n := range shapes {
+		for i := range n {
+			lset := labels.FromStrings(labels.MetricName, name, "i", strconv.Itoa(i))
+			_, err := app.Append(0, lset, 0, 1_700_000_000_000, float64(i), nil, nil, storage.AOptions{})
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, app.Commit())
+
+	before := st.ReadStats()
+	q, err := st.Querier(1_600_000_000_000, 1_800_000_000_000)
+	require.NoError(t, err)
+	defer q.Close()
+	set := q.Select(t.Context(), false, nil, labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "beta_total"))
+	var got []string
+	for set.Next() {
+		got = append(got, set.At().Labels().Get("i"))
+	}
+	require.NoError(t, set.Err())
+	require.Len(t, got, shapes["beta_total"])
+	slices.Sort(got)
+	require.Equal(t, []string{"0", "1", "2", "3", "4", "5", "6"}, got)
+
+	after := st.ReadStats()
+	require.Equal(t, uint64(1), after.HeadIndexHits-before.HeadIndexHits)
+	// The scan must cover only the matching series, not the whole head.
+	require.Equal(t, uint64(shapes["beta_total"]), after.HeadSeriesScanned-before.HeadSeriesScanned)
+
+	// A regex name matcher cannot use the index and must fall back to a full scan.
+	before = st.ReadStats()
+	q2, err := st.Querier(1_600_000_000_000, 1_800_000_000_000)
+	require.NoError(t, err)
+	defer q2.Close()
+	re := q2.Select(t.Context(), false, nil, labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, "beta.*"))
+	count := 0
+	for re.Next() {
+		count++
+	}
+	require.NoError(t, re.Err())
+	require.Equal(t, shapes["beta_total"], count)
+	after = st.ReadStats()
+	require.Equal(t, uint64(0), after.HeadIndexHits-before.HeadIndexHits)
+	require.Equal(t, uint64(50), after.HeadSeriesScanned-before.HeadSeriesScanned)
 }

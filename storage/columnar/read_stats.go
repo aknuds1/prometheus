@@ -34,11 +34,15 @@ type ReadStats struct {
 	// describe the cost model of one query: how many series matcher resolution
 	// kept, how many segments those series hold, how many survived the per-series
 	// time bound, and how many were therefore skipped without being read.
-	SeriesMatched           uint64
-	SegmentsAvailable       uint64
-	SegmentsPlanned         uint64
-	SegmentsOutsideWindow   uint64
-	BlocksOverlapping       uint64
+	SeriesMatched         uint64
+	SegmentsAvailable     uint64
+	SegmentsPlanned       uint64
+	SegmentsOutsideWindow uint64
+	BlocksOverlapping     uint64
+	// HeadIndexHits and HeadSeriesScanned show whether a head selection was
+	// narrowed by metric name, and how many series it still had to examine.
+	HeadIndexHits           uint64
+	HeadSeriesScanned       uint64
 	Queries                 uint64
 	LabelRowsVisited        uint64
 	MetadataIndexCandidates uint64
@@ -75,6 +79,8 @@ type readStats struct {
 	segmentsPlanned    atomic.Uint64
 	segmentsOutsideWin atomic.Uint64
 	blocksOverlapping  atomic.Uint64
+	headIndexHits      atomic.Uint64
+	headScanned        atomic.Uint64
 	queries            atomic.Uint64
 	labelRows          atomic.Uint64
 	metadataCandidates atomic.Uint64
@@ -96,6 +102,8 @@ func (s *Storage) ReadStats() ReadStats {
 		SegmentsPlanned:         s.reads.segmentsPlanned.Load(),
 		SegmentsOutsideWindow:   s.reads.segmentsOutsideWin.Load(),
 		BlocksOverlapping:       s.reads.blocksOverlapping.Load(),
+		HeadIndexHits:           s.reads.headIndexHits.Load(),
+		HeadSeriesScanned:       s.reads.headScanned.Load(),
 		Queries:                 s.reads.queries.Load(),
 		Timings:                 s.ReadTimings(),
 		LabelRowsVisited:        s.reads.labelRows.Load(),
@@ -137,6 +145,8 @@ func (r *readStats) reset() {
 	r.segmentsPlanned.Store(0)
 	r.segmentsOutsideWin.Store(0)
 	r.blocksOverlapping.Store(0)
+	r.headIndexHits.Store(0)
+	r.headScanned.Store(0)
 	r.queries.Store(0)
 	r.labelRows.Store(0)
 	r.metadataCandidates.Store(0)

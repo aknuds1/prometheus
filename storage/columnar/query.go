@@ -48,7 +48,7 @@ func (s *Storage) Querier(mint, maxt int64) (storage.Querier, error) {
 		for _, hs := range s.buffer {
 			heads = append(heads, hs)
 		}
-		queriers = append(queriers, &memQuerier{heads: heads, mint: mint, maxt: maxt, reads: s.reads})
+		queriers = append(queriers, &memQuerier{heads: heads, mint: mint, maxt: maxt, reads: s.reads, storage: s})
 	}
 	for _, block := range s.blocks {
 		if !block.Overlaps(mint, maxt) {
@@ -145,15 +145,51 @@ func (s *Storage) ChunkQuerier(mint, maxt int64) (storage.ChunkQuerier, error) {
 
 // memQuerier serves in-memory series.
 type memQuerier struct {
-	heads []*headSeries
-	mint  int64
-	maxt  int64
-	reads *readStats
+	heads   []*headSeries
+	storage *Storage
+	mint    int64
+	maxt    int64
+	reads   *readStats
 }
 
 func (*memQuerier) Close() error { return nil }
 
+// headCandidates narrows the head scan to one metric name when the selector
+// constrains it by equality. It returns nil when no narrowing applies, and the
+// caller then scans every buffered series. The returned slice is only read for
+// its length, and appended series enter beyond that length, so it stays valid
+// after the lock is released.
+func (s *Storage) headCandidates(matchers []*labels.Matcher) []*headSeries {
+	var name string
+	found := false
+	for _, m := range matchers {
+		if m.Name != labels.MetricName || m.Type != labels.MatchEqual {
+			continue
+		}
+		if found && name != m.Value {
+			// Two conflicting equality matchers cannot match anything; the full
+			// scan produces that answer without special casing here.
+			return nil
+		}
+		name, found = m.Value, true
+	}
+	if !found {
+		return nil
+	}
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return s.headByName[name]
+}
+
 func (q *memQuerier) Select(_ context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
+	if q.storage != nil {
+		if candidates := q.storage.headCandidates(matchers); candidates != nil {
+			q.reads.headIndexHits.Inc()
+			q.reads.headScanned.Add(uint64(len(candidates)))
+			return selectFromHeads(candidates, q.mint, q.maxt, sortSeries, hints, q.reads, matchers)
+		}
+	}
+	q.reads.headScanned.Add(uint64(len(q.heads)))
 	var timings *queryTimings
 	if q.reads != nil {
 		timings = q.reads.timings

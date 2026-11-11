@@ -90,7 +90,11 @@ type Storage struct {
 	mtx sync.Mutex
 	// buffer holds buffered series by stable hash. A map keeps insertion O(1);
 	// flushLocked sorts once at seal time instead of keeping an array ordered.
-	buffer        map[uint64]*headSeries
+	buffer map[uint64]*headSeries
+	// headByName narrows a head selection to the series carrying one metric name,
+	// so a selector with an equality __name__ matcher does not walk every buffered
+	// series. It is guarded by mtx and reset with the buffer.
+	headByName    map[string][]*headSeries
 	bufferN       int
 	bufferMin     int64
 	bufferMax     int64
@@ -152,6 +156,7 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 		opts:         opts,
 		last:         map[uint64]*seriesState{},
 		buffer:       map[uint64]*headSeries{},
+		headByName:   map[string][]*headSeries{},
 		seriesLabels: map[uint64]labels.Labels{},
 		bufferMin:    math.MaxInt64,
 		bufferMax:    math.MinInt64,
@@ -332,6 +337,7 @@ func (s *Storage) flushLocked() error {
 	// Labels were interned while the catalog was built.
 	s.blocks = append(s.blocks, block)
 	s.buffer = map[uint64]*headSeries{}
+	s.headByName = map[string][]*headSeries{}
 	s.bufferN = 0
 	s.bufferMin = math.MaxInt64
 	s.bufferMax = math.MinInt64

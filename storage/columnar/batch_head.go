@@ -142,6 +142,8 @@ func (s *Storage) commitHead(prepared []*headSeries) error {
 			// the head directly without an intermediate duplicate copy.
 			hs = state
 			s.buffer[state.hash] = hs
+			name := hs.labels.Get(labels.MetricName)
+			s.headByName[name] = append(s.headByName[name], hs)
 		} else if !labels.Equal(hs.labels, state.labels) {
 			return ErrSeriesHashCollision
 		}
