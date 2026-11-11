@@ -162,3 +162,39 @@ func TestHeadIndexNarrowsScanToMetricName(t *testing.T) {
 	require.Equal(t, uint64(0), after.HeadIndexHits-before.HeadIndexHits)
 	require.Equal(t, uint64(50), after.HeadSeriesScanned-before.HeadSeriesScanned)
 }
+
+func TestRegexMatcherResolutionIsCounted(t *testing.T) {
+	st := costModelStorage(t)
+	query := func(m *labels.Matcher) columnar.ReadStats {
+		before := st.ReadStats()
+		q, err := st.Querier(1_700_000_000_000, 1_700_000_300_000)
+		require.NoError(t, err)
+		defer q.Close()
+		set := q.Select(t.Context(), false, nil, m)
+		for set.Next() {
+		}
+		require.NoError(t, set.Err())
+		return subStats(st.ReadStats(), before)
+	}
+	eq := query(labels.MustNewMatcher(labels.MatchEqual, labels.MetricName, "node_cpu_seconds_total"))
+	re := query(labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, "node_cpu_seconds.*"))
+
+	// An equality matcher resolves by binary search and never walks the postings.
+	require.Zero(t, eq.PostingsScanned)
+	require.Zero(t, eq.MatcherCalls)
+	// A regex matcher walks them, and must record how many it looked at.
+	require.NotZero(t, re.PostingsScanned)
+	require.NotZero(t, re.MatcherCalls)
+	require.LessOrEqual(t, re.PostingsNameMatched, re.PostingsScanned)
+	require.Equal(t, eq.SelectCalls, re.SelectCalls)
+}
+
+// sub returns the counters that advanced between the receiver and earlier.
+func subStats(r, earlier columnar.ReadStats) columnar.ReadStats {
+	return columnar.ReadStats{
+		PostingsScanned:     r.PostingsScanned - earlier.PostingsScanned,
+		PostingsNameMatched: r.PostingsNameMatched - earlier.PostingsNameMatched,
+		MatcherCalls:        r.MatcherCalls - earlier.MatcherCalls,
+		SelectCalls:         r.SelectCalls - earlier.SelectCalls,
+	}
+}

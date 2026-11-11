@@ -280,6 +280,9 @@ func (q *blockQuerier) Select(ctx context.Context, _ bool, hints *storage.Select
 		timings = q.block.reads.timings
 	}
 	selectStart := timings.now()
+	if q.block.reads != nil {
+		q.block.reads.selectCalls.Inc()
+	}
 	series, err := q.block.Select(ctx, mint, maxt, [][]*labels.Matcher{matchers}, 0)
 	timings.add(phaseSelectTotal, selectStart)
 	if err != nil {

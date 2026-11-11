@@ -25,14 +25,16 @@ import (
 type queryTimings struct {
 	enabled atomic.Bool
 
-	match       atomic.Int64
-	plan        atomic.Int64
-	read        atomic.Int64
-	decode      atomic.Int64
-	drain       atomic.Int64
-	selectTotal atomic.Int64
-	headSelect  atomic.Int64
-	scalar      atomic.Int64
+	match        atomic.Int64
+	plan         atomic.Int64
+	read         atomic.Int64
+	decode       atomic.Int64
+	drain        atomic.Int64
+	selectTotal  atomic.Int64
+	headSelect   atomic.Int64
+	scalar       atomic.Int64
+	union        atomic.Int64
+	matcherMatch atomic.Int64
 
 	drainCalls atomic.Uint64
 }
@@ -60,6 +62,8 @@ const (
 	phaseSelectTotal
 	phaseHeadSelect
 	phaseScalar
+	phaseUnion
+	phaseMatcherMatch
 )
 
 // add accumulates the time elapsed since start, ignoring disabled samples.
@@ -85,6 +89,10 @@ func (t *queryTimings) add(p phase, start int64) {
 		t.headSelect.Add(d)
 	case phaseScalar:
 		t.scalar.Add(d)
+	case phaseUnion:
+		t.union.Add(d)
+	case phaseMatcherMatch:
+		t.matcherMatch.Add(d)
 	}
 }
 

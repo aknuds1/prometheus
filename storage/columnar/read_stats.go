@@ -41,8 +41,16 @@ type ReadStats struct {
 	BlocksOverlapping     uint64
 	// HeadIndexHits and HeadSeriesScanned show whether a head selection was
 	// narrowed by metric name, and how many series it still had to examine.
-	HeadIndexHits           uint64
-	HeadSeriesScanned       uint64
+	HeadIndexHits     uint64
+	HeadSeriesScanned uint64
+	// PostingsScanned, PostingsNameMatched, MatcherCalls and SelectCalls exist to
+	// explain one discrepancy: a regex name matcher is measured at ~6 ms per block,
+	// which reading the resolution loop does not account for. Multiplicity is a
+	// candidate explanation, hence call counts alongside loop counts.
+	PostingsScanned         uint64
+	PostingsNameMatched     uint64
+	MatcherCalls            uint64
+	SelectCalls             uint64
 	Queries                 uint64
 	LabelRowsVisited        uint64
 	MetadataIndexCandidates uint64
@@ -52,16 +60,18 @@ type ReadStats struct {
 // QueryTimingStats reports accumulated phase durations in nanoseconds. Callers
 // difference two samples around a burst of queries; Queries gives the divisor.
 type QueryTimingStats struct {
-	SelectNanos int64
-	MatchNanos  int64
-	PlanNanos   int64
-	ReadNanos   int64
-	DecodeNanos int64
-	DrainNanos  int64
-	HeadNanos   int64
-	ScalarNanos int64
-	DrainCalls  uint64
-	Enabled     bool
+	SelectNanos  int64
+	MatchNanos   int64
+	PlanNanos    int64
+	ReadNanos    int64
+	DecodeNanos  int64
+	DrainNanos   int64
+	HeadNanos    int64
+	ScalarNanos  int64
+	UnionNanos   int64
+	MatcherNanos int64
+	DrainCalls   uint64
+	Enabled      bool
 }
 
 type readStats struct {
@@ -81,6 +91,10 @@ type readStats struct {
 	blocksOverlapping  atomic.Uint64
 	headIndexHits      atomic.Uint64
 	headScanned        atomic.Uint64
+	postingsScanned    atomic.Uint64
+	postingsByName     atomic.Uint64
+	matcherCalls       atomic.Uint64
+	selectCalls        atomic.Uint64
 	queries            atomic.Uint64
 	labelRows          atomic.Uint64
 	metadataCandidates atomic.Uint64
@@ -104,6 +118,10 @@ func (s *Storage) ReadStats() ReadStats {
 		BlocksOverlapping:       s.reads.blocksOverlapping.Load(),
 		HeadIndexHits:           s.reads.headIndexHits.Load(),
 		HeadSeriesScanned:       s.reads.headScanned.Load(),
+		PostingsScanned:         s.reads.postingsScanned.Load(),
+		PostingsNameMatched:     s.reads.postingsByName.Load(),
+		MatcherCalls:            s.reads.matcherCalls.Load(),
+		SelectCalls:             s.reads.selectCalls.Load(),
 		Queries:                 s.reads.queries.Load(),
 		Timings:                 s.ReadTimings(),
 		LabelRowsVisited:        s.reads.labelRows.Load(),
@@ -116,16 +134,18 @@ func (s *Storage) ReadStats() ReadStats {
 func (s *Storage) ReadTimings() QueryTimingStats {
 	t := s.reads.timings
 	return QueryTimingStats{
-		SelectNanos: t.selectTotal.Load(),
-		MatchNanos:  t.match.Load(),
-		PlanNanos:   t.plan.Load(),
-		ReadNanos:   t.read.Load(),
-		DecodeNanos: t.decode.Load(),
-		DrainNanos:  t.drain.Load(),
-		HeadNanos:   t.headSelect.Load(),
-		ScalarNanos: t.scalar.Load(),
-		DrainCalls:  t.drainCalls.Load(),
-		Enabled:     t.Enabled(),
+		SelectNanos:  t.selectTotal.Load(),
+		MatchNanos:   t.match.Load(),
+		PlanNanos:    t.plan.Load(),
+		ReadNanos:    t.read.Load(),
+		DecodeNanos:  t.decode.Load(),
+		DrainNanos:   t.drain.Load(),
+		HeadNanos:    t.headSelect.Load(),
+		ScalarNanos:  t.scalar.Load(),
+		UnionNanos:   t.union.Load(),
+		MatcherNanos: t.matcherMatch.Load(),
+		DrainCalls:   t.drainCalls.Load(),
+		Enabled:      t.Enabled(),
 	}
 }
 
@@ -147,6 +167,10 @@ func (r *readStats) reset() {
 	r.blocksOverlapping.Store(0)
 	r.headIndexHits.Store(0)
 	r.headScanned.Store(0)
+	r.postingsScanned.Store(0)
+	r.postingsByName.Store(0)
+	r.matcherCalls.Store(0)
+	r.selectCalls.Store(0)
 	r.queries.Store(0)
 	r.labelRows.Store(0)
 	r.metadataCandidates.Store(0)

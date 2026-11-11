@@ -182,15 +182,36 @@ func (b *Block) positiveMatcherIDs(matcher *labels.Matcher) ([]uint64, error) {
 		return nil, fmt.Errorf("columnar: unsupported matcher type %v", matcher.Type)
 	}
 
+	// Counts are accumulated locally: per-posting atomics would perturb the loop
+	// being measured, which is the whole point of adding them.
+	var scanned, byName uint64
+	var timings *queryTimings
+	if b.reads != nil {
+		timings = b.reads.timings
+		b.reads.matcherCalls.Inc()
+	}
 	var matching, present []uint64
 	for _, posting := range b.catalog.Postings {
+		scanned++
 		if posting.Name != matcher.Name {
 			continue
 		}
+		byName++
+		start := timings.now()
 		present = unionSortedIDs(present, posting.IDs)
-		if matcher.Matches(posting.Value) {
+		timings.add(phaseUnion, start)
+		start = timings.now()
+		hit := matcher.Matches(posting.Value)
+		timings.add(phaseMatcherMatch, start)
+		if hit {
+			start = timings.now()
 			matching = unionSortedIDs(matching, posting.IDs)
+			timings.add(phaseUnion, start)
 		}
+	}
+	if b.reads != nil {
+		b.reads.postingsScanned.Add(scanned)
+		b.reads.postingsByName.Add(byName)
 	}
 	// PromQL label matchers also apply to an absent label, whose value is empty.
 	if matcher.Matches("") {
