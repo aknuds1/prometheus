@@ -20,6 +20,7 @@ import (
 	"math"
 	"math/bits"
 	"slices"
+	"sync"
 
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
@@ -452,13 +453,28 @@ func decodeXOR(data []byte, count int) ([]float64, error) {
 	return decodeXORInto(data, count, nil)
 }
 
-func decodeXORInto(data []byte, count int, destination []float64) ([]float64, error) {
+// decodeScratch holds the chunk and iterator used to decode one XOR segment.
+// A query decodes one segment per matched series per block, so allocating a
+// chunk and an iterator each time was a large share of query allocations.
+type decodeScratch struct {
+	chunk *chunkenc.XOR2Chunk
+	iter  chunkenc.Iterator
+}
+
+var decodeScratchPool = sync.Pool{New: func() any {
 	chunk := chunkenc.NewXOR2Chunk()
+	return &decodeScratch{chunk: chunk, iter: chunk.Iterator(nil)}
+}}
+
+func decodeXORInto(data []byte, count int, destination []float64) ([]float64, error) {
+	scratch, _ := decodeScratchPool.Get().(*decodeScratch)
+	defer decodeScratchPool.Put(scratch)
+	chunk := scratch.chunk
 	chunk.Reset(data)
 	if chunk.NumSamples() != count {
 		return nil, fmt.Errorf("XOR chunk has %d samples, need %d", chunk.NumSamples(), count)
 	}
-	iterator := chunk.Iterator(nil)
+	iterator := chunk.Iterator(scratch.iter)
 	values := destination[:0]
 	if cap(values) < count {
 		values = make([]float64, 0, count)

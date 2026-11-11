@@ -166,6 +166,13 @@ func (b *Block) readSelectedSeries(ctx context.Context, selections []selectedBlo
 // appendDecodedPage appends one decoded page to series.
 func appendDecodedPage(item *Series, page TypedPage) {
 	previous := item.Len()
+	// Each series is built fresh per query, so size the slices exactly instead of
+	// growing them: the page length is already known.
+	if previous == 0 {
+		item.Timestamps = make([]int64, 0, page.Len())
+		item.Kinds = make([]SampleKind, 0, page.Len())
+		item.Values = make([]float64, 0, page.Len())
+	}
 	item.Timestamps = append(item.Timestamps, page.Timestamps...)
 	item.Kinds = append(item.Kinds, page.Kinds...)
 	item.Values = append(item.Values, page.Values...)
