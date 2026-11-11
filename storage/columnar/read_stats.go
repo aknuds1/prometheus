@@ -13,7 +13,11 @@
 
 package columnar
 
-import "go.uber.org/atomic"
+import (
+	"math"
+
+	"go.uber.org/atomic"
+)
 
 // ReadStats instruments physical reads made by the columnar backend. Metadata
 // opens are distinct from sample projections and label-only reads so callers can
@@ -47,12 +51,19 @@ type ReadStats struct {
 	// explain one discrepancy: a regex name matcher is measured at ~6 ms per block,
 	// which reading the resolution loop does not account for. Multiplicity is a
 	// candidate explanation, hence call counts alongside loop counts.
-	PostingsScanned         uint64
-	PostingsNameMatched     uint64
-	MatcherCalls            uint64
-	PostingsValueMatched    uint64
-	SelectCalls             uint64
-	Queries                 uint64
+	PostingsScanned      uint64
+	PostingsNameMatched  uint64
+	MatcherCalls         uint64
+	PostingsValueMatched uint64
+	SelectCalls          uint64
+	Queries              uint64
+	// Blocks, BlockMinTime and BlockMaxTime describe the sealed corpus at read
+	// time. An overlap count is only interpretable alongside the block duration
+	// that produces it, and duration is what a sample-count threshold stops
+	// controlling as cardinality grows.
+	Blocks                  int
+	BlockMinTime            int64
+	BlockMaxTime            int64
 	LabelRowsVisited        uint64
 	MetadataIndexCandidates uint64
 	MetadataIndexFallbacks  uint64
@@ -104,7 +115,23 @@ type readStats struct {
 }
 
 func (s *Storage) ReadStats() ReadStats {
+	s.mtx.Lock()
+	blocks := len(s.blocks)
+	blockMin, blockMax := int64(math.MaxInt64), int64(math.MinInt64)
+	for _, b := range s.blocks {
+		if b.meta.MinTime < blockMin {
+			blockMin = b.meta.MinTime
+		}
+		if b.meta.MaxTime > blockMax {
+			blockMax = b.meta.MaxTime
+		}
+	}
+	s.mtx.Unlock()
+
 	return ReadStats{
+		Blocks:                  blocks,
+		BlockMinTime:            blockMin,
+		BlockMaxTime:            blockMax,
 		LabelPayloadOpens:       s.reads.labels.Load(),
 		SamplePayloadOpens:      s.reads.samples.Load(),
 		MetadataPayloadOpens:    s.reads.metadata.Load(),
