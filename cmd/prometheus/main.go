@@ -215,6 +215,7 @@ type flagConfig struct {
 	enableColumnarPrototype bool
 	columnarAddress         string
 	columnarQueryTimings    bool
+	columnarFlushSamples    int
 
 	maxprocsEnable          bool
 	memlimitEnable          bool
@@ -509,6 +510,8 @@ func main() {
 
 	serverOnlyFlag(a, "web.columnar-address", "Address on which the experimental columnar prototype serves its Arrow endpoint (--enable-feature=columnar-prototype).").
 		Default("localhost:9091").StringVar(&cfg.columnarAddress)
+	a.Flag("storage.columnar-flush-samples", "Samples buffered in memory before the columnar prototype seals a block. Zero uses the built-in default (--enable-feature=columnar-prototype). Larger values keep more data in the head buffer and seal fewer, bigger blocks.").
+		Hidden().Default("0").IntVar(&cfg.columnarFlushSamples)
 	a.Flag("storage.columnar-query-timings", "Attribute columnar query time to phases for the cost model (--enable-feature=columnar-prototype). Measurement switch: adds clock reads to the query path and does not change behaviour.").
 		Hidden().Default("false").BoolVar(&cfg.columnarQueryTimings)
 
@@ -1013,7 +1016,7 @@ func main() {
 		// Their fanout is intentionally fixed at construction; attaching late
 		// so late attachment would bypass real ingestion entirely.
 		columnarDir := filepath.Join(localStoragePath, "columnar")
-		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{EnableQueryTimings: cfg.columnarQueryTimings})
+		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{EnableQueryTimings: cfg.columnarQueryTimings, FlushSamples: cfg.columnarFlushSamples})
 		if err != nil {
 			logger.Error("Unable to open the experimental columnar storage", "dir", columnarDir, "err", err)
 			os.Exit(1)
