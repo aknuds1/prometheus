@@ -160,10 +160,12 @@ func tsdbEngine(tb testing.TB, f *fixture) *engine {
 	blockDir := tb.TempDir()
 	// The chunk range must cover the fixture span or CreateBlock rejects samples
 	// as out of bounds, which silently limits how long a series can be.
-	chunkRange := f.maxt - f.mint + scrapeIntervalMs
-	if chunkRange < 2*time.Hour.Milliseconds() {
-		chunkRange = 2 * time.Hour.Milliseconds()
-	}
+	// CreateBlock appends through the head, which rejects samples older than its
+	// valid-time window once a 10,000-sample commit has advanced maxTime. The
+	// window is derived from chunkRange, so it must exceed the fixture span by a
+	// wide margin rather than merely cover it - otherwise longer fixtures fail with
+	// "out of bounds" for a reason that has nothing to do with the data.
+	chunkRange := 24 * time.Hour.Milliseconds()
 	if _, err := tsdb.CreateBlock(series, blockDir, chunkRange, logger); err != nil {
 		tb.Fatal(err)
 	}
