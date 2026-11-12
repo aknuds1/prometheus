@@ -30,7 +30,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,8 +133,8 @@ func newOTAPRoutingFixture() otapRoutingFixture {
 // decorators below still call the real sink and the real consumer, so counting a
 // route must not change what it does.
 type otapRouteCounters struct {
-	sink     atomic.Int64
-	consumer atomic.Int64
+	sink     uatomic.Int64
+	consumer uatomic.Int64
 }
 
 func (c *otapRouteCounters) String() string {
@@ -144,7 +143,7 @@ func (c *otapRouteCounters) String() string {
 
 type countedSink struct {
 	inner otap.RecordSink
-	n     *atomic.Int64
+	n     *uatomic.Int64
 }
 
 func (s countedSink) ConsumeRecords(ctx context.Context, records []*record_message.RecordMessage) error {
@@ -154,7 +153,7 @@ func (s countedSink) ConsumeRecords(ctx context.Context, records []*record_messa
 
 type countedConsumer struct {
 	inner consumer.Metrics
-	n     *atomic.Int64
+	n     *uatomic.Int64
 }
 
 func (c countedConsumer) ConsumeMetrics(ctx context.Context, md pmetric.Metrics) error {
@@ -395,6 +394,82 @@ func mapDiff(variants map[string]int, want int) map[string]int {
 		}
 	}
 	return bad
+}
+
+// TestOTAPReceiverColumnarRouteExclusive proves the production route selection: with
+// the columnar prototype on, the receiver has the native record sink and no OTLP
+// consumer, so every logical input sample is appended exactly once.
+func TestOTAPReceiverColumnarRouteExclusive(t *testing.T) {
+	f := newOTAPRoutingFixture()
+	local := newOTAPRoutingStorage(t)
+	var counts otapRouteCounters
+	reg := prometheus.NewRegistry()
+
+	c, sink := otapIngestionRoutes(local.storage, slog.New(slog.DiscardHandler), newLiveConfig(t), 5*time.Minute, false,
+		func() consumer.Metrics { return local.consumerFor(t, reg, &counts) })
+	require.Nil(t, c, "the OTLP consumer must not be attached when the native route is")
+	require.NotNil(t, sink)
+	sink = countedSink{inner: sink, n: &counts.sink}
+
+	client := startOTAPReceiver(t, reg, c, sink)
+	ack := appendBatch(t, client, f.metrics)
+
+	require.Equal(t, colarspb.StatusCode_OK, ack.GetStatusCode(), ack.GetStatusMessage())
+	require.Equal(t, int64(1), counts.sink.Load(), "the native sink is the single route")
+	require.Equal(t, int64(0), counts.consumer.Load(), "the OTLP consumer must never run")
+
+	stored := storedSeries(t, local.storage, f.mint, f.maxt)
+	fixture := fixtureSeries(stored)
+	require.Equal(t, map[string]int{}, mapDiff(identityVariants(fixture), 1), "one stored series per logical series")
+	require.Equal(t, f.samples, countPoints(fixture), "every logical sample is stored exactly once")
+	for _, s := range fixture {
+		require.True(t, s.labels.Has(columnar.OTELResourceLabel),
+			"the native route keeps the Resource identity on every series: %s", s.labels)
+	}
+	require.Equal(t, uint64(1), local.storage.ReadStats().CommitCount, "one transaction")
+
+	// The store must return the input samples, not a subset: compare the complete
+	// set of stored timestamps and values against the fixture's own data points.
+	want := map[string][]string{}
+	for _, rm := range f.metrics.ResourceMetrics().All() {
+		for _, sm := range rm.ScopeMetrics().All() {
+			for _, m := range sm.Metrics().All() {
+				switch m.Type() {
+				case pmetric.MetricTypeGauge:
+					for _, dp := range m.Gauge().DataPoints().All() {
+						want[dp.Attributes().AsRaw()["path"].(string)] = append(want[dp.Attributes().AsRaw()["path"].(string)],
+							strconv.FormatInt(dp.Timestamp().AsTime().UnixMilli(), 10)+"="+
+								strconv.FormatFloat(dp.DoubleValue(), 'g', -1, 64))
+					}
+				case pmetric.MetricTypeSum:
+					for _, dp := range m.Sum().DataPoints().All() {
+						method := dp.Attributes().AsRaw()["method"].(string)
+						want[method] = append(want[method], strconv.FormatInt(dp.Timestamp().AsTime().UnixMilli(), 10)+"="+
+							strconv.FormatFloat(float64(dp.IntValue()), 'g', -1, 64))
+					}
+				}
+			}
+		}
+	}
+	require.Len(t, want, f.series)
+	got := map[string][]string{}
+	for _, s := range fixture {
+		got[seriesKey(s.labels)] = s.points
+	}
+	require.Equal(t, want, got, "complete stored result matches the input data points")
+	t.Logf("columnar route: ack=%s %s storedSeries=%d storedSamples=%d commits=%d",
+		ack.GetStatusCode(), counts.String(), len(fixture), countPoints(fixture), local.storage.ReadStats().CommitCount)
+}
+
+// seriesKey identifies a fixture series by its distinguishing label, matching the
+// per-series attribute in the input data points.
+func seriesKey(ls labels.Labels) string {
+	for _, name := range []string{"path", "method"} {
+		if v := ls.Get(name); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // startOTAPReceiver serves a real OTAP receiver over bufconn and returns a client

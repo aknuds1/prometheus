@@ -53,6 +53,7 @@ import (
 	promslogflag "github.com/prometheus/common/promslog/flag"
 	"github.com/prometheus/common/version"
 	toolkit_web "github.com/prometheus/exporter-toolkit/web"
+	"go.opentelemetry.io/collector/consumer"
 	"go.uber.org/atomic"
 	"go.uber.org/automaxprocs/maxprocs"
 	"go.yaml.in/yaml/v2"
@@ -1416,29 +1417,28 @@ func main() {
 			},
 		})
 
+		consumer, recordSink := otapIngestionRoutes(
+			columnarStorage, logger, liveConfig, time.Duration(cfg.lookbackDelta), cfg.scrape.EnableTypeAndUnitLabels,
+			func() consumer.Metrics {
+				return remote.NewMetricsConsumer(
+					logger.With("component", "otap_receiver"),
+					prometheus.DefaultRegisterer,
+					localStorage,
+					func() config.Config { return *liveConfig.Load() },
+					remote.OTLPOptions{
+						ConvertDelta:            cfg.web.ConvertOTLPDelta,
+						NativeDelta:             cfg.web.NativeOTLPDeltaIngestion,
+						LookbackDelta:           time.Duration(cfg.lookbackDelta),
+						EnableTypeAndUnitLabels: cfg.scrape.EnableTypeAndUnitLabels,
+					},
+				)
+			},
+		)
 		otapServer = otap.NewGRPCServer(
 			logger.With("component", "otap_receiver"),
 			prometheus.DefaultRegisterer,
-			remote.NewMetricsConsumer(
-				logger.With("component", "otap_receiver"),
-				prometheus.DefaultRegisterer,
-				localStorage,
-				func() config.Config { return *liveConfig.Load() },
-				remote.OTLPOptions{
-					ConvertDelta:            cfg.web.ConvertOTLPDelta,
-					NativeDelta:             cfg.web.NativeOTLPDeltaIngestion,
-					LookbackDelta:           time.Duration(cfg.lookbackDelta),
-					EnableTypeAndUnitLabels: cfg.scrape.EnableTypeAndUnitLabels,
-				},
-			),
-			otap.ServerOptions{
-				ReceiverOptions: otap.ReceiverOptions{
-					// When the columnar prototype is on, the same decode feeds it as
-					// well, so the row-oriented path and the columnar path can be
-					// compared on identical input.
-					RecordSink: columnarRecordSink(columnarStorage, logger, liveConfig, time.Duration(cfg.lookbackDelta), cfg.scrape.EnableTypeAndUnitLabels),
-				},
-			},
+			consumer,
+			otap.ServerOptions{ReceiverOptions: otap.ReceiverOptions{RecordSink: recordSink}},
 		)
 	}
 
@@ -1901,6 +1901,36 @@ func selectQueryStorage(primary storage.Storage, candidate *columnar.Storage) st
 		return candidate
 	}
 	return primary
+}
+
+// otapIngestionRoutes returns the OTAP receiver's single ingestion route: the native
+// record sink when the columnar prototype is on, otherwise the ordinary OTLP
+// consumer. Exactly one of the two results is non-nil.
+//
+// Two routes to the same store are not two independent appends: the native sink
+// carries the OTLP Resource identity label and the OTLP translator does not, so the
+// same logical sample becomes two different series and neither append is rejected.
+// Running both therefore doubles every batch silently, which makes any receiver
+// measurement a double-ingest and any query over the result ambiguous. The consumer
+// constructor is a function so the unused route registers no metrics and does no
+// other setup.
+//
+// The native route converts only the NumberDataPoints payloads it supports, so OTAP
+// histograms, summaries and exemplars are skipped in columnar-only mode. That
+// limitation belongs to the sink and is reported by it; it is not repaired by
+// attaching a second route that would duplicate every float sample in the batch.
+func otapIngestionRoutes(
+	columnarStorage *columnar.Storage,
+	logger *slog.Logger,
+	liveConfig *atomic.Pointer[config.Config],
+	lookbackDelta time.Duration,
+	enableTypeAndUnitLabels bool,
+	otlpConsumer func() consumer.Metrics,
+) (consumer.Metrics, otap.RecordSink) {
+	if sink := columnarRecordSink(columnarStorage, logger, liveConfig, lookbackDelta, enableTypeAndUnitLabels); sink != nil {
+		return nil, sink
+	}
+	return otlpConsumer(), nil
 }
 
 // columnarRecordSink returns the OTAP record sink for the columnar prototype, or
