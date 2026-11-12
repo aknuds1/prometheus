@@ -672,16 +672,16 @@ func TestTileBytesPerConfiguration(t *testing.T) {
 	}
 }
 
-// TestTileTimestampCodecFinding quantifies a pre-existing defect in the shared
-// timestamp codec rather than fixing it in this package. subtractInt64 reports
-// overflow with the opposite comparison, so encodeTimestamps falls back to a plain
-// eight-bytes-per-sample column whenever two consecutive deltas are equal. The
-// tile encoders use a corrected check; this test records the size of the defect so
-// the block control's bytes can be interpreted and the defect can be carded
-// separately.
-func TestTileTimestampCodecFinding(t *testing.T) {
+// TestTileTimestampEncoderMatchesShared records that the shared timestamp codec and
+// the tile-local encoder now agree. The shared encoder used to test subtractInt64's
+// overflow result backwards and fell back to a plain eight-bytes-per-sample column
+// whenever two consecutive deltas were equal, which is why this package carried its
+// own corrected copy. The shared defect is fixed since that correction (a separate
+// format-10 commit), so this test keeps the two encoders from drifting apart; the
+// tile-local copy is left in place because removing it is tile work, not a codec fix.
+func TestTileTimestampEncoderMatchesShared(t *testing.T) {
 	// A series with a missed scrape: not a constant interval, so the delta-delta
-	// path is entered and the inverted check fires on the repeated delta.
+	// path is entered and the repeated delta around the gap has to be encoded.
 	var timestamps []int64
 	for j := range 60 {
 		if j == 30 {
@@ -692,19 +692,18 @@ func TestTileTimestampCodecFinding(t *testing.T) {
 
 	shared, sharedCodec, err := encodeTimestamps(timestamps)
 	require.NoError(t, err)
-	fixed, fixedCodec, err := encodeTileTimestamps(timestamps)
+	local, localCodec, err := encodeTileTimestamps(timestamps)
 	require.NoError(t, err)
 
-	decoded, err := decodeIntegerColumn(fixed, len(timestamps), fixedCodec)
-	require.NoError(t, err)
-	require.Equal(t, timestamps, decoded, "the corrected encoder must round-trip exactly")
+	require.Equal(t, integerDeltaDelta, sharedCodec)
+	require.Equal(t, integerDeltaDelta, localCodec)
+	require.Equal(t, shared, local)
 
-	require.Equal(t, integerPlain, sharedCodec, "shared encoder falls back to plain")
-	require.Equal(t, integerDeltaDelta, fixedCodec)
-	require.Less(t, len(fixed), len(shared)/4)
-	t.Logf("samples=%d shared codec=%d bytes=%d (%.2f B/sample); corrected codec=%d bytes=%d (%.2f B/sample)",
-		len(timestamps), sharedCodec, len(shared), float64(len(shared))/float64(len(timestamps)),
-		fixedCodec, len(fixed), float64(len(fixed))/float64(len(timestamps)))
+	decoded, err := decodeIntegerColumn(shared, len(timestamps), sharedCodec)
+	require.NoError(t, err)
+	require.Equal(t, timestamps, decoded, "the shared encoder must round-trip exactly")
+	t.Logf("samples=%d codec=%d bytes=%d (%.2f B/sample)",
+		len(timestamps), sharedCodec, len(shared), float64(len(shared))/float64(len(timestamps)))
 }
 
 // TestTileOrderingEffect isolates the mechanism behind the time-major footprint

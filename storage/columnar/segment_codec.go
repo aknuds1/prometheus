@@ -69,8 +69,8 @@ func encodeTimestamps(values []int64) ([]byte, integerCodec, error) {
 	out = timestampVarints(out, previousDelta)
 	for i := 2; i < len(values); i++ {
 		delta := values[i] - values[i-1]
-		difference, ok := subtractInt64(delta, previousDelta)
-		if !ok {
+		difference, overflowed := subtractInt64(delta, previousDelta)
+		if overflowed {
 			return encodeIntPlain(values), integerPlain, nil
 		}
 		out = timestampVarints(out, difference)
@@ -141,9 +141,17 @@ func timestampVarints(out []byte, values ...int64) []byte {
 	return out
 }
 
-func subtractInt64(a, b int64) (int64, bool) {
-	out := a - b
-	return out, (a^b)&(a^out) < 0
+// subtractInt64 returns a-b and reports whether that subtraction overflowed int64.
+// The second result is true when the signed result does not fit; callers must not
+// read it as "the difference is usable".
+//
+// The wrapped difference is returned even on overflow because two's-complement
+// wrapping is exact modulo 2^64, so a decoder that adds the difference back
+// reconstructs the same int64 delta. Overflow is still a signal that the deltas are
+// pathological and that a plain column is the cheaper and more honest choice.
+func subtractInt64(a, b int64) (difference int64, overflowed bool) {
+	difference = a - b
+	return difference, (a^b)&(a^difference) < 0
 }
 
 func decodeIntegerColumn(data []byte, count int, codec integerCodec) ([]int64, error) {
