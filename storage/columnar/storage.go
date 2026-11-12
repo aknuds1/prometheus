@@ -639,7 +639,11 @@ func (a *appender) previousLocked(ls labels.Labels, hash uint64, tx *headSeries)
 	// Scalar appenders are used concurrently by independent scrape pools.
 	// The shared committed-tail map is protected by the same lock used by
 	// batch seals and lifecycle operations; transaction-local state above is not.
+	waitStart := time.Now()
 	a.s.mtx.Lock()
+	if a.s.reads != nil {
+		a.s.reads.observeAppendLockWait(time.Since(waitStart))
+	}
 	defer a.s.mtx.Unlock()
 	if last, ok := a.s.last[hash]; ok {
 		return *last, true

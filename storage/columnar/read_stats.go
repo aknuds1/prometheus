@@ -15,6 +15,7 @@ package columnar
 
 import (
 	"math"
+	"time"
 
 	"go.uber.org/atomic"
 )
@@ -57,9 +58,21 @@ type ReadStats struct {
 	PostingsValueMatched uint64
 	SelectCalls          uint64
 	Queries              uint64
-	SealCount            uint64
-	SealNanos            uint64
-	LastSealNanos        uint64
+	// CommitCount/HoldNanos cover AppendBatch, which holds the mutex for the whole
+	// append and any inline seal. AppendLockWaits cover the scalar append path,
+	// which takes the same mutex per sample - so a seal blocks every concurrent
+	// append, not only a handful of commits.
+	CommitCount            uint64
+	CommitAcquireWaitNanos uint64
+	CommitAcquireWaitMax   uint64
+	CommitHoldNanos        uint64
+	CommitHoldMax          uint64
+	AppendLockWaits        uint64
+	AppendLockWaitNanos    uint64
+	AppendLockWaitMax      uint64
+	SealCount              uint64
+	SealNanos              uint64
+	LastSealNanos          uint64
 	// Blocks, BlockMinTime and BlockMaxTime describe the sealed corpus at read
 	// time. An overlap count is only interpretable alongside the block duration
 	// that produces it, and duration is what a sample-count threshold stops
@@ -112,6 +125,14 @@ type readStats struct {
 	postingsValueMatch atomic.Uint64
 	selectCalls        atomic.Uint64
 	queries            atomic.Uint64
+	commits            atomic.Uint64
+	commitAcquireNanos atomic.Uint64
+	commitAcquireMax   atomic.Uint64
+	commitHoldNanos    atomic.Uint64
+	commitHoldMax      atomic.Uint64
+	appendLockWaits    atomic.Uint64
+	appendLockNanos    atomic.Uint64
+	appendLockMax      atomic.Uint64
 	seals              atomic.Uint64
 	sealNanos          atomic.Uint64
 	lastSealNanos      atomic.Uint64
@@ -159,6 +180,14 @@ func (s *Storage) ReadStats() ReadStats {
 		PostingsValueMatched:    s.reads.postingsValueMatch.Load(),
 		SelectCalls:             s.reads.selectCalls.Load(),
 		Queries:                 s.reads.queries.Load(),
+		CommitCount:             s.reads.commits.Load(),
+		CommitAcquireWaitNanos:  s.reads.commitAcquireNanos.Load(),
+		CommitAcquireWaitMax:    s.reads.commitAcquireMax.Load(),
+		CommitHoldNanos:         s.reads.commitHoldNanos.Load(),
+		CommitHoldMax:           s.reads.commitHoldMax.Load(),
+		AppendLockWaits:         s.reads.appendLockWaits.Load(),
+		AppendLockWaitNanos:     s.reads.appendLockNanos.Load(),
+		AppendLockWaitMax:       s.reads.appendLockMax.Load(),
 		SealCount:               s.reads.seals.Load(),
 		SealNanos:               s.reads.sealNanos.Load(),
 		LastSealNanos:           s.reads.lastSealNanos.Load(),
@@ -212,10 +241,52 @@ func (r *readStats) reset() {
 	r.postingsValueMatch.Store(0)
 	r.selectCalls.Store(0)
 	r.queries.Store(0)
+	r.commits.Store(0)
+	r.commitAcquireNanos.Store(0)
+	r.commitAcquireMax.Store(0)
+	r.commitHoldNanos.Store(0)
+	r.commitHoldMax.Store(0)
+	r.appendLockWaits.Store(0)
+	r.appendLockNanos.Store(0)
+	r.appendLockMax.Store(0)
 	r.seals.Store(0)
 	r.sealNanos.Store(0)
 	r.lastSealNanos.Store(0)
 	r.labelRows.Store(0)
 	r.metadataCandidates.Store(0)
 	r.metadataFallbacks.Store(0)
+}
+
+// atomicMax stores v if it exceeds the current value.
+func atomicMax(a *atomic.Uint64, v uint64) {
+	for {
+		cur := a.Load()
+		if v <= cur || a.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
+// observeAppendLockWait records one scalar-append mutex acquisition.
+func (r *readStats) observeAppendLockWait(d time.Duration) {
+	n := uint64(d.Nanoseconds())
+	r.appendLockWaits.Inc()
+	r.appendLockNanos.Add(n)
+	atomicMax(&r.appendLockMax, n)
+}
+
+// observeCommit records one AppendBatch mutex acquisition. The hold is recorded
+// separately when the lock is released, because the seal it may contain happens
+// while the lock is held rather than being waited for.
+func (r *readStats) observeCommit(acquire time.Duration) {
+	a := uint64(acquire.Nanoseconds())
+	r.commits.Inc()
+	r.commitAcquireNanos.Add(a)
+	atomicMax(&r.commitAcquireMax, a)
+}
+
+func (r *readStats) observeCommitHold(h time.Duration) {
+	n := uint64(h.Nanoseconds())
+	r.commitHoldNanos.Add(n)
+	atomicMax(&r.commitHoldMax, n)
 }

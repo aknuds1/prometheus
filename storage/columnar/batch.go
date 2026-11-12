@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/value"
@@ -195,7 +196,13 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		}
 	}
 
+	acquireStart := time.Now()
 	s.mtx.Lock()
+	if s.reads != nil {
+		acquired := time.Now()
+		s.reads.observeCommit(acquired.Sub(acquireStart))
+		defer func() { s.reads.observeCommitHold(time.Since(acquired)) }()
+	}
 	defer s.mtx.Unlock()
 
 	if s.closed {
