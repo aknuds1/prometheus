@@ -20,19 +20,55 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// missedScrapeTimestamps is a 15 s series missing its thirtieth sample. Its deltas
+// are ordinary, but the 30 s skip repeats the 15 s delta on both sides of the gap,
+// which is the ordinary shape a delta-of-delta timestamp column has to encode.
+func missedScrapeTimestamps() []int64 {
+	const base, interval = int64(1_700_000_000_000), int64(15_000)
+	values := make([]int64, 0, 59)
+	for i := range 60 {
+		if i == 30 {
+			continue
+		}
+		values = append(values, base+int64(i)*interval)
+	}
+	return values
+}
+
+// jitteredTimestamps is a 15 s series whose samples arrive a few hundred
+// milliseconds early or late, so no two consecutive deltas repeat.
+func jitteredTimestamps() []int64 {
+	const base, interval = int64(1_700_000_000_000), int64(15_000)
+	jitter := []int64{-430, 260, -1200, 880, 75, -640, 1390, -210}
+	values := make([]int64, 0, 60)
+	for i := range 60 {
+		values = append(values, base+int64(i)*interval+jitter[i%len(jitter)])
+	}
+	return values
+}
+
 func TestSegmentIntegerCodecs(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		values    []int64
-		timestamp bool
-		want      integerCodec
-		anyCodec  bool
+		name              string
+		values            []int64
+		timestamp         bool
+		want              integerCodec
+		anyCodec          bool
+		maxBytesPerSample float64
 	}{
 		{name: "empty", timestamp: true, want: integerPlain},
 		{name: "one timestamp", values: []int64{-123456}, timestamp: true, want: integerConstantInterval},
 		{name: "constant interval", values: []int64{1000, 2000, 3000, 4000}, timestamp: true, want: integerConstantInterval},
-		{name: "irregular small deltas", values: []int64{1000, 1010, 1030, 1080, 1150}, timestamp: true, anyCodec: true},
-		{name: "extreme timestamp deltas", values: []int64{math.MinInt64, 0, math.MaxInt64}, timestamp: true, anyCodec: true},
+		// A repeated delta must stay on the delta-of-delta column: falling back to
+		// the plain column here costs eight bytes per sample on the ordinary
+		// missed-scrape shape.
+		{name: "missed scrape repeated delta", values: missedScrapeTimestamps(), timestamp: true, want: integerDeltaDelta, maxBytesPerSample: 2},
+		{name: "irregular small deltas", values: []int64{1000, 1010, 1030, 1080, 1150}, timestamp: true, want: integerDeltaDelta},
+		{name: "jittered timestamps", values: jitteredTimestamps(), timestamp: true, want: integerDeltaDelta, maxBytesPerSample: 3},
+		// A delta that overflows int64 is not worth encoding; the plain column is
+		// always exact, and the overflow predicate must not be read backwards.
+		{name: "extreme timestamp deltas", values: []int64{math.MinInt64, 0, math.MaxInt64}, timestamp: true, want: integerPlain},
+		{name: "signed boundary interval", values: []int64{math.MinInt64 + 3, math.MinInt64 + 8, math.MinInt64 + 13}, timestamp: true, want: integerConstantInterval},
 		{name: "integer runs", values: []int64{7, 7, 7, 9, 9, 0, 0}, want: integerRLE},
 		{name: "large varints can use plain", values: []int64{math.MinInt64, math.MinInt64 + 1, math.MinInt64 + 2}, want: integerPlain},
 	} {
@@ -51,6 +87,10 @@ func TestSegmentIntegerCodecs(t *testing.T) {
 			} else {
 				require.Equal(t, tc.want, codec)
 			}
+			if tc.maxBytesPerSample > 0 {
+				require.LessOrEqual(t, float64(len(encoded))/float64(len(tc.values)), tc.maxBytesPerSample,
+					"codec %d uses %d bytes for %d samples", codec, len(encoded), len(tc.values))
+			}
 			decoded, err := decodeIntegerColumn(encoded, len(tc.values), codec)
 			require.NoError(t, err)
 			if len(tc.values) == 0 {
@@ -60,6 +100,33 @@ func TestSegmentIntegerCodecs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSegmentTimestampCodecDecodesStoredPayloads pins the decode contract for
+// payloads written before the encoder's overflow check was corrected. Codec ids and
+// payload layouts are unchanged, so these byte strings must keep decoding exactly.
+func TestSegmentTimestampCodecDecodesStoredPayloads(t *testing.T) {
+	t.Run("plain", func(t *testing.T) {
+		payload := encodeIntPlain([]int64{-5, 15_000, math.MaxInt64})
+		decoded, err := decodeIntegerColumn(payload, 3, integerPlain)
+		require.NoError(t, err)
+		require.Equal(t, []int64{-5, 15_000, math.MaxInt64}, decoded)
+	})
+	t.Run("delta of delta", func(t *testing.T) {
+		// Six samples, encoded by hand as start=1000, first delta=2000, then the
+		// three following delta differences.
+		payload := appendSigned(1000)
+		payload = timestampVarints(payload, 2000, 0, 0, 0, 0)
+		decoded, err := decodeIntegerColumn(payload, 6, integerDeltaDelta)
+		require.NoError(t, err)
+		require.Equal(t, []int64{1000, 3000, 5000, 7000, 9000, 11000}, decoded)
+	})
+	t.Run("constant interval", func(t *testing.T) {
+		payload := timestampVarints(appendSigned(1000), 500)
+		decoded, err := decodeIntegerColumn(payload, 4, integerConstantInterval)
+		require.NoError(t, err)
+		require.Equal(t, []int64{1000, 1500, 2000, 2500}, decoded)
+	})
 }
 
 func TestSegmentIntegerCodecRejectsTruncatedInput(t *testing.T) {
