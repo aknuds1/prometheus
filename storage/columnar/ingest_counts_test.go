@@ -43,14 +43,14 @@ func ingestTestLabels(i int) labels.Labels {
 
 // hashCounts is the counter subset a test asserts on.
 type hashCounts struct {
-	seriesFor, refFor, prepare, prepareSeries, trusted, fallback uint64
+	seriesFor, refFor, prepare, trusted, fallback uint64
 }
 
 func readHashCounts(s *columnar.Storage) hashCounts {
 	stats := s.ReadStats()
 	return hashCounts{
 		seriesFor: stats.HashCallsSeriesFor, refFor: stats.HashCallsRefFor,
-		prepare: stats.HashCallsPrepare, prepareSeries: stats.HashCallsPrepareSeries,
+		prepare: stats.HashCallsPrepare,
 		trusted: stats.RefTrusted, fallback: stats.RefFallback,
 	}
 }
@@ -58,7 +58,7 @@ func readHashCounts(s *columnar.Storage) hashCounts {
 func (h hashCounts) sub(o hashCounts) hashCounts {
 	return hashCounts{
 		seriesFor: h.seriesFor - o.seriesFor, refFor: h.refFor - o.refFor,
-		prepare: h.prepare - o.prepare, prepareSeries: h.prepareSeries - o.prepareSeries,
+		prepare: h.prepare - o.prepare,
 		trusted: h.trusted - o.trusted, fallback: h.fallback - o.fallback,
 	}
 }
@@ -91,10 +91,12 @@ func TestIngestHashCountsEstablished(t *testing.T) {
 	appendRound(1)
 	got := readHashCounts(s).sub(before)
 
-	// One sample per series per round, so every count is per sample.
+	// One sample per series per round. A verified reference means no label is
+	// hashed anywhere on this path, and the appender hands its identity to
+	// preparation instead of letting it hash the same labels again.
 	require.Equal(t, hashCounts{
-		seriesFor: series, refFor: series, prepare: series, prepareSeries: series,
-		trusted: 0, fallback: series,
+		seriesFor: 0, refFor: 0, prepare: 0,
+		trusted: series, fallback: 0,
 	}, got, "established-series round hash accounting")
 }
 
@@ -118,8 +120,10 @@ func TestIngestHashCountsFirstSeen(t *testing.T) {
 	require.NoError(t, app.Commit())
 	got := readHashCounts(s).sub(before)
 
+	// A new identity still hashes once to find or create its series and once to
+	// build the reference it returns; preparation reuses the appender's hash.
 	require.Equal(t, hashCounts{
-		seriesFor: series, refFor: series, prepare: series, prepareSeries: series,
+		seriesFor: series, refFor: series, prepare: 0,
 		trusted: 0, fallback: series,
 	}, got, "first-seen round hash accounting")
 }
@@ -149,5 +153,7 @@ func TestIngestHashCountsTypedBatch(t *testing.T) {
 	require.NoError(t, s.AppendBatch(context.Background(), batch))
 	got := readHashCounts(s).sub(before)
 
-	require.Equal(t, hashCounts{prepare: series, prepareSeries: series}, got, "typed batch hash accounting")
+	// A direct batch has no appender to supply hashes, so it hashes once per
+	// series for ordering and reuses that hash for the prepared series.
+	require.Equal(t, hashCounts{prepare: series}, got, "typed batch hash accounting")
 }

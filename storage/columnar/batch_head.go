@@ -22,8 +22,10 @@ import (
 	"github.com/prometheus/prometheus/storage"
 )
 
-func newHeadSeries(ls labels.Labels) *headSeries {
-	return &headSeries{hash: stableSeriesHash(ls), labels: ls}
+// newHeadSeriesAt builds a prepared series from a hash that is already known:
+// either supplied by the appender or computed while indexing the batch.
+func newHeadSeriesAt(hash uint64, ls labels.Labels) *headSeries {
+	return &headSeries{hash: hash, labels: ls}
 }
 
 type indexedBatchSeries struct {
@@ -43,8 +45,12 @@ func prepareBatchSeries(batch Batch) ([]*headSeries, ingestCounts, error) {
 			return nil, counts, fmt.Errorf("series chunk %d: %w", i, err)
 		}
 		if len(series.Timestamps) > 0 {
-			counts.prepareHash++
-			indexed = append(indexed, indexedBatchSeries{index: i, hash: stableSeriesHash(series.Labels)})
+			hash := series.hash
+			if !series.hashValid {
+				counts.prepareHash++
+				hash = stableSeriesHash(series.Labels)
+			}
+			indexed = append(indexed, indexedBatchSeries{index: i, hash: hash})
 		}
 	}
 	slices.SortStableFunc(indexed, func(a, b indexedBatchSeries) int {
@@ -65,8 +71,9 @@ func prepareBatchSeries(batch Batch) ([]*headSeries, ingestCounts, error) {
 			end++
 		}
 		first := batch.Series[indexed[start].index]
-		counts.prepareSeriesHash++
-		merged := newHeadSeries(first.Labels)
+		// The indexed hash is the series' hash, so the prepared series reuses it
+		// instead of hashing the same labels a second time.
+		merged := newHeadSeriesAt(indexed[start].hash, first.Labels)
 		for i := start; i < end; i++ {
 			series := batch.Series[indexed[i].index]
 			if !labels.Equal(merged.labels, series.Labels) {

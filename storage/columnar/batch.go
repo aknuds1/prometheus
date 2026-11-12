@@ -115,10 +115,9 @@ type ingestCounts struct {
 	// refForHash counts label hashes taken to build the reference returned to the
 	// caller.
 	refForHash int
-	// prepareHash counts label hashes taken to order a batch for preparation.
+	// prepareHash counts label hashes taken to order a batch for preparation and
+	// to build the prepared series, which now share one hash per series.
 	prepareHash int
-	// prepareSeriesHash counts label hashes taken to build the prepared series.
-	prepareSeriesHash int
 	// refTrusted and refFallback count appends that did and did not reuse a
 	// verified reference instead of hashing.
 	refTrusted  int
@@ -130,7 +129,6 @@ func (c *ingestCounts) add(other ingestCounts) {
 	c.seriesForHash += other.seriesForHash
 	c.refForHash += other.refForHash
 	c.prepareHash += other.prepareHash
-	c.prepareSeriesHash += other.prepareSeriesHash
 	c.refTrusted += other.refTrusted
 	c.refFallback += other.refFallback
 }
@@ -163,6 +161,12 @@ type BatchSeries struct {
 	Kinds           []SampleKind
 	Values          []float64
 	Histograms      [][]byte
+
+	// hash carries a series hash that an in-package caller already computed or
+	// verified, so preparation does not hash the same labels again. External
+	// callers leave both fields zero-valued and preparation hashes the labels.
+	hash      uint64
+	hashValid bool
 }
 
 // AssociationUpdate relates a metadata observation to a concrete series.

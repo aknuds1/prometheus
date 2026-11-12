@@ -386,7 +386,7 @@ type appender struct {
 // Append implements the shared V2 appender, producing typed head arrays.
 // Prometheus metadata, where supplied, is staged alongside the transaction and
 // associated to the series' own metric owner, not converted into labels here.
-func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, opts storage.AOptions) (storage.SeriesRef, error) {
+func (a *appender) Append(ref storage.SeriesRef, ls labels.Labels, st, t int64, v float64, h *histogram.Histogram, fh *histogram.FloatHistogram, opts storage.AOptions) (storage.SeriesRef, error) {
 	if a.done {
 		return 0, errors.New("columnar: appender used after Commit or Rollback")
 	}
@@ -394,12 +394,34 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 		return 0, fmt.Errorf("%w: timestamp %d precedes retention cutoff %d", storage.ErrOutOfBounds, t, a.s.minValidTime)
 	}
 
-	hs, hash, err := a.seriesFor(ls)
-	if err != nil {
-		return 0, err
+	// A non-zero ref is the hash this storage returned for the series, but it is
+	// treated as a hint: complete labels must agree before the reference is used,
+	// so a stale, foreign or colliding reference cannot move a sample to another
+	// series. Anything that does not verify is hashed exactly as before.
+	var (
+		hs      *headSeries
+		hash    uint64
+		prev    seriesState
+		hasPrev bool
+	)
+	reused := false
+	if ref != 0 {
+		if h, p, hp, ok := a.resolveReference(ref, ls); ok {
+			hash, prev, hasPrev, reused = h, p, hp, true
+			var err error
+			if hs, err = a.stagedSeries(hash, ls); err != nil {
+				return 0, err
+			}
+			a.counts.refTrusted++
+		}
 	}
-
-	prev, hasPrev := a.previousLocked(ls, hash, hs)
+	if !reused {
+		var err error
+		if hs, hash, err = a.seriesFor(ls); err != nil {
+			return 0, err
+		}
+		prev, hasPrev = a.previousLocked(ls, hash, hs)
+	}
 	if hasPrev {
 		switch {
 		case t == prev.t:
@@ -457,6 +479,9 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 			},
 		})
 	}
+	if reused {
+		return refForHash(hash), nil
+	}
 	a.counts.refForHash++
 	return refFor(ls), nil
 }
@@ -473,17 +498,58 @@ func (a *appender) seriesFor(ls labels.Labels) (*headSeries, uint64, error) {
 	a.counts.seriesForHash++
 	a.counts.refFallback++
 	hash := stableSeriesHash(ls)
+	hs, err := a.stagedSeries(hash, ls)
+	if err != nil {
+		return nil, 0, err
+	}
+	return hs, hash, nil
+}
+
+// stagedSeries returns the transaction's series for hash, creating it when the
+// transaction has not seen it yet. Complete labels are compared whenever the
+// hash came from outside this function, so a reference cannot alias a series.
+func (a *appender) stagedSeries(hash uint64, ls labels.Labels) (*headSeries, error) {
 	if hs, ok := a.txs[hash]; ok {
 		if !labels.Equal(hs.labels, ls) {
-			return nil, 0, fmt.Errorf("%w for labels = %q", ErrSeriesHashCollision, ls)
+			return nil, fmt.Errorf("%w for labels = %q", ErrSeriesHashCollision, ls)
 		}
-		return hs, hash, nil
+		return hs, nil
 	}
 	hs := headSeriesPool.Get().(*headSeries)
 	*hs = headSeries{hash: hash, labels: ls}
 	a.txs[hash] = hs
 	a.order = append(a.order, hash)
-	return hs, hash, nil
+	return hs, nil
+}
+
+// resolveReference reports the series hash, previous-sample state and whether a
+// reference can be trusted. The reference is the hash this storage returned for
+// the series, so the transaction's staged series or the committed tail at that
+// hash verifies it with one complete-label comparison and no hashing. ok is
+// false for a zero reference, a label mismatch, or a series that is not known
+// yet; the caller then hashes the labels, which preserves the previous
+// behaviour for stale, foreign and zero references.
+func (a *appender) resolveReference(ref storage.SeriesRef, ls labels.Labels) (hash uint64, prev seriesState, hasPrev, ok bool) {
+	hash = uint64(ref)
+	if tx, staged := a.txs[hash]; staged {
+		if !labels.Equal(tx.labels, ls) {
+			return 0, seriesState{}, false, false
+		}
+		if len(tx.ts) > 0 {
+			return hash, stagedState(ls, tx), true, true
+		}
+	}
+	waitStart := time.Now()
+	a.s.mtx.Lock()
+	if a.s.reads != nil {
+		a.s.reads.observeAppendLockWait(time.Since(waitStart))
+	}
+	last, found := a.s.last[hash]
+	a.s.mtx.Unlock()
+	if found && labels.Equal(last.labels, ls) {
+		return hash, *last, true, true
+	}
+	return 0, seriesState{}, false, false
 }
 
 // Commit applies the buffered series and metadata through the same batched
@@ -504,6 +570,7 @@ func (a *appender) Commit() error {
 		batch.Series = append(batch.Series, BatchSeries{
 			Labels: tx.labels, Timestamps: tx.ts, StartTimestamps: tx.st,
 			Kinds: tx.kind, Values: tx.v, Histograms: tx.hist,
+			hash: tx.hash, hashValid: true,
 		})
 		// The batch captured the slice headers and labels by value; the struct
 		// itself can be recycled for the next transaction.
@@ -630,15 +697,7 @@ func detectsReset(prev seriesState, h *histogram.Histogram, fh *histogram.FloatH
 // already staged in the same appender transaction.
 func (a *appender) previousLocked(ls labels.Labels, hash uint64, tx *headSeries) (seriesState, bool) {
 	if len(tx.ts) > 0 {
-		last := tx.ts[len(tx.ts)-1]
-		state := seriesState{labels: ls, t: last, st: tx.st[len(tx.st)-1]}
-		if kind := tx.kind[len(tx.kind)-1]; kind != SampleFloat {
-			h, fh, err := decodeSampleHistogram(tx.hist[len(tx.hist)-1])
-			if err == nil {
-				state.h, state.fh = h, fh
-			}
-		}
-		return state, true
+		return stagedState(ls, tx), true
 	}
 	// Scalar appenders are used concurrently by independent scrape pools.
 	// The shared committed-tail map is protected by the same lock used by
@@ -655,10 +714,30 @@ func (a *appender) previousLocked(ls labels.Labels, hash uint64, tx *headSeries)
 	return seriesState{}, false
 }
 
+// stagedState reports the newest sample staged in the transaction.
+func stagedState(ls labels.Labels, tx *headSeries) seriesState {
+	last := tx.ts[len(tx.ts)-1]
+	state := seriesState{labels: ls, t: last, st: tx.st[len(tx.st)-1]}
+	if kind := tx.kind[len(tx.kind)-1]; kind != SampleFloat {
+		h, fh, err := decodeSampleHistogram(tx.hist[len(tx.hist)-1])
+		if err == nil {
+			state.h, state.fh = h, fh
+		}
+	}
+	return state
+}
+
 // refFor derives a stable series reference. Referenced series use the same hash
 // as metadata associations; callers must not treat zero as a valid ref.
 func refFor(ls labels.Labels) storage.SeriesRef {
-	if ref := storage.SeriesRef(stableSeriesHash(ls)); ref != 0 {
+	return refForHash(stableSeriesHash(ls))
+}
+
+// refForHash is refFor for an already computed hash, so a verified reference can
+// be returned without hashing the labels again. A zero hash is never a valid
+// reference.
+func refForHash(hash uint64) storage.SeriesRef {
+	if ref := storage.SeriesRef(hash); ref != 0 {
 		return ref
 	}
 	return 1

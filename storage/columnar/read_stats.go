@@ -83,14 +83,13 @@ type ReadStats struct {
 	LabelRowsVisited        uint64
 	MetadataIndexCandidates uint64
 	MetadataIndexFallbacks  uint64
-	// HashCallsSeriesFor, HashCallsRefFor, HashCallsPrepare and
-	// HashCallsPrepareSeries count label hashes at each call site of the
-	// ingestion path. Together with the reference counters they prove that a
-	// hash or lookup stopped happening, which a timing delta alone cannot.
-	HashCallsSeriesFor     uint64
-	HashCallsRefFor        uint64
-	HashCallsPrepare       uint64
-	HashCallsPrepareSeries uint64
+	// HashCallsSeriesFor, HashCallsRefFor and HashCallsPrepare count label
+	// hashes at each remaining call site of the ingestion path. Together with the
+	// reference counters they prove that a hash or lookup stopped happening,
+	// which a timing delta alone cannot.
+	HashCallsSeriesFor uint64
+	HashCallsRefFor    uint64
+	HashCallsPrepare   uint64
 	// RefTrusted counts appends that reused a verified series reference;
 	// RefFallback counts appends whose reference was absent or unverified and
 	// therefore hashed.
@@ -155,7 +154,6 @@ type readStats struct {
 	hashSeriesFor      atomic.Uint64
 	hashRefFor         atomic.Uint64
 	hashPrepare        atomic.Uint64
-	hashPrepareSeries  atomic.Uint64
 	refTrusted         atomic.Uint64
 	refFallback        atomic.Uint64
 }
@@ -217,7 +215,6 @@ func (s *Storage) ReadStats() ReadStats {
 		HashCallsSeriesFor:      s.reads.hashSeriesFor.Load(),
 		HashCallsRefFor:         s.reads.hashRefFor.Load(),
 		HashCallsPrepare:        s.reads.hashPrepare.Load(),
-		HashCallsPrepareSeries:  s.reads.hashPrepareSeries.Load(),
 		RefTrusted:              s.reads.refTrusted.Load(),
 		RefFallback:             s.reads.refFallback.Load(),
 	}
@@ -283,7 +280,6 @@ func (r *readStats) reset() {
 	r.hashSeriesFor.Store(0)
 	r.hashRefFor.Store(0)
 	r.hashPrepare.Store(0)
-	r.hashPrepareSeries.Store(0)
 	r.refTrusted.Store(0)
 	r.refFallback.Store(0)
 }
@@ -328,7 +324,6 @@ func (r *readStats) observeIngestCounts(c ingestCounts) {
 	r.hashSeriesFor.Add(uint64(c.seriesForHash))
 	r.hashRefFor.Add(uint64(c.refForHash))
 	r.hashPrepare.Add(uint64(c.prepareHash))
-	r.hashPrepareSeries.Add(uint64(c.prepareSeriesHash))
 	r.refTrusted.Add(uint64(c.refTrusted))
 	r.refFallback.Add(uint64(c.refFallback))
 }
