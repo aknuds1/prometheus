@@ -104,6 +104,37 @@ func (s *Storage) SeriesMetadataAssociation(seriesHash uint64, kind MetadataKind
 	return s.metadata.ownersAt(seriesHash, kind, at)
 }
 
+// ingestCounts is per-transaction mechanism accounting for the ingestion path.
+// It is accumulated with plain arithmetic while one transaction is prepared and
+// published with one atomic add per field when a commit succeeds, so proving
+// that a hash or a lookup stopped happening costs no per-sample atomics.
+type ingestCounts struct {
+	// seriesForHash counts label hashes taken to find or create the appender's
+	// transaction series.
+	seriesForHash int
+	// refForHash counts label hashes taken to build the reference returned to the
+	// caller.
+	refForHash int
+	// prepareHash counts label hashes taken to order a batch for preparation.
+	prepareHash int
+	// prepareSeriesHash counts label hashes taken to build the prepared series.
+	prepareSeriesHash int
+	// refTrusted and refFallback count appends that did and did not reuse a
+	// verified reference instead of hashing.
+	refTrusted  int
+	refFallback int
+}
+
+// add accumulates other into c.
+func (c *ingestCounts) add(other ingestCounts) {
+	c.seriesForHash += other.seriesForHash
+	c.refForHash += other.refForHash
+	c.prepareHash += other.prepareHash
+	c.prepareSeriesHash += other.prepareSeriesHash
+	c.refTrusted += other.refTrusted
+	c.refFallback += other.refFallback
+}
+
 // Batch is an ingestion batch of typed per-series columns and metadata updates.
 //
 // Resource/context association isn't reconstructed from promoted labels later;
@@ -116,6 +147,8 @@ type Batch struct {
 	// OwnerUpdates carry owner versions without series memberships. They are
 	// logged and replayed independently of samples and associations.
 	OwnerUpdates []Update
+	// counts is internal mechanism accounting carried by an in-package caller.
+	counts ingestCounts
 }
 
 // BatchSeries is one series and its sample columns.
@@ -183,7 +216,7 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 
 	// Prepare sorted typed arrays and validate every sample range before taking
 	// the store transaction lock or publishing a WAL segment.
-	prepared, err := prepareBatchSeries(batch)
+	prepared, counts, err := prepareBatchSeries(batch)
 	if err != nil {
 		return err
 	}
@@ -258,7 +291,16 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 	}
 	s.metadata = nextMetadata
 	s.metadataDirty = s.metadataDirty || metadataChanged
-	return s.commitHead(prepared)
+	if err := s.commitHead(prepared); err != nil {
+		return err
+	}
+	// Publish mechanism accounting once the transaction is visible, so the
+	// counters describe committed work rather than attempts.
+	counts.add(batch.counts)
+	if s.reads != nil {
+		s.reads.observeIngestCounts(counts)
+	}
+	return nil
 }
 
 func appendTypedSeries(dst *headSeries, src BatchSeries) {

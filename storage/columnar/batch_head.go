@@ -35,13 +35,15 @@ type indexedBatchSeries struct {
 // between repeated chunks of one series, and produces stable-hash-sorted typed
 // transaction arrays. Its stable sort preserves the caller's sample order for a
 // series while allowing unrelated series to arrive in any order.
-func prepareBatchSeries(batch Batch) ([]*headSeries, error) {
+func prepareBatchSeries(batch Batch) ([]*headSeries, ingestCounts, error) {
+	var counts ingestCounts
 	indexed := make([]indexedBatchSeries, 0, len(batch.Series))
 	for i, series := range batch.Series {
 		if err := validateSeriesColumns(series); err != nil {
-			return nil, fmt.Errorf("series chunk %d: %w", i, err)
+			return nil, counts, fmt.Errorf("series chunk %d: %w", i, err)
 		}
 		if len(series.Timestamps) > 0 {
+			counts.prepareHash++
 			indexed = append(indexed, indexedBatchSeries{index: i, hash: stableSeriesHash(series.Labels)})
 		}
 	}
@@ -63,17 +65,18 @@ func prepareBatchSeries(batch Batch) ([]*headSeries, error) {
 			end++
 		}
 		first := batch.Series[indexed[start].index]
+		counts.prepareSeriesHash++
 		merged := newHeadSeries(first.Labels)
 		for i := start; i < end; i++ {
 			series := batch.Series[indexed[i].index]
 			if !labels.Equal(merged.labels, series.Labels) {
-				return nil, fmt.Errorf("%w: %q and %q", ErrSeriesHashCollision, merged.labels, series.Labels)
+				return nil, counts, fmt.Errorf("%w: %q and %q", ErrSeriesHashCollision, merged.labels, series.Labels)
 			}
 			if merged.Len() > 0 {
 				previous := merged.ts[len(merged.ts)-1]
 				next := series.Timestamps[0]
 				if next <= previous {
-					return nil, batchTimestampError(previous, next)
+					return nil, counts, batchTimestampError(previous, next)
 				}
 			}
 			appendTypedSeries(merged, series)
@@ -81,7 +84,7 @@ func prepareBatchSeries(batch Batch) ([]*headSeries, error) {
 		prepared = append(prepared, merged)
 		start = end
 	}
-	return prepared, nil
+	return prepared, counts, nil
 }
 
 func batchTimestampError(previous, next int64) error {

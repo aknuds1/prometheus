@@ -376,10 +376,11 @@ func (a *appenderV1) Append_(ls labels.Labels, t int64, v float64) (storage.Seri
 type appender struct {
 	s *Storage
 
-	txs   map[uint64]*headSeries
-	order []uint64
-	meta  []AssociationUpdate
-	done  bool
+	txs    map[uint64]*headSeries
+	order  []uint64
+	meta   []AssociationUpdate
+	counts ingestCounts
+	done   bool
 }
 
 // Append implements the shared V2 appender, producing typed head arrays.
@@ -456,6 +457,7 @@ func (a *appender) Append(_ storage.SeriesRef, ls labels.Labels, st, t int64, v 
 			},
 		})
 	}
+	a.counts.refForHash++
 	return refFor(ls), nil
 }
 
@@ -468,6 +470,8 @@ var headSeriesPool = sync.Pool{New: func() any { return new(headSeries) }}
 // seriesFor returns the transaction's series and its stable hash, so callers do
 // not re-hash the same labels.
 func (a *appender) seriesFor(ls labels.Labels) (*headSeries, uint64, error) {
+	a.counts.seriesForHash++
+	a.counts.refFallback++
 	hash := stableSeriesHash(ls)
 	if hs, ok := a.txs[hash]; ok {
 		if !labels.Equal(hs.labels, ls) {
@@ -490,7 +494,7 @@ func (a *appender) Commit() error {
 	}
 	a.done = true
 
-	batch := Batch{Updates: a.meta, Series: make([]BatchSeries, 0, len(a.order))}
+	batch := Batch{Updates: a.meta, Series: make([]BatchSeries, 0, len(a.order)), counts: a.counts}
 	for _, hash := range a.order {
 		tx := a.txs[hash]
 		if len(tx.ts) == 0 {

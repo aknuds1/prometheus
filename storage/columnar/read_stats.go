@@ -83,6 +83,19 @@ type ReadStats struct {
 	LabelRowsVisited        uint64
 	MetadataIndexCandidates uint64
 	MetadataIndexFallbacks  uint64
+	// HashCallsSeriesFor, HashCallsRefFor, HashCallsPrepare and
+	// HashCallsPrepareSeries count label hashes at each call site of the
+	// ingestion path. Together with the reference counters they prove that a
+	// hash or lookup stopped happening, which a timing delta alone cannot.
+	HashCallsSeriesFor     uint64
+	HashCallsRefFor        uint64
+	HashCallsPrepare       uint64
+	HashCallsPrepareSeries uint64
+	// RefTrusted counts appends that reused a verified series reference;
+	// RefFallback counts appends whose reference was absent or unverified and
+	// therefore hashed.
+	RefTrusted  uint64
+	RefFallback uint64
 }
 
 // QueryTimingStats reports accumulated phase durations in nanoseconds. Callers
@@ -139,6 +152,12 @@ type readStats struct {
 	labelRows          atomic.Uint64
 	metadataCandidates atomic.Uint64
 	metadataFallbacks  atomic.Uint64
+	hashSeriesFor      atomic.Uint64
+	hashRefFor         atomic.Uint64
+	hashPrepare        atomic.Uint64
+	hashPrepareSeries  atomic.Uint64
+	refTrusted         atomic.Uint64
+	refFallback        atomic.Uint64
 }
 
 func (s *Storage) ReadStats() ReadStats {
@@ -195,6 +214,12 @@ func (s *Storage) ReadStats() ReadStats {
 		LabelRowsVisited:        s.reads.labelRows.Load(),
 		MetadataIndexCandidates: s.reads.metadataCandidates.Load(),
 		MetadataIndexFallbacks:  s.reads.metadataFallbacks.Load(),
+		HashCallsSeriesFor:      s.reads.hashSeriesFor.Load(),
+		HashCallsRefFor:         s.reads.hashRefFor.Load(),
+		HashCallsPrepare:        s.reads.hashPrepare.Load(),
+		HashCallsPrepareSeries:  s.reads.hashPrepareSeries.Load(),
+		RefTrusted:              s.reads.refTrusted.Load(),
+		RefFallback:             s.reads.refFallback.Load(),
 	}
 }
 
@@ -255,6 +280,12 @@ func (r *readStats) reset() {
 	r.labelRows.Store(0)
 	r.metadataCandidates.Store(0)
 	r.metadataFallbacks.Store(0)
+	r.hashSeriesFor.Store(0)
+	r.hashRefFor.Store(0)
+	r.hashPrepare.Store(0)
+	r.hashPrepareSeries.Store(0)
+	r.refTrusted.Store(0)
+	r.refFallback.Store(0)
 }
 
 // atomicMax stores v if it exceeds the current value.
@@ -289,4 +320,15 @@ func (r *readStats) observeCommitHold(h time.Duration) {
 	n := uint64(h.Nanoseconds())
 	r.commitHoldNanos.Add(n)
 	atomicMax(&r.commitHoldMax, n)
+}
+
+// observeIngestCounts publishes one transaction's mechanism accounting with a
+// fixed number of atomic adds, independent of the number of samples.
+func (r *readStats) observeIngestCounts(c ingestCounts) {
+	r.hashSeriesFor.Add(uint64(c.seriesForHash))
+	r.hashRefFor.Add(uint64(c.refForHash))
+	r.hashPrepare.Add(uint64(c.prepareHash))
+	r.hashPrepareSeries.Add(uint64(c.prepareSeriesHash))
+	r.refTrusted.Add(uint64(c.refTrusted))
+	r.refFallback.Add(uint64(c.refFallback))
 }
