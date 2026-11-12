@@ -614,6 +614,18 @@ func infoFixture(series, perSeries int, mode string) infoCorpus {
 	return c
 }
 
+// instances returns the distinct target identities of the fixture in a stable
+// order, so the control emits one target_info stream per target rather than one
+// per data series.
+func (c infoCorpus) instances() []string {
+	out := make([]string, 0, len(c.owners))
+	for instance := range c.owners {
+		out = append(out, instance)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // instanceFor returns the identifying instance of data series i.
 func (c infoCorpus) instanceFor(i int) string {
 	if c.mode == "per-series" {
@@ -702,9 +714,13 @@ func buildTSDBInfo(tb testing.TB, c infoCorpus) (storage.Queryable, func()) {
 			_, err := app.Append(0, ls, 0, t, float64(j), nil, nil, storage.AOptions{})
 			require.NoError(tb, err)
 		}
-		// target_info is scraped every interval, as a real target_info is, so the
-		// version change lands on the same step as the native association.
-		instance := c.instanceFor(i)
+	}
+	// One target_info stream per distinct target, scraped every interval, as a
+	// real target_info is: the version change lands on the same step as the
+	// native association. Emitting one stream per data series would append the
+	// same target_info row thousands of times and would not be an equivalent
+	// conventional corpus.
+	for _, instance := range c.instances() {
 		for j := range c.samples {
 			t := c.mint + int64(j)*scrapeIntervalMs
 			content := c.owners[instance]
@@ -820,7 +836,14 @@ func TestStage0InfoEquivalence(t *testing.T) {
 			// The version change must be observable, or the fixture measures nothing.
 			require.Contains(t, strings.Join(got, "\n"), `region="west"`)
 		}
-		t.Logf("owners=%s series=%d resultSeries=%d", mode, series, len(got))
+		// Record the corpus shape of the control, so a duplicated or missing
+		// target_info stream cannot hide behind equal query results.
+		controlSeries := -1
+		if head, ok := db.(interface{ Head() *tsdb.Head }); ok {
+			controlSeries = int(head.Head().NumSeries())
+		}
+		t.Logf("owners=%s series=%d distinct-targets=%d resultSeries=%d tsdbHeadSeries=%d",
+			mode, series, len(c.owners), len(got), controlSeries)
 
 		colClose()
 		dbClose()
