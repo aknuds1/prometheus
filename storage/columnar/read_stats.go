@@ -57,6 +57,9 @@ type ReadStats struct {
 	PostingsValueMatched uint64
 	SelectCalls          uint64
 	Queries              uint64
+	SealCount            uint64
+	SealNanos            uint64
+	LastSealNanos        uint64
 	// Blocks, BlockMinTime and BlockMaxTime describe the sealed corpus at read
 	// time. An overlap count is only interpretable alongside the block duration
 	// that produces it, and duration is what a sample-count threshold stops
@@ -109,6 +112,9 @@ type readStats struct {
 	postingsValueMatch atomic.Uint64
 	selectCalls        atomic.Uint64
 	queries            atomic.Uint64
+	seals              atomic.Uint64
+	sealNanos          atomic.Uint64
+	lastSealNanos      atomic.Uint64
 	labelRows          atomic.Uint64
 	metadataCandidates atomic.Uint64
 	metadataFallbacks  atomic.Uint64
@@ -153,6 +159,9 @@ func (s *Storage) ReadStats() ReadStats {
 		PostingsValueMatched:    s.reads.postingsValueMatch.Load(),
 		SelectCalls:             s.reads.selectCalls.Load(),
 		Queries:                 s.reads.queries.Load(),
+		SealCount:               s.reads.seals.Load(),
+		SealNanos:               s.reads.sealNanos.Load(),
+		LastSealNanos:           s.reads.lastSealNanos.Load(),
 		Timings:                 s.ReadTimings(),
 		LabelRowsVisited:        s.reads.labelRows.Load(),
 		MetadataIndexCandidates: s.reads.metadataCandidates.Load(),
@@ -203,6 +212,9 @@ func (r *readStats) reset() {
 	r.postingsValueMatch.Store(0)
 	r.selectCalls.Store(0)
 	r.queries.Store(0)
+	r.seals.Store(0)
+	r.sealNanos.Store(0)
+	r.lastSealNanos.Store(0)
 	r.labelRows.Store(0)
 	r.metadataCandidates.Store(0)
 	r.metadataFallbacks.Store(0)

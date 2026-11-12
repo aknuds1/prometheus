@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/histogram"
@@ -296,6 +297,18 @@ func (s *Storage) NumBlocks() int {
 
 // flushLocked converts columns into block rows only at seal time.
 func (s *Storage) flushLocked() error {
+	// Measured over the whole call, fsync included: this is the commit-blocking
+	// window, which is what a scrape actually waits on.
+	sealStart := time.Now()
+	defer func() {
+		if s.reads == nil {
+			return
+		}
+		d := uint64(time.Since(sealStart).Nanoseconds())
+		s.reads.seals.Inc()
+		s.reads.sealNanos.Add(d)
+		s.reads.lastSealNanos.Store(d)
+	}()
 	if len(s.buffer) == 0 && !s.metadataDirty {
 		return nil
 	}
