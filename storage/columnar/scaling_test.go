@@ -261,7 +261,14 @@ func BenchmarkScaling(b *testing.B) {
 	// Series count is fixed so that label cardinality, catalog entries and index
 	// postings are constant; only samples per series changes, which is the only
 	// thing that changes segment and chunk size.
-	const series = 10_000
+	series := 10_000
+	if v := os.Getenv("SCALING_SERIES"); v != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			b.Fatal(err)
+		}
+		series = n
+	}
 	densities := []int{60, 600}
 	if v := os.Getenv("SCALING_DENSITIES"); v != "" {
 		densities = nil
