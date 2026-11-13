@@ -15,6 +15,7 @@ package columnar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -35,14 +36,28 @@ import (
 // Resource attributes are not labels merely because they arrived in the batch;
 // existing promotion and target_info settings still provide compatibility.
 //
-// Histograms, summaries and exemplars remain deliberately unsupported. Delta
-// samples are retained without conversion. Native values are stringified with
-// the same pcommon.Value.AsString conversion used by the existing OTLP path.
+// Classic histograms, exponential histograms, summaries and data point exemplars
+// are not converted yet, and the sink accepts a batch as a whole or not at all. A
+// batch carrying any of them, or a data point row it cannot attribute or value,
+// fails with [ErrUnsupportedPayload] before anything is published, so its samples,
+// associations and metadata versions never become visible. Delta samples are
+// retained without conversion. Native values are stringified with the same
+// pcommon.Value.AsString conversion used by the existing OTLP path.
 type OTAPSink struct {
 	storage  *Storage
 	logger   *slog.Logger
 	settings func() otlpprw.Settings
 }
+
+// ErrUnsupportedPayload is returned by [OTAPSink.ConsumeRecords] when a batch
+// carries OTAP data the native sink cannot convert: summary, classic histogram or
+// exponential histogram data points, data point exemplars, a metric row without a
+// convertible name, or a data point row without a value.
+//
+// Such a batch is rejected as a whole. Dropping only the unconvertible part of it
+// would acknowledge samples the store never received, so the transport reports a
+// negative batch acknowledgement instead and leaves the decision to the client.
+var ErrUnsupportedPayload = errors.New("columnar: unsupported OTAP payload")
 
 // NewOTAPSink returns a sink appending to storage. An optional settings provider
 // is evaluated once per batch, so live OTLP translation changes don't require
@@ -59,12 +74,23 @@ func NewOTAPSink(storage *Storage, logger *slog.Logger, providers ...func() otlp
 }
 
 // ConsumeRecords appends the metrics carried by one OTAP batch.
+//
+// The batch is all-or-nothing. A readable batch is appended in one
+// [Storage.AppendBatch] transaction; a batch the sink cannot convert is rejected
+// before that call, so none of its samples, associations or metadata versions are
+// published. An empty batch, or a batch whose metrics carry no data points, is a
+// successful no-op, because it holds nothing that could be lost.
 func (s *OTAPSink) ConsumeRecords(ctx context.Context, records []*record_message.RecordMessage) error {
 	if len(records) == 0 {
 		return nil
 	}
-	batch, appended, skipped, err := s.buildBatch(records)
+	batch, appended, err := s.buildBatch(records)
 	if err != nil {
+		// The transport reports the rejection to the client; the sink's own log keeps
+		// the payload-level reason next to the component that refused the batch.
+		if s.logger != nil {
+			s.logger.Debug("Rejecting OTAP batch the columnar sink cannot convert", "err", err)
+		}
 		return err
 	}
 	if appended == 0 {
@@ -72,10 +98,6 @@ func (s *OTAPSink) ConsumeRecords(ctx context.Context, records []*record_message
 	}
 	if err := s.storage.AppendBatch(ctx, batch); err != nil {
 		return fmt.Errorf("appending OTAP batch: %w", err)
-	}
-	if s.logger != nil && skipped > 0 {
-		s.logger.Debug("Skipped OTAP samples the columnar sink does not support",
-			"appended", appended, "skipped", skipped)
 	}
 	return nil
 }

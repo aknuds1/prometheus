@@ -111,33 +111,6 @@ func TestOTAPSinkAppendsGaugeAndSum(t *testing.T) {
 	require.Equal(t, []float64{7}, sumSeries.Values, "integer values are widened")
 }
 
-func TestOTAPSinkIgnoresUnsupportedSignals(t *testing.T) {
-	s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, s.Close()) })
-
-	// A histogram-only batch has no NUMBER_DATA_POINTS record the sink can use, and
-	// must be skipped rather than approximated.
-	md := pmetric.NewMetrics()
-	sm := md.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty()
-	hist := sm.Metrics().AppendEmpty()
-	hist.SetName("columnar_histogram")
-	h := hist.SetEmptyHistogram()
-	h.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
-	hdp := h.DataPoints().AppendEmpty()
-	hdp.SetTimestamp(pcommon.Timestamp(1700000000_000_000_000))
-	hdp.SetCount(3)
-	hdp.SetSum(6)
-	hdp.BucketCounts().FromRaw([]uint64{1, 2})
-
-	sink := columnar.NewOTAPSink(s, slog.New(slog.DiscardHandler))
-	require.NoError(t, sink.ConsumeRecords(t.Context(), recordsFor(t, md)))
-
-	series, err := s.SelectSeries(t.Context(), 0, 2_000_000_000_000, nil, 0)
-	require.NoError(t, err)
-	require.Empty(t, series, "unsupported signals must be dropped, not approximated")
-}
-
 func TestOTAPSinkHandlesSuccessiveBatches(t *testing.T) {
 	s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{FlushSamples: 2})
 	require.NoError(t, err)

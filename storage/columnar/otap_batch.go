@@ -17,8 +17,10 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -64,10 +66,18 @@ type otapBatchBuilder struct {
 	resourceBounds map[uint16]otapResourceBounds
 	targetInfoSeen map[targetInfoBatchKey]struct{}
 	appended       int
-	skipped        int
 }
 
-func (s *OTAPSink) buildBatch(records []*record_message.RecordMessage) (Batch, int, int, error) {
+// buildBatch converts one batch worth of records into a single transaction-local
+// [Batch] and reports how many samples it holds.
+//
+// It never returns a partially converted batch: any payload or data point row the
+// native sink cannot convert fails the whole call with [ErrUnsupportedPayload].
+// Publishing part of a batch would acknowledge samples the store does not hold,
+// which is worse than rejecting the batch the client can still choose to re-send
+// elsewhere. An empty batch, or a batch whose metrics carry no data points, is a
+// no-op: it holds nothing that could be lost.
+func (s *OTAPSink) buildBatch(records []*record_message.RecordMessage) (Batch, int, error) {
 	var metricsRecord, resourceRecord, scopeRecord, numberDPRecord, pointAttrsRecord *record_message.RecordMessage
 	for _, record := range records {
 		switch record.PayloadType() {
@@ -83,26 +93,43 @@ func (s *OTAPSink) buildBatch(records []*record_message.RecordMessage) (Batch, i
 			pointAttrsRecord = record
 		}
 	}
-	if metricsRecord == nil || numberDPRecord == nil {
-		// Histograms, summaries, logs and traces have no accepted NumberDataPoints.
-		return Batch{}, 0, 0, nil
+
+	// Naming the unsupported payloads before decoding anything keeps the error about
+	// the input rather than about a symptom of it.
+	if unsupported := otapUnsupportedPayloads(records); len(unsupported) > 0 {
+		return Batch{}, 0, fmt.Errorf("%w: %s; nothing was appended",
+			ErrUnsupportedPayload, strings.Join(unsupported, ", "))
+	}
+
+	numberDPRows := 0
+	if numberDPRecord != nil {
+		numberDPRows = int(numberDPRecord.Record().NumRows())
+	}
+	switch {
+	case numberDPRows == 0:
+		// An empty batch, or metrics without data points. Nothing exists that the
+		// sink could convert and therefore nothing exists that it could drop.
+		return Batch{}, 0, nil
+	case metricsRecord == nil:
+		return Batch{}, 0, fmt.Errorf("%w: %s without a metrics payload; nothing was appended",
+			ErrUnsupportedPayload, otapRowCount(numberDPRows, "number data point row", "number data point rows"))
 	}
 
 	resourceAttrs, err := decodeOTAPAttributes[uint16](resourceRecord)
 	if err != nil {
-		return Batch{}, 0, 0, fmt.Errorf("decoding Resource attributes: %w", err)
+		return Batch{}, 0, fmt.Errorf("decoding Resource attributes: %w", err)
 	}
 	scopeAttrs, err := decodeOTAPAttributes[uint16](scopeRecord)
 	if err != nil {
-		return Batch{}, 0, 0, fmt.Errorf("decoding Scope attributes: %w", err)
+		return Batch{}, 0, fmt.Errorf("decoding Scope attributes: %w", err)
 	}
 	pointAttrs, err := decodeOTAPAttributes[uint32](pointAttrsRecord)
 	if err != nil {
-		return Batch{}, 0, 0, fmt.Errorf("decoding DataPoint attributes: %w", err)
+		return Batch{}, 0, fmt.Errorf("decoding DataPoint attributes: %w", err)
 	}
 	metrics, err := readOTAPMetricContexts(metricsRecord.Record(), resourceAttrs)
 	if err != nil {
-		return Batch{}, 0, 0, err
+		return Batch{}, 0, err
 	}
 
 	builder := &otapBatchBuilder{
@@ -118,13 +145,83 @@ func (s *OTAPSink) buildBatch(records []*record_message.RecordMessage) (Batch, i
 		targetInfoSeen: map[targetInfoBatchKey]struct{}{},
 	}
 	if err := builder.appendNumberDataPoints(numberDPRecord.Record(), metrics); err != nil {
-		return Batch{}, 0, 0, err
+		return Batch{}, 0, err
 	}
 	if err := builder.appendTargetInfo(); err != nil {
-		return Batch{}, 0, 0, err
+		return Batch{}, 0, err
 	}
 	builder.sortSamples()
-	return builder.batch, builder.appended, builder.skipped, nil
+	return builder.batch, builder.appended, nil
+}
+
+// otapUnsupportedPayloads describes every payload of a batch that carries rows the
+// native sink cannot convert, ordered by payload type so the same input always
+// produces the same error.
+func otapUnsupportedPayloads(records []*record_message.RecordMessage) []string {
+	rows := map[colarspb.ArrowPayloadType]int{}
+	for _, record := range records {
+		kind := record.PayloadType()
+		if _, unsupported := otapUnsupportedPayloadName(kind); !unsupported {
+			continue
+		}
+		// A payload without rows drops nothing, so it is not a reason to reject.
+		if n := int(record.Record().NumRows()); n > 0 {
+			rows[kind] += n
+		}
+	}
+	kinds := slices.Sorted(maps.Keys(rows))
+	unsupported := make([]string, len(kinds))
+	for i, kind := range kinds {
+		name, _ := otapUnsupportedPayloadName(kind)
+		unsupported[i] = fmt.Sprintf("%s (%s)", name, otapRowCount(rows[kind], "row", "rows"))
+	}
+	return unsupported
+}
+
+// otapUnsupportedPayloadName names a payload the native sink does not convert and
+// reports whether records of that payload type are rejected. Attribute payloads
+// carry no row of their own and travel with the payload that owns them, so only
+// the owning payload is named. Payload types the sink does not know are rejected
+// by name: failing closed is the only safe default for data of unknown shape.
+func otapUnsupportedPayloadName(kind colarspb.ArrowPayloadType) (string, bool) {
+	switch kind {
+	case colarspb.ArrowPayloadType_RESOURCE_ATTRS,
+		colarspb.ArrowPayloadType_SCOPE_ATTRS,
+		colarspb.ArrowPayloadType_UNIVARIATE_METRICS,
+		colarspb.ArrowPayloadType_NUMBER_DATA_POINTS,
+		colarspb.ArrowPayloadType_NUMBER_DP_ATTRS,
+		colarspb.ArrowPayloadType_SUMMARY_DP_ATTRS,
+		colarspb.ArrowPayloadType_HISTOGRAM_DP_ATTRS,
+		colarspb.ArrowPayloadType_EXP_HISTOGRAM_DP_ATTRS,
+		colarspb.ArrowPayloadType_NUMBER_DP_EXEMPLAR_ATTRS,
+		colarspb.ArrowPayloadType_HISTOGRAM_DP_EXEMPLAR_ATTRS,
+		colarspb.ArrowPayloadType_EXP_HISTOGRAM_DP_EXEMPLAR_ATTRS:
+		return "", false
+	case colarspb.ArrowPayloadType_SUMMARY_DATA_POINTS:
+		return "summary data points", true
+	case colarspb.ArrowPayloadType_HISTOGRAM_DATA_POINTS:
+		return "classic histogram data points", true
+	case colarspb.ArrowPayloadType_EXP_HISTOGRAM_DATA_POINTS:
+		return "exponential histogram data points", true
+	case colarspb.ArrowPayloadType_NUMBER_DP_EXEMPLARS:
+		return "number data point exemplars", true
+	case colarspb.ArrowPayloadType_HISTOGRAM_DP_EXEMPLARS:
+		return "classic histogram data point exemplars", true
+	case colarspb.ArrowPayloadType_EXP_HISTOGRAM_DP_EXEMPLARS:
+		return "exponential histogram data point exemplars", true
+	case colarspb.ArrowPayloadType_MULTIVARIATE_METRICS:
+		return "multivariate metrics", true
+	default:
+		return fmt.Sprintf("payload type %s", kind), true
+	}
+}
+
+// otapRowCount renders a row count with the noun that agrees with it.
+func otapRowCount(rows int, singular, plural string) string {
+	if rows == 1 {
+		return fmt.Sprintf("%d %s", rows, singular)
+	}
+	return fmt.Sprintf("%d %s", rows, plural)
 }
 
 func decodeOTAPAttributes[unsigned constraints.Unsigned](record *record_message.RecordMessage) (*commonotlp.AttributesStore[unsigned], error) {
@@ -160,8 +257,8 @@ func (b *otapBatchBuilder) appendNumberDataPoints(rec arrow.RecordBatch, metrics
 		metricID += uint16(uintValue(parentCol, row))
 		ctx, ok := metrics[metricID]
 		if !ok {
-			b.skipped++
-			continue
+			return fmt.Errorf("%w: number data point row %d refers to metric %d, which the sink does not convert (unnamed or unsupported metric row); nothing was appended",
+				ErrUnsupportedPayload, row, metricID)
 		}
 
 		var attributes map[string]string
@@ -194,8 +291,8 @@ func (b *otapBatchBuilder) appendNumberDataPoints(rec arrow.RecordBatch, metrics
 			hasValue = true
 		}
 		if !hasValue {
-			b.skipped++
-			continue
+			return fmt.Errorf("%w: number data point row %d of metric %q carries neither an integer nor a double value; nothing was appended",
+				ErrUnsupportedPayload, row, ctx.metric.Name())
 		}
 
 		translation, err := b.translateMetric(metricID, ctx)

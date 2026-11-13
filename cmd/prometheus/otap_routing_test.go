@@ -472,6 +472,221 @@ func seriesKey(ls labels.Labels) string {
 	return ""
 }
 
+// otapRejectionTimestamp is the instant every unsupported-payload fixture uses.
+const otapRejectionTimestamp = pcommon.Timestamp(1_700_000_000_000_000_000)
+
+// newOTAPRejectionFixture returns an empty batch whose Resource and Scope match the
+// routing fixture. The Resource carries identifying and descriptive attributes, so a
+// sink that committed a supported prefix would also commit a target_info sample and
+// a metadata version, and the rejection tests would see them.
+func newOTAPRejectionFixture() (pmetric.Metrics, pmetric.ScopeMetrics) {
+	md := pmetric.NewMetrics()
+	rm := md.ResourceMetrics().AppendEmpty()
+	rm.Resource().Attributes().PutStr("service.name", "checkout")
+	rm.Resource().Attributes().PutStr("host.name", "host-1")
+	rm.Resource().Attributes().PutStr("region", "east")
+	sm := rm.ScopeMetrics().AppendEmpty()
+	sm.Scope().SetName("prometheus.otap.rejection")
+	return md, sm
+}
+
+// appendOTAPGauge adds a gauge with one double-valued point and returns it.
+func appendOTAPGauge(sm pmetric.ScopeMetrics, name string, value float64) pmetric.NumberDataPoint {
+	metric := sm.Metrics().AppendEmpty()
+	metric.SetName(name)
+	dp := metric.SetEmptyGauge().DataPoints().AppendEmpty()
+	dp.SetTimestamp(otapRejectionTimestamp)
+	dp.SetDoubleValue(value)
+	return dp
+}
+
+// appendOTAPClassicHistogram adds one cumulative classic histogram with one point.
+func appendOTAPClassicHistogram(sm pmetric.ScopeMetrics, name string) {
+	metric := sm.Metrics().AppendEmpty()
+	metric.SetName(name)
+	histogram := metric.SetEmptyHistogram()
+	histogram.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	dp := histogram.DataPoints().AppendEmpty()
+	dp.SetTimestamp(otapRejectionTimestamp)
+	dp.SetCount(4)
+	dp.SetSum(10)
+	dp.BucketCounts().FromRaw([]uint64{1, 2, 1})
+	dp.ExplicitBounds().FromRaw([]float64{1, 2})
+}
+
+// appendOTAPSummary adds one summary with one point.
+func appendOTAPSummary(sm pmetric.ScopeMetrics, name string) {
+	metric := sm.Metrics().AppendEmpty()
+	metric.SetName(name)
+	dp := metric.SetEmptySummary().DataPoints().AppendEmpty()
+	dp.SetTimestamp(otapRejectionTimestamp)
+	dp.SetCount(2)
+	dp.SetSum(3)
+	quantile := dp.QuantileValues().AppendEmpty()
+	quantile.SetQuantile(0.5)
+	quantile.SetValue(1.5)
+}
+
+// appendOTAPExponentialHistogram adds one cumulative exponential histogram with one
+// point.
+func appendOTAPExponentialHistogram(sm pmetric.ScopeMetrics, name string) {
+	metric := sm.Metrics().AppendEmpty()
+	metric.SetName(name)
+	histogram := metric.SetEmptyExponentialHistogram()
+	histogram.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	dp := histogram.DataPoints().AppendEmpty()
+	dp.SetTimestamp(otapRejectionTimestamp)
+	dp.SetCount(2)
+	dp.SetSum(3)
+	dp.SetScale(1)
+	dp.Positive().SetOffset(0)
+	dp.Positive().BucketCounts().FromRaw([]uint64{1, 1})
+}
+
+// TestOTAPReceiverRejectsUnsupportedBatch proves the native route's all-or-nothing
+// contract end to end, through the real gRPC receiver, stream decoder and columnar
+// sink. Before this contract the sink silently dropped every case below and the
+// client still saw OK, so a producer could believe data was stored that never was.
+//
+// Both routes are attached so the test also proves a rejected batch cannot fall back
+// to the ordinary OTLP consumer: that would be a second route hidden inside a
+// rejection.
+func TestOTAPReceiverRejectsUnsupportedBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		metrics func() pmetric.Metrics
+		want    string
+	}{
+		{
+			name: "classic histogram",
+			metrics: func() pmetric.Metrics {
+				md, sm := newOTAPRejectionFixture()
+				appendOTAPClassicHistogram(sm, "otap_routing_histogram")
+				return md
+			},
+			want: "classic histogram data points (1 row)",
+		},
+		{
+			name: "summary",
+			metrics: func() pmetric.Metrics {
+				md, sm := newOTAPRejectionFixture()
+				appendOTAPSummary(sm, "otap_routing_summary")
+				return md
+			},
+			want: "summary data points (1 row)",
+		},
+		{
+			name: "exponential histogram",
+			metrics: func() pmetric.Metrics {
+				md, sm := newOTAPRejectionFixture()
+				appendOTAPExponentialHistogram(sm, "otap_routing_exponential_histogram")
+				return md
+			},
+			want: "exponential histogram data points (1 row)",
+		},
+		{
+			name: "supported numbers mixed with a classic histogram",
+			metrics: func() pmetric.Metrics {
+				md, sm := newOTAPRejectionFixture()
+				appendOTAPGauge(sm, "otap_routing_gauge", 1)
+				appendOTAPClassicHistogram(sm, "otap_routing_histogram")
+				return md
+			},
+			want: "classic histogram data points (1 row)",
+		},
+		{
+			name: "supported number carrying an exemplar",
+			metrics: func() pmetric.Metrics {
+				md, sm := newOTAPRejectionFixture()
+				points := appendOTAPGauge(sm, "otap_routing_gauge", 1).Exemplars()
+				exemplar := points.AppendEmpty()
+				exemplar.SetTimestamp(otapRejectionTimestamp - 1_000_000)
+				exemplar.SetDoubleValue(0.5)
+				return md
+			},
+			want: "number data point exemplars (1 row)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			local := newOTAPRoutingStorage(t)
+			var counts otapRouteCounters
+			reg := prometheus.NewRegistry()
+
+			client := startOTAPReceiver(t, reg, local.consumerFor(t, reg, &counts), local.nativeSinkFor(t, &counts))
+			ack := appendBatch(t, client, tc.metrics())
+
+			require.NotEqual(t, colarspb.StatusCode_OK, ack.GetStatusCode(),
+				"an unsupported batch must not be acknowledged as stored")
+			require.Contains(t, ack.GetStatusMessage(), tc.want,
+				"the acknowledgement must name the payload the sink cannot convert")
+			require.Equal(t, int64(1), counts.sink.Load(), "the native sink is called once")
+			require.Equal(t, int64(0), counts.consumer.Load(), "a rejected batch must not fall back to the OTLP consumer")
+
+			stored := storedSeries(t, local.storage, 0, 2_000_000_000_000)
+			require.Empty(t, stored, "a rejected batch must not store a supported prefix or a target_info sample")
+			require.Zero(t, local.storage.ReadStats().CommitCount, "a rejected batch must not reach a store transaction")
+			t.Logf("rejected %s: status=%s message=%q commits=%d",
+				tc.name, ack.GetStatusCode(), ack.GetStatusMessage(), local.storage.ReadStats().CommitCount)
+		})
+	}
+}
+
+// TestOTAPReceiverAcceptsEmptyBatch pins the other side of the contract: an input
+// that carries no data point is still a successful no-op on the native route, so the
+// rejection above cannot be explained by treating every batch as unreadable.
+func TestOTAPReceiverAcceptsEmptyBatch(t *testing.T) {
+	local := newOTAPRoutingStorage(t)
+	var counts otapRouteCounters
+	reg := prometheus.NewRegistry()
+
+	c, sink := otapIngestionRoutes(local.storage, slog.New(slog.DiscardHandler), newLiveConfig(t), 5*time.Minute, false,
+		func() consumer.Metrics { return local.consumerFor(t, reg, &counts) })
+	require.Nil(t, c)
+	require.NotNil(t, sink)
+	sink = countedSink{inner: sink, n: &counts.sink}
+
+	client := startOTAPReceiver(t, reg, c, sink)
+	ack := appendBatch(t, client, pmetric.NewMetrics())
+
+	require.Equal(t, colarspb.StatusCode_OK, ack.GetStatusCode(), ack.GetStatusMessage())
+	require.Equal(t, int64(1), counts.sink.Load(), "the native sink still sees the empty batch")
+	require.Equal(t, int64(0), counts.consumer.Load())
+	require.Empty(t, storedSeries(t, local.storage, 0, 2_000_000_000_000))
+	require.Zero(t, local.storage.ReadStats().CommitCount)
+}
+
+// TestOTAPReceiverOrdinaryOTLPRouteStoresHistogram is the control for the rejection
+// above: classic histograms stay fully supported through the ordinary OTLP consumer,
+// and their stored output is unchanged. The native route's refusal therefore removes
+// no capability the receiver had, it only stops pretending the native route had it.
+func TestOTAPReceiverOrdinaryOTLPRouteStoresHistogram(t *testing.T) {
+	md, sm := newOTAPRejectionFixture()
+	appendOTAPClassicHistogram(sm, "otap_routing_histogram")
+
+	local := newOTAPRoutingStorage(t)
+	var counts otapRouteCounters
+	reg := prometheus.NewRegistry()
+
+	client := startOTAPReceiver(t, reg, local.consumerFor(t, reg, &counts), nil)
+	ack := appendBatch(t, client, md)
+
+	require.Equal(t, colarspb.StatusCode_OK, ack.GetStatusCode(), ack.GetStatusMessage())
+	require.Equal(t, int64(1), counts.consumer.Load())
+
+	got := map[string][]string{}
+	for _, s := range storedSeries(t, local.storage, 0, 2_000_000_000_000) {
+		got[s.labels.String()] = s.points
+	}
+	require.Equal(t, map[string][]string{
+		`{__name__="otap_routing_histogram_bucket", job="checkout", le="+Inf"}`:       {"1700000000000=4"},
+		`{__name__="otap_routing_histogram_bucket", job="checkout", le="1"}`:          {"1700000000000=1"},
+		`{__name__="otap_routing_histogram_bucket", job="checkout", le="2"}`:          {"1700000000000=3"},
+		`{__name__="otap_routing_histogram_count", job="checkout"}`:                   {"1700000000000=4"},
+		`{__name__="otap_routing_histogram_sum", job="checkout"}`:                     {"1700000000000=10"},
+		`{__name__="target_info", host_name="host-1", job="checkout", region="east"}`: {"1700000000000=1"},
+	}, got, "the ordinary OTLP consumer must keep storing classic histograms exactly")
+}
+
 // startOTAPReceiver serves a real OTAP receiver over bufconn and returns a client
 // for it. A nil sink means the receiver only has the ordinary OTLP consumer.
 func startOTAPReceiver(t *testing.T, reg *prometheus.Registry, c consumer.Metrics, sink otap.RecordSink) colarspb.ArrowMetricsServiceClient {

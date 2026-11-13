@@ -1915,10 +1915,12 @@ func selectQueryStorage(primary storage.Storage, candidate *columnar.Storage) st
 // constructor is a function so the unused route registers no metrics and does no
 // other setup.
 //
-// The native route converts only the NumberDataPoints payloads it supports, so OTAP
-// histograms, summaries and exemplars are skipped in columnar-only mode. That
-// limitation belongs to the sink and is reported by it; it is not repaired by
-// attaching a second route that would duplicate every float sample in the batch.
+// The native route converts only the NumberDataPoints payloads it supports. A batch
+// that carries histograms, summaries, exponential histograms, data point exemplars or
+// a data point row it cannot attribute is rejected as a whole, and the client sees a
+// failed acknowledgement instead of a silent partial store. That limitation belongs
+// to the sink and is reported by it; it is not repaired by attaching a second route
+// that would duplicate every float sample in the batch.
 func otapIngestionRoutes(
 	columnarStorage *columnar.Storage,
 	logger *slog.Logger,
