@@ -62,11 +62,24 @@ type MetadataQuery struct {
 	Latest     bool
 }
 
+// requireMetadataEnabled returns ErrMetadataDisabled when the native metadata
+// catalog is not initialized. A successful commit replaces Storage.metadata while
+// queries run, so the catalog pointer is read under the transaction lock that
+// publishes it.
+func (s *Storage) requireMetadataEnabled() error {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	if s.metadata == nil {
+		return ErrMetadataDisabled
+	}
+	return nil
+}
+
 // QueryMetadata returns owner histories within the requested validity period.
 // Metadata-only owners are included unless a series matcher narrows the owners.
 func (s *Storage) QueryMetadata(ctx context.Context, query MetadataQuery) (MetadataOwnerPage, error) {
-	if s.metadata == nil {
-		return MetadataOwnerPage{}, ErrMetadataDisabled
+	if err := s.requireMetadataEnabled(); err != nil {
+		return MetadataOwnerPage{}, err
 	}
 	if query.Start > query.End {
 		return MetadataOwnerPage{}, fmt.Errorf("metadata query start %d is after end %d", query.Start, query.End)
@@ -224,6 +237,11 @@ func (s *Storage) matchMetadataOwners(ctx context.Context, kind MetadataKind, ma
 func (s *Storage) matchMetadataOwnersAt(ctx context.Context, kind MetadataKind, matcherSets [][]*labels.Matcher, start, end int64, membershipAt *int64) (map[OwnerKey]struct{}, error) {
 	result := map[OwnerKey]struct{}{}
 	if len(matcherSets) == 0 {
+		// The matcher path below reads the catalog under the transaction lock. Without
+		// matchers nothing else on this path takes it, so take it here and read one
+		// published catalog.
+		s.mtx.Lock()
+		defer s.mtx.Unlock()
 		for owner := range s.metadata.byOwner {
 			if owner.Kind == kind {
 				result[owner] = struct{}{}

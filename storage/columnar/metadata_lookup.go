@@ -56,8 +56,8 @@ type MetadataSeriesPage struct {
 }
 
 func (s *Storage) QueryMetadataSeries(ctx context.Context, query MetadataSeriesQuery) (MetadataSeriesPage, error) {
-	if s.metadata == nil {
-		return MetadataSeriesPage{}, ErrMetadataDisabled
+	if err := s.requireMetadataEnabled(); err != nil {
+		return MetadataSeriesPage{}, err
 	}
 	if query.Start > query.End {
 		return MetadataSeriesPage{}, fmt.Errorf("metadata query start %d is after end %d", query.Start, query.End)
@@ -270,8 +270,8 @@ type MetadataDiffPage struct {
 }
 
 func (s *Storage) DiffMetadata(ctx context.Context, query MetadataDiffQuery) (MetadataDiffPage, error) {
-	if s.metadata == nil {
-		return MetadataDiffPage{}, ErrMetadataDisabled
+	if err := s.requireMetadataEnabled(); err != nil {
+		return MetadataDiffPage{}, err
 	}
 	owners, err := s.matchMetadataOwnersAt(ctx, query.Kind, query.Matchers, math.MinInt64, math.MaxInt64, &query.Time)
 	if err != nil {
@@ -371,8 +371,8 @@ type MetadataDiscoveryPage struct {
 }
 
 func (s *Storage) DiscoverMetadata(ctx context.Context, query MetadataDiscoveryQuery) (MetadataDiscoveryPage, error) {
-	if s.metadata == nil {
-		return MetadataDiscoveryPage{}, ErrMetadataDisabled
+	if err := s.requireMetadataEnabled(); err != nil {
+		return MetadataDiscoveryPage{}, err
 	}
 	if query.Start > query.End {
 		return MetadataDiscoveryPage{}, fmt.Errorf("metadata query start %d is after end %d", query.Start, query.End)
