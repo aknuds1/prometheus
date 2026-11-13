@@ -122,6 +122,9 @@ type ingestCounts struct {
 	// verified reference instead of hashing.
 	refTrusted  int
 	refFallback int
+	// native is the native OTAP builder's accounting for this transaction, carried
+	// from the built batch and published with the commit.
+	native NativeDerivationStats
 }
 
 // add accumulates other into c.
@@ -131,6 +134,96 @@ func (c *ingestCounts) add(other ingestCounts) {
 	c.prepareHash += other.prepareHash
 	c.refTrusted += other.refTrusted
 	c.refFallback += other.refFallback
+}
+
+// NativeDerivationAssociationSites are the call sites that derive one owner
+// association per sample in the native OTAP builder, in the order they run.
+const (
+	// NativeDerivationResource associates the Resource owner.
+	NativeDerivationResource = iota
+	// NativeDerivationResourceSchema associates the Resource schema owner.
+	NativeDerivationResourceSchema
+	// NativeDerivationScope associates the Scope owner of a metric row that has one.
+	NativeDerivationScope
+	// NativeDerivationSource associates the ingestion source owner.
+	NativeDerivationSource
+	// NativeDerivationMetric associates the exact per-series Metric owner.
+	NativeDerivationMetric
+	// NativeDerivationAssociationSites is the number of association call sites.
+	NativeDerivationAssociationSites
+)
+
+// NativeDerivationStats is the per-batch mechanism accounting of the native OTAP
+// association builder. It exists to prove which derivations happen per sample and
+// which happen per distinct context, so a timing change can be attributed to a
+// mechanism rather than to a profile share.
+//
+// Every count is plain batch-local arithmetic while one batch is built and is
+// published with one atomic add per field when that batch commits, so the builder
+// adds no per-sample atomic. Counters describe committed work only.
+type NativeDerivationStats struct {
+	// Batches is the number of committed native batches. It is the divisor for the
+	// shape counts below.
+	Batches   uint64
+	Samples   uint64
+	Series    uint64
+	Resources uint64
+	// OwnersByKind is the number of distinct owners asserted in the batch, indexed
+	// by MetadataKind.
+	OwnersByKind [6]uint64
+	// OwnerRevisionChanges counts the assertions that closed an owner/series
+	// observation epoch: a changed owner content or a moved series membership.
+	OwnerRevisionChanges uint64
+
+	// SeriesLookupHashes counts the complete-label hashes taken to find or create a
+	// series. It runs once per sample before the derivation reuse and once per
+	// distinct context after it.
+	SeriesLookupHashes uint64
+	// SeriesLookupHits and SeriesLookupNew split the series lookups that reused an
+	// existing series from those that created one.
+	SeriesLookupHits uint64
+	SeriesLookupNew  uint64
+	// AssocKeyHashes counts complete-label hashes taken to form an association key,
+	// indexed by NativeDerivation* site. It is the hash that a reusable per-context
+	// association removes without removing the site itself.
+	AssocKeyHashes [NativeDerivationAssociationSites]uint64
+	// ContentCanonicalizations counts Content.Canonical calls made to form an
+	// association key, one per association call.
+	ContentCanonicalizations uint64
+	// ContentDerivations counts Content values constructed for an association, one
+	// per association call.
+	ContentDerivations uint64
+	// SchemaContentDerivations counts the subset that constructs a schema Content
+	// map for a schema URL.
+	SchemaContentDerivations uint64
+	// OwnerConstructors counts owner key constructions, indexed by MetadataKind.
+	OwnerConstructors [6]uint64
+	// OwnerReferences counts OwnerKey.Ref calls, which digest an owner identity for
+	// the series' identity label.
+	OwnerReferences uint64
+	// LabelBuilds counts complete label sets built from a metric row and a point
+	// attribute set.
+	LabelBuilds uint64
+	// LabelNameHits and LabelNameMisses split label-name translation cache probes.
+	LabelNameHits   uint64
+	LabelNameMisses uint64
+	// TranslationHits and TranslationMisses split metric translation cache probes.
+	TranslationHits   uint64
+	TranslationMisses uint64
+	// EpochOwnerChecks and EpochMembershipChecks count the ordered-fold domain
+	// probes that keep a re-observation from moving an already emitted boundary.
+	EpochOwnerChecks      uint64
+	EpochMembershipChecks uint64
+	// EmittedChangePoints counts associations appended as an epoch's change point.
+	EmittedChangePoints uint64
+	// EmittedObservationBounds counts the further entries a context needs to state
+	// its latest observation within the same epoch.
+	EmittedObservationBounds uint64
+	// FoldedObservations counts observations absorbed by an open epoch.
+	FoldedObservations uint64
+	// EpochRestatements counts observations emitted as a new change point because a
+	// content or membership assertion intervened in their domain.
+	EpochRestatements uint64
 }
 
 // Batch is an ingestion batch of typed per-series columns and metadata updates.
@@ -147,6 +240,9 @@ type Batch struct {
 	OwnerUpdates []Update
 	// counts is internal mechanism accounting carried by an in-package caller.
 	counts ingestCounts
+	// nativeDerivation is the native builder's mechanism accounting for this batch.
+	// An in-package builder fills it; other callers leave it zero.
+	nativeDerivation NativeDerivationStats
 }
 
 // BatchSeries is one series and its sample columns.
@@ -301,6 +397,7 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 	// Publish mechanism accounting once the transaction is visible, so the
 	// counters describe committed work rather than attempts.
 	counts.add(batch.counts)
+	counts.native = batch.nativeDerivation
 	if s.reads != nil {
 		s.reads.observeIngestCounts(counts)
 	}

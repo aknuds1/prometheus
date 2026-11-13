@@ -190,12 +190,14 @@ func otapAttributeStrings(attributes *pcommon.Map) map[string]string {
 
 func (b *otapBatchBuilder) translateMetric(id uint16, ctx otapMetricContext) (otapMetricTranslation, error) {
 	if translated, ok := b.translated[id]; ok {
+		b.counts.TranslationHits++
 		return translated, nil
 	}
 	translated, err := b.translateMetricContext(ctx)
 	if err != nil {
 		return otapMetricTranslation{}, err
 	}
+	b.counts.TranslationMisses++
 	b.translated[id] = translated
 	return translated, nil
 }
@@ -238,8 +240,10 @@ func nativeOTLPMetricType(metric pmetric.Metric) model.MetricType {
 
 func (b *otapBatchBuilder) labelName(name string) (string, error) {
 	if cached, ok := b.labelNames[name]; ok {
+		b.counts.LabelNameHits++
 		return cached.name, cached.err
 	}
+	b.counts.LabelNameMisses++
 	result := otapLabelNameResult{}
 	result.name, result.err = (&otlptranslator.LabelNamer{
 		UTF8Allowed:                 b.settings.AllowUTF8,
@@ -251,6 +255,7 @@ func (b *otapBatchBuilder) labelName(name string) (string, error) {
 }
 
 func (b *otapBatchBuilder) buildLabels(ctx otapMetricContext, translation otapMetricTranslation, attributes map[string]string) (labels.Labels, error) {
+	b.counts.LabelBuilds++
 	builder := labels.NewBuilder(labels.EmptyLabels())
 	present := map[string]struct{}{}
 
@@ -341,6 +346,7 @@ func (b *otapBatchBuilder) buildLabels(ctx otapMetricContext, translation otapMe
 	}
 
 	builder.Set(labels.MetricName, translation.name)
+	b.counts.OwnerReferences++
 	builder.Set(OTELResourceLabel, ctx.resource.owner.Ref())
 	return builder.Labels(), nil
 }

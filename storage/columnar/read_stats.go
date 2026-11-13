@@ -95,6 +95,10 @@ type ReadStats struct {
 	// therefore hashed.
 	RefTrusted  uint64
 	RefFallback uint64
+	// NativeDerivation is the committed native OTAP association builder's mechanism
+	// accounting: which derivations run per sample and which run per distinct
+	// context, plus the ordered-fold work that is retained for correctness.
+	NativeDerivation NativeDerivationStats
 }
 
 // QueryTimingStats reports accumulated phase durations in nanoseconds. Callers
@@ -156,6 +160,130 @@ type readStats struct {
 	hashPrepare        atomic.Uint64
 	refTrusted         atomic.Uint64
 	refFallback        atomic.Uint64
+	native             nativeDerivationAccumulator
+}
+
+// nativeDerivationAccumulator aggregates committed native builder accounting. It
+// is written once per commit under the storage lock and read by a snapshot, so a
+// field per counter keeps publication a fixed number of atomic adds.
+type nativeDerivationAccumulator struct {
+	batches, samples, series, resources           atomic.Uint64
+	ownersByKind                                  [6]atomic.Uint64
+	ownerRevisionChanges                          atomic.Uint64
+	seriesLookupHashes, seriesLookupHits          atomic.Uint64
+	seriesLookupNew                               atomic.Uint64
+	assocKeyHashes                                [NativeDerivationAssociationSites]atomic.Uint64
+	contentCanonicalizations, contentDerivations  atomic.Uint64
+	schemaContentDerivations                      atomic.Uint64
+	ownerConstructors                             [6]atomic.Uint64
+	ownerReferences, labelBuilds                  atomic.Uint64
+	labelNameHits, labelNameMisses                atomic.Uint64
+	translationHits, translationMisses            atomic.Uint64
+	epochOwnerChecks, epochMembershipChecks       atomic.Uint64
+	emittedChangePoints, emittedObservationBounds atomic.Uint64
+	foldedObservations, epochRestatements         atomic.Uint64
+}
+
+func (a *nativeDerivationAccumulator) add(c NativeDerivationStats) {
+	a.batches.Add(c.Batches)
+	a.samples.Add(c.Samples)
+	a.series.Add(c.Series)
+	a.resources.Add(c.Resources)
+	for i := range c.OwnersByKind {
+		a.ownersByKind[i].Add(c.OwnersByKind[i])
+		a.ownerConstructors[i].Add(c.OwnerConstructors[i])
+	}
+	for i := range c.AssocKeyHashes {
+		a.assocKeyHashes[i].Add(c.AssocKeyHashes[i])
+	}
+	a.ownerRevisionChanges.Add(c.OwnerRevisionChanges)
+	a.seriesLookupHashes.Add(c.SeriesLookupHashes)
+	a.seriesLookupHits.Add(c.SeriesLookupHits)
+	a.seriesLookupNew.Add(c.SeriesLookupNew)
+	a.contentCanonicalizations.Add(c.ContentCanonicalizations)
+	a.contentDerivations.Add(c.ContentDerivations)
+	a.schemaContentDerivations.Add(c.SchemaContentDerivations)
+	a.ownerReferences.Add(c.OwnerReferences)
+	a.labelBuilds.Add(c.LabelBuilds)
+	a.labelNameHits.Add(c.LabelNameHits)
+	a.labelNameMisses.Add(c.LabelNameMisses)
+	a.translationHits.Add(c.TranslationHits)
+	a.translationMisses.Add(c.TranslationMisses)
+	a.epochOwnerChecks.Add(c.EpochOwnerChecks)
+	a.epochMembershipChecks.Add(c.EpochMembershipChecks)
+	a.emittedChangePoints.Add(c.EmittedChangePoints)
+	a.emittedObservationBounds.Add(c.EmittedObservationBounds)
+	a.foldedObservations.Add(c.FoldedObservations)
+	a.epochRestatements.Add(c.EpochRestatements)
+}
+
+func (a *nativeDerivationAccumulator) snapshot() NativeDerivationStats {
+	out := NativeDerivationStats{
+		Batches:                  a.batches.Load(),
+		Samples:                  a.samples.Load(),
+		Series:                   a.series.Load(),
+		Resources:                a.resources.Load(),
+		OwnerRevisionChanges:     a.ownerRevisionChanges.Load(),
+		SeriesLookupHashes:       a.seriesLookupHashes.Load(),
+		SeriesLookupHits:         a.seriesLookupHits.Load(),
+		SeriesLookupNew:          a.seriesLookupNew.Load(),
+		ContentCanonicalizations: a.contentCanonicalizations.Load(),
+		ContentDerivations:       a.contentDerivations.Load(),
+		SchemaContentDerivations: a.schemaContentDerivations.Load(),
+		OwnerReferences:          a.ownerReferences.Load(),
+		LabelBuilds:              a.labelBuilds.Load(),
+		LabelNameHits:            a.labelNameHits.Load(),
+		LabelNameMisses:          a.labelNameMisses.Load(),
+		TranslationHits:          a.translationHits.Load(),
+		TranslationMisses:        a.translationMisses.Load(),
+		EpochOwnerChecks:         a.epochOwnerChecks.Load(),
+		EpochMembershipChecks:    a.epochMembershipChecks.Load(),
+		EmittedChangePoints:      a.emittedChangePoints.Load(),
+		EmittedObservationBounds: a.emittedObservationBounds.Load(),
+		FoldedObservations:       a.foldedObservations.Load(),
+		EpochRestatements:        a.epochRestatements.Load(),
+	}
+	for i := range out.OwnersByKind {
+		out.OwnersByKind[i] = a.ownersByKind[i].Load()
+		out.OwnerConstructors[i] = a.ownerConstructors[i].Load()
+	}
+	for i := range out.AssocKeyHashes {
+		out.AssocKeyHashes[i] = a.assocKeyHashes[i].Load()
+	}
+	return out
+}
+
+func (a *nativeDerivationAccumulator) reset() {
+	a.batches.Store(0)
+	a.samples.Store(0)
+	a.series.Store(0)
+	a.resources.Store(0)
+	for i := range a.ownersByKind {
+		a.ownersByKind[i].Store(0)
+		a.ownerConstructors[i].Store(0)
+	}
+	for i := range a.assocKeyHashes {
+		a.assocKeyHashes[i].Store(0)
+	}
+	a.ownerRevisionChanges.Store(0)
+	a.seriesLookupHashes.Store(0)
+	a.seriesLookupHits.Store(0)
+	a.seriesLookupNew.Store(0)
+	a.contentCanonicalizations.Store(0)
+	a.contentDerivations.Store(0)
+	a.schemaContentDerivations.Store(0)
+	a.ownerReferences.Store(0)
+	a.labelBuilds.Store(0)
+	a.labelNameHits.Store(0)
+	a.labelNameMisses.Store(0)
+	a.translationHits.Store(0)
+	a.translationMisses.Store(0)
+	a.epochOwnerChecks.Store(0)
+	a.epochMembershipChecks.Store(0)
+	a.emittedChangePoints.Store(0)
+	a.emittedObservationBounds.Store(0)
+	a.foldedObservations.Store(0)
+	a.epochRestatements.Store(0)
 }
 
 func (s *Storage) ReadStats() ReadStats {
@@ -217,6 +345,7 @@ func (s *Storage) ReadStats() ReadStats {
 		HashCallsPrepare:        s.reads.hashPrepare.Load(),
 		RefTrusted:              s.reads.refTrusted.Load(),
 		RefFallback:             s.reads.refFallback.Load(),
+		NativeDerivation:        s.reads.native.snapshot(),
 	}
 }
 
@@ -282,6 +411,7 @@ func (r *readStats) reset() {
 	r.hashPrepare.Store(0)
 	r.refTrusted.Store(0)
 	r.refFallback.Store(0)
+	r.native.reset()
 }
 
 // atomicMax stores v if it exceeds the current value.
@@ -326,4 +456,10 @@ func (r *readStats) observeIngestCounts(c ingestCounts) {
 	r.hashPrepare.Add(uint64(c.prepareHash))
 	r.refTrusted.Add(uint64(c.refTrusted))
 	r.refFallback.Add(uint64(c.refFallback))
+	r.observeNativeDerivation(c.native)
+}
+
+// observeNativeDerivation adds one committed native batch's accounting.
+func (r *readStats) observeNativeDerivation(c NativeDerivationStats) {
+	r.native.add(c)
 }

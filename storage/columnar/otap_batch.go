@@ -100,6 +100,10 @@ type otapBatchBuilder struct {
 	resourceBounds map[uint16]otapResourceBounds
 	targetInfoSeen map[targetInfoBatchKey]struct{}
 	appended       int
+	// counts is plain batch-local mechanism accounting. It is copied onto the
+	// batch when the build succeeds and published by the commit, so nothing here
+	// costs a per-sample atomic.
+	counts NativeDerivationStats
 }
 
 // buildBatch converts one batch worth of records into a single transaction-local
@@ -187,7 +191,21 @@ func (s *OTAPSink) buildBatch(records []*record_message.RecordMessage) (Batch, i
 		return Batch{}, 0, err
 	}
 	builder.sortSamples()
+	builder.recordBatchShape()
+	builder.batch.nativeDerivation = builder.counts
 	return builder.batch, builder.appended, nil
+}
+
+// recordBatchShape records the corpus facts of the finished batch: what it holds,
+// not how much derivation it needed.
+func (b *otapBatchBuilder) recordBatchShape() {
+	b.counts.Batches = 1
+	b.counts.Samples = uint64(b.appended)
+	b.counts.Series = uint64(len(b.batch.Series))
+	b.counts.Resources = uint64(len(b.resourceBounds))
+	for owner := range b.owners {
+		b.counts.OwnersByKind[owner.Kind]++
+	}
 }
 
 // otapUnsupportedPayloads describes every payload of a batch that carries rows the
@@ -371,13 +389,17 @@ func (b *otapBatchBuilder) appendSample(
 	kind SampleKind,
 ) error {
 	hash := stableSeriesHash(ls)
+	b.counts.SeriesLookupHashes++
 	index, exists := b.series[hash]
 	if !exists {
 		index = len(b.batch.Series)
 		b.series[hash] = index
 		b.batch.Series = append(b.batch.Series, BatchSeries{Labels: ls.Copy()})
+		b.counts.SeriesLookupNew++
 	} else if !labels.Equal(b.batch.Series[index].Labels, ls) {
 		return fmt.Errorf("%w: %q and %q", ErrSeriesHashCollision, b.batch.Series[index].Labels, ls)
+	} else {
+		b.counts.SeriesLookupHits++
 	}
 	series := &b.batch.Series[index]
 	series.Timestamps = append(series.Timestamps, t)
@@ -387,13 +409,25 @@ func (b *otapBatchBuilder) appendSample(
 	series.Histograms = append(series.Histograms, nil)
 	b.appended++
 
+	b.counts.OwnerConstructors[MetadataResource]++
+	b.counts.AssocKeyHashes[NativeDerivationResource]++
 	b.associate(ls, ctx.resource.owner, Content{Attributes: ctx.resource.descriptive}, t)
+	b.counts.OwnerConstructors[MetadataResourceSchema]++
+	b.counts.AssocKeyHashes[NativeDerivationResourceSchema]++
+	b.counts.SchemaContentDerivations++
 	b.associate(ls, ResourceSchemaOwner(ctx.resource.owner), schemaContent(ctx.resource.schemaURL), t)
 	if ctx.hasScope {
+		b.counts.OwnerConstructors[MetadataScope]++
+		b.counts.AssocKeyHashes[NativeDerivationScope]++
+		b.counts.SchemaContentDerivations++
 		b.associate(ls, ScopeOwner(ctx.scopeName, ctx.scopeVersion), schemaContent(ctx.scopeSchemaURL), t)
 	}
 	// OTAP has no authoritative scrape cadence, so no Scrape owner is invented.
+	b.counts.OwnerConstructors[MetadataSource]++
+	b.counts.AssocKeyHashes[NativeDerivationSource]++
 	b.associate(ls, SourceOwner("otap"), Content{Attributes: map[string]string{"transport": "otap"}}, t)
+	b.counts.OwnerConstructors[MetadataMetric]++
+	b.counts.AssocKeyHashes[NativeDerivationMetric]++
 	b.associate(ls, MetricOwner(ls), metricContent, t)
 	return nil
 }
@@ -410,10 +444,13 @@ func (b *otapBatchBuilder) appendSample(
 // temporal domain, so a later re-statement of the earlier content is emitted as its own
 // ordered change point instead of rewriting an earlier observation bound.
 func (b *otapBatchBuilder) associate(ls labels.Labels, owner OwnerKey, content Content, effectiveFrom int64) {
+	b.counts.ContentDerivations++
 	key := metadataBatchKey{seriesHash: labels.StableHash(ls), owner: owner, content: content.Canonical()}
+	b.counts.ContentCanonicalizations++
 	revision := b.observeOwnerContent(owner, key.content, key.seriesHash)
 	observation, exists := b.observations[key]
 	if exists && observation.revision == revision {
+		b.counts.FoldedObservations++
 		observation.earliest = min(observation.earliest, effectiveFrom)
 		observation.latest = max(observation.latest, effectiveFrom)
 		b.batch.Updates[observation.first].Update.EffectiveFrom = observation.earliest
@@ -427,12 +464,17 @@ func (b *otapBatchBuilder) associate(ls labels.Labels, owner OwnerKey, content C
 				Owner: owner, Content: content, EffectiveFrom: observation.latest,
 			}})
 			observation.last = len(b.batch.Updates) - 1
+			b.counts.EmittedObservationBounds++
 		}
 		return
+	}
+	if exists {
+		b.counts.EpochRestatements++
 	}
 	b.batch.Updates = append(b.batch.Updates, AssociationUpdate{Labels: ls, Update: Update{
 		Owner: owner, Content: content, EffectiveFrom: effectiveFrom,
 	}})
+	b.counts.EmittedChangePoints++
 	b.observations[key] = &metadataBatchObservation{
 		first: len(b.batch.Updates) - 1, last: len(b.batch.Updates) - 1,
 		earliest: effectiveFrom, latest: effectiveFrom, revision: revision,
@@ -445,10 +487,13 @@ func (b *otapBatchBuilder) associate(ls labels.Labels, owner OwnerKey, content C
 // epochs that preceded it. A repeated assertion writes nothing, so the steady-state
 // path stays one map read per owner and series domain.
 func (b *otapBatchBuilder) observeOwnerContent(owner OwnerKey, content string, seriesHash uint64) int {
+	b.counts.EpochOwnerChecks++
+	b.counts.EpochMembershipChecks++
 	state := b.owners[owner]
 	if content != state.content {
 		if state.content != "" {
 			state.revision++
+			b.counts.OwnerRevisionChanges++
 		}
 		state.content = content
 		b.owners[owner] = state
@@ -462,6 +507,7 @@ func (b *otapBatchBuilder) observeOwnerContent(owner OwnerKey, content string, s
 		previousState.revision++
 		b.owners[previous] = previousState
 		b.seriesOwners[seriesKind] = owner
+		b.counts.OwnerRevisionChanges++
 	}
 	return state.revision
 }

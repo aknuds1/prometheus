@@ -154,6 +154,10 @@ type ingestShape struct {
 	resources ingestResources
 	meta      ingestMetadata
 	firstSeen bool
+	// contentChurn changes the descriptive Resource attributes on alternate ring
+	// entries without changing the Resource identity. It is a metadata version
+	// change per commit, not a different series and not a different owner.
+	contentChurn bool
 	// intervalMs overrides the dense interval, which the sparse shape uses.
 	intervalMs int64
 	// commitsPerEntry splits one ring entry into several commits.
@@ -178,9 +182,14 @@ func (s ingestShape) String() string {
 	if s.firstSeen {
 		ids = "first-seen"
 	}
+	// The content marker and the commit split are appended only when the shape uses
+	// them, so an arm that does not change keeps its established name.
 	split := ""
+	if s.contentChurn {
+		split = ",content=changing"
+	}
 	if s.commitsPerEntry > 1 {
-		split = fmt.Sprintf(",commits=%d", s.commitsPerEntry)
+		split += fmt.Sprintf(",commits=%d", s.commitsPerEntry)
 	}
 	return fmt.Sprintf("series=%d,samples=%d,presence=%s,%s,%s,%s%s",
 		s.series, s.perSeries, s.presence, s.resources, s.meta, ids, split)
@@ -211,6 +220,16 @@ type ingestEntry struct {
 
 	updates   []columnar.AssociationUpdate
 	ownerUpds []columnar.Update
+}
+
+// entryResourceAttrs returns the Resource attributes record i states in ring entry
+// e. Content churn changes descriptive content on alternate entries, which keeps the
+// owner identity and the series identity while stating a new Resource version.
+func (s ingestShape) entryResourceAttrs(e, i int) map[string]string {
+	if s.contentChurn && e%2 == 1 {
+		return s.changedResourceAttrs(i)
+	}
+	return s.resourceAttrs(i)
 }
 
 // resourceAttrs returns the Resource attributes of record i.
@@ -304,7 +323,7 @@ func buildIngestRing(shape ingestShape, ringSize int) []ingestEntry {
 			for j := range vs {
 				vs[j] = float64(e)*1.5 + float64(j)*0.25 + float64(i%97)
 			}
-			attrs := shape.resourceAttrs(i)
+			attrs := shape.entryResourceAttrs(e, i)
 			if shape.meta == metaMembership && e%2 == 1 && i%2 == 0 {
 				// Alternate entries move half the records to a different Resource: a
 				// membership change, not a descriptive version change. The identity
@@ -704,6 +723,8 @@ func BenchmarkPrimaryIngestOTAP(b *testing.B) {
 		shape ingestShape
 	}{
 		{"B-1000x100/shared-resource", ingestShape{series: 1_000, perSeries: 100}},
+		{"B-1000x100/first-seen", ingestShape{series: 1_000, perSeries: 100, firstSeen: true}},
+		{"B-1000x100/changing-content", ingestShape{series: 1_000, perSeries: 100, contentChurn: true}},
 		{"B-1000x100/per-series-resources", ingestShape{series: 1_000, perSeries: 100, resources: resourcePerSeries}},
 		{"B-missed", ingestShape{series: 1_000, perSeries: 100, presence: presenceMissed}},
 		{"B-sparse", ingestShape{series: 1_000, perSeries: 10, intervalMs: 10 * primaryIntervalMs}},
@@ -734,8 +755,33 @@ func BenchmarkPrimaryIngestOTAP(b *testing.B) {
 			reportEntryMetrics(b, entries[0].samples, entries[0].series)
 			b.ReportMetric(float64(st.ReadStats().CommitCount), "commits")
 			b.ReportMetric(float64(st.ReadStats().HashCallsPrepare), "prepare-hashes")
+			reportNativeDerivation(b, st.ReadStats().NativeDerivation)
 		})
 	}
+}
+
+// reportNativeDerivation publishes the native builder's mechanism accounting after
+// the timed loop, so the counters describe the whole run rather than one sample.
+func reportNativeDerivation(b *testing.B, stats columnar.NativeDerivationStats) {
+	sites := stats.AssocKeyHashes
+	b.ReportMetric(float64(stats.Samples), "derivation-samples")
+	b.ReportMetric(float64(stats.Series), "derivation-series")
+	b.ReportMetric(float64(stats.Resources), "resources")
+	b.ReportMetric(float64(stats.OwnersByKind[0]), "resource-owners")
+	b.ReportMetric(float64(stats.OwnersByKind[2]), "metric-owners")
+	b.ReportMetric(float64(stats.SeriesLookupHashes), "series-hashes")
+	b.ReportMetric(float64(sites[0]+sites[1]+sites[2]+sites[3]+sites[4]), "assoc-hashes")
+	b.ReportMetric(float64(stats.ContentCanonicalizations), "canonicalizations")
+	b.ReportMetric(float64(stats.ContentDerivations), "content-derivations")
+	b.ReportMetric(float64(stats.SchemaContentDerivations), "schema-contents")
+	b.ReportMetric(float64(stats.OwnerReferences), "owner-refs")
+	b.ReportMetric(float64(stats.LabelBuilds), "label-builds")
+	b.ReportMetric(float64(stats.EpochOwnerChecks), "epoch-owner-checks")
+	b.ReportMetric(float64(stats.EpochMembershipChecks), "epoch-membership-checks")
+	b.ReportMetric(float64(stats.EmittedChangePoints), "emitted-change-points")
+	b.ReportMetric(float64(stats.EmittedObservationBounds), "emitted-bounds")
+	b.ReportMetric(float64(stats.FoldedObservations), "folded-observations")
+	b.ReportMetric(float64(stats.EpochRestatements), "epoch-restatements")
 }
 
 // otapRing encodes the ring as OTAP batches once, outside the timed loop, with one
