@@ -131,6 +131,9 @@ type ingestCounts struct {
 	// ordinary is the ordinary scalar appender's metadata-derivation accounting for
 	// this transaction. It is never mixed with native accounting.
 	ordinary ordinaryDerivationStats
+	// metadata is this transaction's metadata physical-work accounting. It is
+	// published only when the commit becomes visible.
+	metadata metadataWork
 }
 
 // add accumulates other into c.
@@ -425,6 +428,9 @@ type batchMetadataTransaction struct {
 	// counts, when set, receives the ordinary path's call-site accounting for the
 	// associations and owner updates this transaction applies.
 	counts *ordinaryDerivationStats
+	// work receives the direct transaction's physical-work accounting. It is dropped
+	// with the transaction unless the commit publishes it.
+	work *metadataWork
 	// versionCanonicals memoizes the stored versions' canonical content for this
 	// transaction, so an observation that states its own identity compares two strings
 	// instead of canonicalizing stored content again. It is dropped with the
@@ -439,7 +445,10 @@ func (t *batchMetadataTransaction) ownerHistory(owner OwnerKey) *metadataOwnerHi
 	if t.counts != nil {
 		t.counts.OwnerHistoryLookups++
 	}
-	history := t.store.ownerHistory(owner)
+	if t.work != nil {
+		t.work.ownerHistoryResolutions++
+	}
+	history := t.store.ownerHistory(owner, t.work)
 	t.owners[owner] = history
 	return history
 }
@@ -454,14 +463,14 @@ func (t *batchMetadataTransaction) associate(update AssociationUpdate, identity 
 		seriesHash = metadataSeriesKey(update.Labels)
 	}
 	derived := associationDerivation{canonical: identity.canonical, versions: t.versionCanonicals}
-	return t.store.associateWithHistory(seriesHash, update.Labels, update.Update, history, derived, t.counts)
+	return t.store.associateWithHistory(seriesHash, update.Labels, update.Update, history, derived, t.counts, t.work)
 }
 
 func (t *batchMetadataTransaction) update(update Update) error {
 	if update.Owner.Kind > MetadataSource {
 		return fmt.Errorf("columnar: invalid metadata kind %d", update.Owner.Kind)
 	}
-	return t.store.updateHistory(t.ownerHistory(update.Owner), update, associationDerivation{}, t.counts)
+	return t.store.updateHistory(t.ownerHistory(update.Owner), update, associationDerivation{}, t.counts, t.work)
 }
 
 // AppendBatch validates and appends an entire batch in one atomic store
@@ -473,6 +482,9 @@ func (t *batchMetadataTransaction) update(update Update) error {
 func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if s.reads != nil {
+		s.reads.metadataWork.observeAttempt()
 	}
 
 	// Prepare sorted typed arrays and validate every sample range before taking
@@ -519,17 +531,30 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		ordinaryAccounting = &counts.ordinary
 	}
 
+	work := &counts.metadata
+	work.inputSeries = len(batch.Series)
+	for _, series := range prepared {
+		work.inputSamples += series.Len()
+	}
+	work.inputAssociations = len(batch.Updates)
+	work.inputOwnerUpdates = len(batch.OwnerUpdates)
 	metadataChanged := len(batch.Updates)+len(batch.OwnerUpdates) > 0
 	nextMetadata := s.metadata
 	if metadataChanged {
 		if s.metadata == nil {
 			return ErrMetadataDisabled
 		}
+		work.residentOwners = len(s.metadata.byOwner)
+		work.residentSeries = len(s.metadata.bySeries)
+		work.batchChangeChecks++
 		// Repeated observations of unchanged content must not clone the whole
 		// catalog build a transaction. This is the common steady-state case.
-		if !s.metadata.batchChanges(batch, ordinaryAccounting) {
+		if !s.metadata.batchChanges(batch, ordinaryAccounting, work) {
+			work.batchChangeUnchanged++
 			metadataChanged = false
 			nextMetadata = s.metadata
+		} else {
+			work.batchChangeSelected++
 		}
 	}
 	if metadataChanged {
@@ -537,13 +562,14 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 			return ErrMetadataDisabled
 		}
 		var err error
-		nextMetadata, err = s.metadata.clone()
+		nextMetadata, err = s.metadata.clone(&counts.metadata)
 		if err != nil {
 			return fmt.Errorf("preparing metadata transaction: %w", err)
 		}
+		counts.metadata.metadataTransactions++
 		transaction := batchMetadataTransaction{
 			store: nextMetadata, owners: make(map[OwnerKey]*metadataOwnerHistory, len(batch.Updates)+len(batch.OwnerUpdates)),
-			counts: ordinaryAccounting,
+			counts: ordinaryAccounting, work: &counts.metadata,
 		}
 		if ordinaryAccounting != nil && len(batch.associationIdentities) > 0 {
 			// Only an observation that states its own identity can compare against a
@@ -573,6 +599,8 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 	}
 	// Publish mechanism accounting once the transaction is visible, so the
 	// counters describe committed work rather than attempts.
+	counts.metadata.commits = 1
+	counts.metadata.changedOwners = len(counts.metadata.versionedOwners)
 	counts.add(batch.counts)
 	counts.native = batch.nativeDerivation
 	if s.reads != nil {

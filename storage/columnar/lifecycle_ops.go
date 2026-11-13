@@ -96,7 +96,7 @@ func (s *Storage) RetainBefore(ctx context.Context, cutoff int64) (int, error) {
 	var retainedMetadata *metadataStore
 	if s.metadata != nil {
 		var err error
-		retainedMetadata, err = s.metadata.clone()
+		retainedMetadata, err = s.metadata.clone(nil)
 		if err != nil {
 			return 0, err
 		}

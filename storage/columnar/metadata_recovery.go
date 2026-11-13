@@ -66,7 +66,7 @@ func (s *metadataStore) restoreRelations(relations metadataRelations) error {
 		}
 		if err := s.attachMembership(
 			membership.seriesHash, membership.labels, owner.key,
-			membership.effectiveFrom, membership.observedUntil, nil,
+			membership.effectiveFrom, membership.observedUntil, nil, nil,
 		); err != nil {
 			return err
 		}
@@ -79,7 +79,15 @@ func (s *metadataStore) restoreRelations(relations metadataRelations) error {
 // may be shared. Mutable owner, membership and index entries are copied before
 // they change. Storage must validate the candidate before publication and hold
 // Storage.mtx for preparation/publication.
-func (s *metadataStore) clone() (*metadataStore, error) {
+func (s *metadataStore) clone(w *metadataWork) (*metadataStore, error) {
+	if w != nil {
+		w.clones++
+		w.cloneByOwnerEntries += len(s.byOwner)
+		w.cloneBySeriesEntries += len(s.bySeries)
+		w.cloneChainsEntries += len(s.chains)
+		w.cloneOwnerIndex += len(s.ownerIndex)
+		w.cloneAttributeConds += len(s.attributeIndex)
+	}
 	clone := newMetadataStore(s.versionCap)
 	clone.indexedResourceAttrs = maps.Clone(s.indexedResourceAttrs)
 	clone.reads = s.reads
@@ -87,6 +95,9 @@ func (s *metadataStore) clone() (*metadataStore, error) {
 	// Starting empty avoids cloning the largest map; entries repopulate on demand.
 	clone.byOwner = maps.Clone(s.byOwner)
 	for owner, history := range s.byOwner {
+		if w != nil {
+			w.cloneOwnerStructs++
+		}
 		// A copy-on-write history may already have been published. Its marker
 		// belongs to that transaction's publication lifetime, not to this clone.
 		// Give each new clone its own owner struct so freshness checks never

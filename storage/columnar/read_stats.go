@@ -162,6 +162,7 @@ type readStats struct {
 	refFallback        atomic.Uint64
 	native             nativeDerivationAccumulator
 	ordinary           ordinaryDerivationAccumulator
+	metadataWork       metadataWorkAccumulator
 }
 
 // ordinaryDerivationAccumulator aggregates committed ordinary appender accounting.
@@ -227,6 +228,14 @@ func (a *ordinaryDerivationAccumulator) snapshot() ordinaryDerivationStats {
 // ordinaryDerivationSnapshot returns the committed ordinary appender accounting.
 // It is unexported on purpose: the ordinary path's exported statistics surface is
 // unchanged, and in-package tests read the counters directly.
+// metadataWorkSnapshot returns the accumulated metadata physical-work accounting,
+// including attempts that never committed. It is unexported on purpose: the metadata
+// path's exported statistics surface is deliberately unchanged, so in-package tests
+// and benchmarks read the counters directly.
+func (r *readStats) metadataWorkSnapshot() metadataWork {
+	return r.metadataWork.snapshot()
+}
+
 func (r *readStats) ordinaryDerivationSnapshot() ordinaryDerivationStats {
 	return r.ordinary.snapshot()
 }
@@ -536,6 +545,7 @@ func (r *readStats) observeIngestCounts(c ingestCounts) {
 	r.refTrusted.Add(uint64(c.refTrusted))
 	r.refFallback.Add(uint64(c.refFallback))
 	r.ordinary.add(c.ordinary)
+	r.metadataWork.add(c.metadata)
 	r.observeNativeDerivation(c.native)
 }
 

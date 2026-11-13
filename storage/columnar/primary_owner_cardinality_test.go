@@ -124,7 +124,7 @@ func ownerCostFullSpec(mode ownerCardinalityMode, owners, updated int) ownerCard
 }
 
 // interval is the fixture's dense sample interval.
-func (s ownerCardinalitySpec) interval() int64 { return ownerCostIntervalMs }
+func (ownerCardinalitySpec) interval() int64 { return ownerCostIntervalMs }
 
 // span is the time one ring entry covers, so no two entries overlap.
 func (s ownerCardinalitySpec) span() int64 { return int64(s.points+2) * s.interval() }
@@ -418,7 +418,7 @@ func (s ownerCardinalitySpec) versionVersion(e int) int {
 // observeExpectedVersion applies one association to the expected state: it extends the
 // bounds of the version active at the observation time when the content is equal, and
 // otherwise inserts a version, which is what makes a restoration observable.
-func observeExpectedVersion(state *ownerCardinalityState, j int, content Content, t int64, cap int) {
+func observeExpectedVersion(state *ownerCardinalityState, j int, content Content, t int64, versionCap int) {
 	if active, ok := versionAt(state.ownerVersions[j], t); ok {
 		canonical := content.Canonical()
 		for v := range state.ownerVersions[j] {
@@ -438,11 +438,11 @@ func observeExpectedVersion(state *ownerCardinalityState, j int, content Content
 			return
 		}
 	}
-	insertExpectedVersion(state, j, content, t, cap)
+	insertExpectedVersion(state, j, content, t, versionCap)
 }
 
 // insertExpectedVersion inserts one expected version, applying the arm's version cap.
-func insertExpectedVersion(state *ownerCardinalityState, j int, content Content, t int64, cap int) {
+func insertExpectedVersion(state *ownerCardinalityState, j int, content Content, t int64, versionCap int) {
 	versions := state.ownerVersions[j]
 	version := ownerCardinalityVersion{
 		content: content, effectiveFrom: t, observedFrom: t, observedUntil: t,
@@ -456,9 +456,9 @@ func insertExpectedVersion(state *ownerCardinalityState, j int, content Content,
 	}
 	versions = slices.Insert(versions, at, version)
 	state.versionsInserted++
-	if cap > 0 && len(versions) > cap {
-		state.versionsEvicted += len(versions) - cap
-		versions = slices.Clone(versions[len(versions)-cap:])
+	if versionCap > 0 && len(versions) > versionCap {
+		state.versionsEvicted += len(versions) - versionCap
+		versions = slices.Clone(versions[len(versions)-versionCap:])
 		state.truncated[j] = true
 	}
 	state.ownerVersions[j] = versions
@@ -514,6 +514,7 @@ func benchmarkOwnerCardinalityArm(b *testing.B, spec ownerCardinalitySpec) {
 
 	st := newOwnerCardinalityStorage(b)
 	require.NoError(b, st.AppendBatch(b.Context(), fx.entries[0].batch))
+	prewarm := st.reads.metadataWorkSnapshot()
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -538,11 +539,63 @@ func benchmarkOwnerCardinalityArm(b *testing.B, spec ownerCardinalitySpec) {
 	}
 	b.ReportMetric(liveHeapMiB(), "live-heap-MiB")
 
+	// Timed work is the counter delta of the timed loop, never the whole run.
+	timed := st.reads.metadataWorkSnapshot().since(prewarm)
+	reportOwnerCardinalityWork(b, timed, b.N)
+	require.Equal(b, b.N*spec.ownerUpdates(), timed.versionsInserted,
+		"exactly the versions the fixture declares, per commit")
+	if spec.mode == ownerCardinalityNoMetadata {
+		require.Zero(b, timed.metadataTransactions, "no metadata transaction")
+	} else {
+		require.Equal(b, b.N, timed.metadataTransactions, "one metadata transaction per commit")
+	}
+	require.Zero(b, timed.versionsEvicted, "the controlled matrix is uncapped")
+	require.Zero(b, timed.versionDuplicateNoops)
+	require.Zero(b, timed.membershipDuplicateNoops)
+
 	require.Len(b, st.buffer, spec.series(), "every fixture series is resident")
 	require.Equal(b, spec.samples()*(b.N+1), st.bufferN, "exactly the fixture's samples are buffered")
 	require.Zero(b, st.ReadStats().SealCount, "no seal inside the timed loop")
 	requireOwnerCardinalityResident(b, st, fx, b.N)
 	requireOwnerCardinalityHistories(b, st, fx, fx.entries[b.N].expect)
+}
+
+// reportOwnerCardinalityWork publishes the timed loop's physical work per commit. The
+// bucket-entry count is the decisive one: it separates a fixed-price bucket clone from
+// a clone whose size is the resident owner count.
+func reportOwnerCardinalityWork(b *testing.B, w metadataWork, commits int) {
+	b.Helper()
+	perCommit := func(n int) float64 { return float64(n) / float64(commits) }
+	b.ReportMetric(perCommit(w.versionsInserted), "versions/op")
+	b.ReportMetric(perCommit(w.versionBoundsExtended), "version-bounds/op")
+	b.ReportMetric(perCommit(w.versionsEvicted), "evicted/op")
+	b.ReportMetric(perCommit(w.membershipsInserted), "memberships/op")
+	b.ReportMetric(perCommit(w.membershipBoundsExtended), "membership-bounds/op")
+	b.ReportMetric(perCommit(w.changedOwners), "changed-owners/op")
+	b.ReportMetric(perCommit(w.residentOwners), "resident-owners/op")
+	b.ReportMetric(perCommit(w.ownerHistoryResolutions), "owner-resolutions/op")
+	b.ReportMetric(perCommit(w.versionSearches), "version-searches/op")
+	b.ReportMetric(perCommit(w.versionSearchComparisons), "version-search-cmp/op")
+	b.ReportMetric(perCommit(w.membershipSearches), "membership-searches/op")
+	b.ReportMetric(perCommit(w.seriesHashes), "series-hashes/op")
+	b.ReportMetric(perCommit(w.completeLabelChecks), "label-checks/op")
+	b.ReportMetric(perCommit(w.changeDetectionCanonicalizations), "detect-canonical/op")
+	b.ReportMetric(perCommit(w.applyCanonicalizations), "apply-canonical/op")
+	b.ReportMetric(perCommit(w.contentComparisons), "content-compares/op")
+	b.ReportMetric(perCommit(w.contentClones), "content-clones/op")
+	b.ReportMetric(perCommit(w.cloneByOwnerEntries), "clone-owners/op")
+	b.ReportMetric(perCommit(w.cloneBySeriesEntries), "clone-series/op")
+	b.ReportMetric(perCommit(w.cloneAttributeConds), "clone-index-conds/op")
+	b.ReportMetric(perCommit(w.ownerCOPCopies), "owner-copies/op")
+	b.ReportMetric(perCommit(w.ownerCOPVersionRows), "owner-cop-rows/op")
+	b.ReportMetric(perCommit(w.membershipCOPRows), "membership-cop-rows/op")
+	b.ReportMetric(perCommit(w.indexCalls), "index-calls/op")
+	b.ReportMetric(perCommit(w.indexVersionsVisited), "index-versions/op")
+	b.ReportMetric(perCommit(w.indexOldConditions), "index-old-conds/op")
+	b.ReportMetric(perCommit(w.indexNewConditions), "index-new-conds/op")
+	b.ReportMetric(perCommit(w.indexBucketClones), "bucket-clones/op")
+	b.ReportMetric(perCommit(w.indexBucketClonedEntries), "bucket-entries/op")
+	b.ReportMetric(perCommit(w.indexGlobalRangeUpdates), "index-range-updates/op")
 }
 
 // liveHeapMiB returns the live heap after a collection, which is retained state rather
@@ -687,7 +740,7 @@ func verifyOwnerCardinalitySamples(tb testing.TB, st *Storage, fx *ownerCardinal
 	for i := range want {
 		require.True(tb, labels.Equal(want[i].labels, got[i].labels),
 			"stored series %d complete labels: want %s, got %s", i, want[i].labels, got[i].labels)
-		require.Equal(tb, len(want[i].samples), len(got[i].samples), "series %s sample count", want[i].labels)
+		require.Len(tb, got[i].samples, len(want[i].samples), "series %s sample count", want[i].labels)
 		for k := range want[i].samples {
 			if want[i].samples[k] != got[i].samples[k] {
 				tb.Fatalf("series %s sample %d: want timestamp %d bits %#x, got timestamp %d bits %#x",
@@ -946,7 +999,9 @@ func TestPrimaryIngestOwnerCardinalityCounts(t *testing.T) {
 				for e := 1; e <= fx.spec.timed; e++ {
 					before := fx.entries[e-1].expect
 					after := fx.entries[e].expect
+					beforeWork := st.reads.metadataWorkSnapshot()
 					require.NoError(t, st.AppendBatch(context.Background(), fx.entries[e].batch))
+					work := st.reads.metadataWorkSnapshot().since(beforeWork)
 
 					inserted, extended := 0, 0
 					for j, owner := range fx.owners {
@@ -973,6 +1028,43 @@ func TestPrimaryIngestOwnerCardinalityCounts(t *testing.T) {
 					require.Equal(t, after.versionsBoundExtended-before.versionsBoundExtended, extended,
 						"entry %d extended versions", e)
 
+					// The committed counters describe the same entry, and no more: one
+					// commit, the declared input shape, and the declared applied work.
+					require.Equal(t, 1, work.commits, "entry %d commits", e)
+					require.Equal(t, fx.spec.samples(), work.inputSamples, "entry %d input samples", e)
+					require.Equal(t, fx.spec.series(), work.inputSeries, "entry %d input series", e)
+					require.Equal(t, fx.spec.associations(), work.inputAssociations, "entry %d associations", e)
+					require.Equal(t, fx.spec.ownerUpdates(), work.inputOwnerUpdates, "entry %d owner updates", e)
+					require.Equal(t, inserted, work.versionsInserted, "entry %d counted versions", e)
+					require.Equal(t, extended, changedVersionsOf(before, after),
+						"entry %d distinct bound extensions", e)
+					require.Equal(t, after.versionBoundExtensions-before.versionBoundExtensions,
+						work.versionBoundsExtended, "entry %d apply-call extensions", e)
+					require.Equal(t, inserted, work.indexCalls,
+						"entry %d rebuilds exactly one index per inserted Resource version", e)
+					require.Zero(t, work.versionsEvicted, "entry %d evictions", e)
+					require.Zero(t, work.versionsCoalesced, "entry %d coalescing", e)
+					// Re-observing content several times in one entry extends a version
+					// once and repeats the same bounds for every further observation.
+					require.Equal(t, work.versionBoundsExtended-changedVersionsOf(before, after),
+						work.versionDuplicateNoops, "entry %d duplicate version no-ops", e)
+					require.Zero(t, work.membershipDuplicateNoops, "entry %d duplicate membership no-ops", e)
+					if fx.spec.mode == ownerCardinalityNoMetadata {
+						require.Zero(t, work.metadataTransactions, "entry %d has no metadata transaction", e)
+						require.Zero(t, work.clones)
+					} else {
+						require.Equal(t, 1, work.metadataTransactions, "entry %d metadata transaction", e)
+						require.Equal(t, 1, work.clones, "entry %d clone", e)
+						require.Equal(t, fx.spec.owners, work.residentOwners, "entry %d resident owners", e)
+						wantSeries := 0
+						if after.hasMembership {
+							wantSeries = fx.spec.records
+						}
+						require.Equal(t, wantSeries, work.residentSeries, "entry %d resident series", e)
+						require.Equal(t, changedOwnersOf(before, after), work.changedOwners,
+							"entry %d distinct changed owners", e)
+					}
+
 					page, err := st.QueryMetadataSeries(context.Background(), MetadataSeriesQuery{
 						Kind: MetadataResource, Start: math.MinInt64, End: math.MaxInt64,
 					})
@@ -981,6 +1073,10 @@ func TestPrimaryIngestOwnerCardinalityCounts(t *testing.T) {
 					if after.hasMembership {
 						wantMemberships = fx.spec.records
 					}
+					require.Equal(t, after.membershipInserted-before.membershipInserted,
+						work.membershipsInserted, "entry %d memberships inserted", e)
+					require.Equal(t, after.membershipBoundExtends-before.membershipBoundExtends,
+						work.membershipBoundsExtended, "entry %d membership bound extensions", e)
 					require.Len(t, page.Series, wantMemberships, "entry %d membership rows", e)
 					if after.hasMembership {
 						for _, result := range page.Series {
@@ -995,6 +1091,37 @@ func TestPrimaryIngestOwnerCardinalityCounts(t *testing.T) {
 			})
 		}
 	}
+}
+
+// changedVersionsOf counts the versions one expected state kept but extended.
+func changedVersionsOf(before, after ownerCardinalityState) int {
+	extended := 0
+	for j := range after.ownerVersions {
+		for _, want := range before.ownerVersions[j] {
+			for _, got := range after.ownerVersions[j] {
+				if got.effectiveFrom != want.effectiveFrom {
+					continue
+				}
+				if got.observedFrom != want.observedFrom || got.observedUntil != want.observedUntil {
+					extended++
+				}
+			}
+		}
+	}
+	return extended
+}
+
+// changedOwnersOf counts the owners whose committed history changed between two
+// expected states.
+func changedOwnersOf(before, after ownerCardinalityState) int {
+	changed := 0
+	for j := range after.ownerVersions {
+		if len(after.ownerVersions[j]) != len(before.ownerVersions[j]) ||
+			after.truncated[j] != before.truncated[j] {
+			changed++
+		}
+	}
+	return changed
 }
 
 // TestPrimaryIngestOwnerCardinalityRejectedCommit proves that same-time conflicting
@@ -1067,12 +1194,19 @@ func TestPrimaryIngestOwnerCardinalityRejectedCommit(t *testing.T) {
 			beforeSeries := len(st.buffer)
 			beforeCatalog := ownerCardinalityCatalogOf(t, st)
 			beforeWAL := walBytes(t, dir)
+			beforeWork := st.reads.metadataWorkSnapshot()
 
 			err := st.AppendBatch(context.Background(), tc.batch)
 			require.ErrorIs(t, err, tc.err)
 
+			afterWork := st.reads.metadataWorkSnapshot()
+			require.Equal(t, beforeWork.attempts+1, afterWork.attempts, "the attempt is visible")
+			require.Equal(t, ownerCardinalityWorkWithoutAttempts(beforeWork),
+				ownerCardinalityWorkWithoutAttempts(afterWork),
+				"no committed metadata work is published")
+
 			require.Equal(t, beforeSamples, st.bufferN, "no sample becomes visible")
-			require.Equal(t, beforeSeries, len(st.buffer), "no series becomes visible")
+			require.Len(t, st.buffer, beforeSeries, "no series becomes visible")
 			require.Equal(t, beforeCatalog, ownerCardinalityCatalogOf(t, st),
 				"no metadata becomes visible")
 			require.Equal(t, beforeWAL, walBytes(t, dir), "no WAL prefix is published")
@@ -1112,6 +1246,13 @@ func ownerCardinalityCatalogOf(tb testing.TB, st *Storage) ownerCardinalityCatal
 	return ownerCardinalityCatalog{
 		Owners: owners, Series: series, ScopeOwners: scopes, ScopeSeries: scopeSeries,
 	}
+}
+
+// ownerCardinalityWorkWithoutAttempts clears the one counter a rejected transaction
+// does publish, so the rest can be compared for total absence of effect.
+func ownerCardinalityWorkWithoutAttempts(w metadataWork) metadataWork {
+	w.attempts = 0
+	return w
 }
 
 // walBytes sums the sizes of the store's WAL segments.
@@ -1223,16 +1364,25 @@ func TestPrimaryIngestOwnerCardinalityLegacyAccounting(t *testing.T) {
 	for e := 1; e <= fx.spec.timed; e++ {
 		before := fx.entries[e-1].expect
 		after := fx.entries[e].expect
+		beforeWork := st.reads.metadataWorkSnapshot()
 		require.NoError(t, st.AppendBatch(context.Background(), fx.entries[e].batch))
+		work := st.reads.metadataWorkSnapshot().since(beforeWork)
 		inserted := after.versionsInserted - before.versionsInserted
 		evicted := after.versionsEvicted - before.versionsEvicted
 		require.Equal(t, 2*fx.spec.records, inserted,
 			"entry %d restores the identity content and then re-applies the descriptive content", e)
 		require.Zero(t, after.membershipInserted-before.membershipInserted,
 			"memberships are stated once per series")
-		t.Logf("entry=%d associations=%d owner-updates=%d inserted=%d evicted=%d resident=%d",
+		require.Equal(t, inserted, work.versionsInserted, "entry %d counted versions", e)
+		require.Equal(t, evicted, work.versionsEvicted, "entry %d counted evictions", e)
+		require.Equal(t, fx.spec.records, work.changedOwners,
+			"entry %d changes every owner, twice", e)
+		require.Equal(t, inserted, work.indexCalls, "entry %d index rebuilds", e)
+		t.Logf("entry=%d associations=%d owner-updates=%d inserted=%d evicted=%d resident=%d "+
+			"index-calls=%d bucket-clones=%d bucket-entries=%d clone-owners=%d",
 			e, len(fx.entries[e].batch.Updates), len(fx.entries[e].batch.OwnerUpdates),
-			inserted, evicted, len(after.ownerVersions[0]))
+			inserted, evicted, len(after.ownerVersions[0]),
+			work.indexCalls, work.indexBucketClones, work.indexBucketClonedEntries, work.cloneByOwnerEntries)
 		requireOwnerCardinalityHistories(t, st, fx, after)
 	}
 	requireOwnerCardinalityResident(t, st, fx, fx.spec.timed)
@@ -1272,7 +1422,7 @@ func TestPrimaryIngestOwnerCardinalityLifecycle(t *testing.T) {
 	require.NoError(t, st.AppendBatch(context.Background(), fx.entries[2].batch))
 	expect := fx.entries[2].expect
 	delta := st.metadata.snapshot().pendingSince(st.metadataPublished)
-	require.Greater(t, len(delta.versions), 0, "observation-only bounds publish rows")
+	require.NotEmpty(t, delta.versions, "observation-only bounds publish rows")
 	for _, owner := range delta.owners {
 		require.False(t, owner.replace, "a delta never replaces an owner history")
 	}
@@ -1310,14 +1460,14 @@ func TestPrimaryIngestOwnerCardinalityLifecycle(t *testing.T) {
 // TestPrimaryIngestOwnerCardinalityTruncation proves truncation stays exact under a
 // small explicit version cap.
 func TestPrimaryIngestOwnerCardinalityTruncation(t *testing.T) {
-	const cap = 3
+	const versionCap = 3
 	spec := ownerCardinalitySpec{
 		mode: ownerCardinalityVersionAndAssociations, records: 4, points: 4, owners: 2,
-		timed: 3, versionCap: cap,
+		timed: 3, versionCap: versionCap,
 	}
 	fx := buildOwnerCardinalityFixture(t, spec)
 	st, err := NewStorage(t.TempDir(), StorageOptions{
-		FlushSamples: 1 << 40, DisableWAL: true, MetadataVersionCap: cap,
+		FlushSamples: 1 << 40, DisableWAL: true, MetadataVersionCap: versionCap,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, st.Close()) })
@@ -1329,10 +1479,10 @@ func TestPrimaryIngestOwnerCardinalityTruncation(t *testing.T) {
 	for j, owner := range fx.owners {
 		history, ok := st.MetadataHistory(owner)
 		require.True(t, ok)
-		require.Len(t, history.Versions, cap, "owner %d is capped", j)
+		require.Len(t, history.Versions, versionCap, "owner %d is capped", j)
 		require.True(t, history.Truncated, "owner %d reports truncation rather than a silent current value", j)
 		want := fx.entries[spec.timed].expect.ownerVersions[j]
-		require.Equal(t, want[len(want)-1].effectiveFrom, history.Versions[cap-1].EffectiveFrom,
+		require.Equal(t, want[len(want)-1].effectiveFrom, history.Versions[versionCap-1].EffectiveFrom,
 			"the retained versions are the newest ones")
 	}
 }

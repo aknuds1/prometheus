@@ -78,23 +78,34 @@ func (s *metadataStore) setIndexedResourceAttrs(attributes []string) {
 	clear(s.ownerIndex)
 	for owner, history := range s.byOwner {
 		history.index = map[string]struct{}{}
-		s.indexResourceOwner(owner, history)
+		s.indexResourceOwner(owner, history, nil)
 	}
 }
 
 // indexResourceOwner rebuilds only one owner's contribution. The per-owner index
 // set permits old values to be removed at truncation/backfill through the shared
 // value→owner index without retaining an unbounded candidate history.
-func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwnerHistory) {
+func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwnerHistory, w *metadataWork) {
 	if owner.Kind != MetadataResource {
 		return
+	}
+	if w != nil {
+		w.indexCalls++
+		w.indexVersionsVisited += len(history.versions)
 	}
 	if history.index == nil {
 		history.index = map[string]struct{}{}
 	}
 	clear(history.index)
+	if w != nil {
+		w.indexHistoryClears++
+	}
 	newConditions := map[string]metadataIndexedRange{}
-	for name, value := range metadataOwnerIdentity(owner) {
+	identity := metadataOwnerIdentity(owner)
+	if w != nil {
+		w.indexIdentifyingVisits += len(identity)
+	}
+	for name, value := range identity {
 		condition := attributeCondition(name, value)
 		newConditions[condition] = metadataIndexedRange{}
 		if len(history.versions) > 0 {
@@ -103,11 +114,20 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 	}
 	for i, version := range history.versions {
 		for name, value := range version.Content.Attributes {
+			if w != nil {
+				w.indexContentAttributeVisits++
+			}
 			if _, configured := s.indexedResourceAttrs[name]; !configured {
 				continue
 			}
+			if w != nil {
+				w.indexDescriptiveAttributeVisits++
+			}
 			condition := attributeCondition(name, value)
 			history.index[condition] = struct{}{}
+			if w != nil {
+				w.indexHistoryEntriesWritten++
+			}
 			candidate, exists := newConditions[condition]
 			if !exists {
 				candidate.from = version.EffectiveFrom
@@ -121,6 +141,10 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 	}
 
 	previous := s.ownerIndex[owner]
+	if w != nil {
+		w.indexOldConditions += len(previous)
+		w.indexNewConditions += len(newConditions)
+	}
 	if s.copyOnWrite {
 		// Shared attribute/value maps are cloned before an owner mutation, for
 		// both conditions being removed and newly introduced conditions. This
@@ -133,12 +157,22 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 			toCopy[condition] = struct{}{}
 		}
 		for condition := range toCopy {
+			if w != nil {
+				w.indexBucketClones++
+				w.indexBucketClonedEntries += len(s.attributeIndex[condition])
+			}
 			s.attributeIndex[condition] = maps.Clone(s.attributeIndex[condition])
 		}
 	}
 	for condition := range previous {
 		if _, retained := newConditions[condition]; retained {
+			if w != nil {
+				w.indexRetainedConditions++
+			}
 			continue
+		}
+		if w != nil {
+			w.indexDeletedConditions++
 		}
 		delete(s.attributeIndex[condition], owner)
 		if len(s.attributeIndex[condition]) == 0 {
@@ -146,6 +180,12 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 		}
 	}
 	for condition, candidate := range newConditions {
+		if w != nil {
+			w.indexGlobalRangeUpdates++
+			if _, existed := previous[condition]; !existed {
+				w.indexAddedConditions++
+			}
+		}
 		if s.attributeIndex[condition] == nil {
 			s.attributeIndex[condition] = map[OwnerKey]metadataIndexedRange{}
 		}
