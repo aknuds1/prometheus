@@ -43,6 +43,16 @@ func (ev *evaluator) evalInfo(ctx context.Context, args parser.Expressions) (par
 	// with a materialized matrix selector that no longer carries the modifiers inside it.
 	nodeTimestamp, offset := infoSeriesSelectTimestampAndOffset(args[0])
 
+	var resourceInfo *resourceInfoQuery
+	if selectsNativeResourceInfo(args) {
+		querier, _ := ev.querier.(storage.ResourceQuerier)
+		var err error
+		resourceInfo, err = newResourceInfoQuery(args, querier, ev.labelNamerConfig)
+		if err != nil {
+			ev.error(err)
+		}
+	}
+
 	val, annots := ev.eval(ctx, args[0])
 	mat := val.(Matrix)
 	// Map from data label name to matchers.
@@ -78,14 +88,20 @@ func (ev *evaluator) evalInfo(ctx context.Context, args parser.Expressions) (par
 		}
 	}
 
-	selectHints := ev.infoSelectHints(nodeTimestamp, offset)
-	infoSeries, ws, err := ev.fetchInfoSeries(ctx, mat, ignoreSeries, dataLabelMatchers, selectHints, nodeTimestamp, offset)
-	if err != nil {
-		ev.error(err)
+	var infoSeries Matrix
+	var warnings annotations.Annotations
+	if !resourceInfo.nativeOnlyInput(mat, ignoreSeries) {
+		selectHints := ev.infoSelectHints(nodeTimestamp, offset)
+		series, ws, err := ev.fetchInfoSeries(ctx, mat, ignoreSeries, dataLabelMatchers, selectHints, nodeTimestamp, offset)
+		if err != nil {
+			ev.error(err)
+		}
+		warnings.Merge(ws)
+		infoSeries = series
 	}
-	annots.Merge(ws)
+	annots.Merge(warnings)
 
-	res, ws := ev.combineWithInfoSeries(ctx, mat, infoSeries, ignoreSeries, dataLabelMatchers)
+	res, ws := ev.combineWithInfoSeries(ctx, mat, infoSeries, ignoreSeries, dataLabelMatchers, resourceInfo, nodeTimestamp, offset)
 	annots.Merge(ws)
 	return res, annots
 }
@@ -389,7 +405,7 @@ func infoIdentifyingMatcherSets(mat Matrix, ignoreSeries map[uint64]struct{}) []
 }
 
 // combineWithInfoSeries combines mat with select data labels from infoMat.
-func (ev *evaluator) combineWithInfoSeries(ctx context.Context, mat, infoMat Matrix, ignoreSeries map[uint64]struct{}, dataLabelMatchers map[string][]*labels.Matcher) (Matrix, annotations.Annotations) {
+func (ev *evaluator) combineWithInfoSeries(ctx context.Context, mat, infoMat Matrix, ignoreSeries map[uint64]struct{}, dataLabelMatchers map[string][]*labels.Matcher, resourceInfo *resourceInfoQuery, nodeTimestamp *int64, offset time.Duration) (Matrix, annotations.Annotations) {
 	buf := make([]byte, 0, 1024)
 	lb := labels.NewScratchBuilder(0)
 	sigFunction := func(name string) func(labels.Labels) string {
@@ -469,7 +485,12 @@ func (ev *evaluator) combineWithInfoSeries(ctx context.Context, mat, infoMat Mat
 		infoVector, _ = ev.gatherVector(ts, infoMat, infoVector, nil, nil)
 
 		enh.Ts = ts
-		result, err := ev.combineWithInfoVector(baseVector, infoVector, ignoreSeries, baseSigs, infoSigs, enh, dataLabelMatchers)
+		lookupTimestamp := ts
+		if nodeTimestamp != nil {
+			lookupTimestamp = *nodeTimestamp
+		}
+		lookupTimestamp -= durationMilliseconds(offset)
+		result, err := ev.combineWithInfoVector(baseVector, infoVector, ignoreSeries, baseSigs, infoSigs, enh, dataLabelMatchers, resourceInfo, lookupTimestamp)
 		if err != nil {
 			ev.error(err)
 		}
@@ -523,7 +544,7 @@ func (ev *evaluator) combineWithInfoSeries(ctx context.Context, mat, infoMat Mat
 
 // combineWithInfoVector combines base and info Vectors.
 // Base series in ignoreSeries are not combined.
-func (ev *evaluator) combineWithInfoVector(base, info Vector, ignoreSeries map[uint64]struct{}, baseSigs map[uint64]map[string]string, infoSigs map[uint64]string, enh *EvalNodeHelper, dataLabelMatchers map[string][]*labels.Matcher) (Vector, error) {
+func (ev *evaluator) combineWithInfoVector(base, info Vector, ignoreSeries map[uint64]struct{}, baseSigs map[uint64]map[string]string, infoSigs map[uint64]string, enh *EvalNodeHelper, dataLabelMatchers map[string][]*labels.Matcher, resourceInfo *resourceInfoQuery, lookupTimestamp int64) (Vector, error) {
 	if len(base) == 0 {
 		return nil, nil // Short-circuit: nothing is going to match.
 	}
@@ -574,6 +595,27 @@ func (ev *evaluator) combineWithInfoVector(base, info Vector, ignoreSeries map[u
 				DropName: bs.DropName,
 			})
 			continue
+		}
+
+		if resourceInfo != nil {
+			resource, found := resourceInfo.querier.GetResourceAt(labels.StableHash(bs.Metric), lookupTimestamp)
+			var attributes map[string]string
+			hasNativeMembership := found && resource != nil
+			if hasNativeMembership {
+				attributes = resource.Descriptive
+			} else if resourceInfo.membership != nil {
+				// A member without an applicable retained version has no native
+				// content, but must not enrich from target_info instead.
+				hasNativeMembership = resourceInfo.membership.HasResourceMembershipAt(labels.StableHash(bs.Metric), lookupTimestamp)
+			}
+			if hasNativeMembership {
+				sample, keep := enrichSampleWithResource(bs, attributes, resourceInfo.matchers, resourceInfo.toOutput, enh)
+				if !keep {
+					continue
+				}
+				enh.Out = append(enh.Out, sample)
+				continue
+			}
 		}
 
 		baseLabels := bs.Metric.Map()

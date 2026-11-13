@@ -420,6 +420,19 @@ func (c *PrometheusConverter) FromMetrics(ctx context.Context, md pmetric.Metric
 	return annots, errs
 }
 
+// Promotes reports whether the configured resource-attribute policy includes
+// name. A nil selector promotes nothing.
+func (s *PromoteResourceAttributes) Promotes(name string) bool {
+	if s == nil {
+		return false
+	}
+	_, configured := s.attrs[name]
+	if s.promoteAll {
+		return !configured
+	}
+	return configured
+}
+
 func NewPromoteResourceAttributes(otlpCfg config.OTLPConfig) *PromoteResourceAttributes {
 	attrs := otlpCfg.PromoteResourceAttributes
 	if otlpCfg.PromoteAllResourceAttributes {

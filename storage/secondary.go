@@ -36,7 +36,8 @@ var errSecondarySearchUnsupported = errors.New("search is not supported by a sec
 // NOTE: This works well only for implementations that only fail during first Next() (e.g fetch from network). If implementation fails
 // during further iterations, set will panic. If Select is invoked after first Next of any returned SeriesSet, querier will panic.
 //
-// Not go-routine safe.
+// Not go-routine safe. Later Select calls made after the first series iteration
+// receive independent first-next validation rather than reusing that one-shot.
 // NOTE: Prometheus treats all remote storages as secondary / best effort.
 type secondaryQuerier struct {
 	genericQuerier
@@ -90,7 +91,7 @@ func (s *secondaryQuerier) SearchLabelValues(ctx context.Context, name string, h
 
 func (s *secondaryQuerier) Select(ctx context.Context, sortSeries bool, hints *SelectHints, matchers ...*labels.Matcher) genericSeriesSet {
 	if s.done {
-		panic("secondaryQuerier: Select invoked after first Next of any returned SeriesSet was done")
+		return lazySecondarySeriesSet(s.genericQuerier.Select(ctx, sortSeries, hints, matchers...))
 	}
 
 	s.asyncSets = append(s.asyncSets, s.genericQuerier.Select(ctx, sortSeries, hints, matchers...))
@@ -128,6 +129,27 @@ func (s *secondaryQuerier) Select(ctx context.Context, sortSeries bool, hints *S
 		default:
 			return s.asyncSets[curr], true
 		}
+	}}
+}
+
+// lazySecondarySeriesSet performs a fresh first-next check for a secondary
+// selection made after the wrapper's original grouped initialization completed.
+func lazySecondarySeriesSet(set genericSeriesSet) genericSeriesSet {
+	return &lazyGenericSeriesSet{init: func() (genericSeriesSet, bool) {
+		warnings := set.Warnings()
+		if err := set.Err(); err != nil {
+			warnings = warnings.Add(err)
+			return warningsOnlySeriesSet(warnings), false
+		}
+		if set.Next() {
+			if err := set.Err(); err != nil {
+				warnings = warnings.Add(err)
+				return warningsOnlySeriesSet(warnings), false
+			}
+			return set, true
+		}
+		warnings.Merge(set.Warnings())
+		return warningsOnlySeriesSet(warnings), false
 	}}
 }
 

@@ -1,0 +1,352 @@
+// Copyright The Prometheus Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package columnar
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/oklog/ulid/v2"
+
+	"github.com/prometheus/prometheus/model/labels"
+)
+
+// MetadataSummary is the block catalog entry for native metadata. Effective
+// timestamps are milliseconds and inclusive. AttributeNames contains retained
+// Resource attribute names only; it does not promote other metadata kinds.
+type MetadataSummary struct {
+	NumOwners        int      `json:"num_owners"`
+	NumContents      int      `json:"num_contents"`
+	NumVersions      int      `json:"num_versions"`
+	NumMemberships   int      `json:"num_memberships"`
+	MinEffectiveFrom int64    `json:"min_effective_from"`
+	MaxEffectiveFrom int64    `json:"max_effective_from"`
+	Kinds            []string `json:"kinds,omitempty"`
+	AttributeNames   []string `json:"attribute_names,omitempty"`
+	// IndexedAttributes records selected descriptive attributes, not an
+	// index-everything default. Identifying attributes are always implicit.
+	IndexedAttributes []string `json:"indexed_attributes"`
+	HistoryTruncated  bool     `json:"history_truncated,omitempty"`
+}
+
+// Meta is the manifest of a block.
+//
+// Times are in milliseconds and follow Prometheus block conventions: MinTime is
+// inclusive, MaxTime exclusive.
+type Meta struct {
+	ULID          string `json:"ulid"`
+	MinTime       int64  `json:"min_time"`
+	MaxTime       int64  `json:"max_time"`
+	NumSeries     int    `json:"num_series"`
+	NumSamples    int    `json:"num_samples"`
+	FormatVersion int    `json:"format_version"`
+	// WALSequence is the highest append-log batch included in this block.
+	WALSequence uint64 `json:"wal_sequence,omitempty"`
+	// Replaces names validated parents of a published compaction, allowing reopen
+	// to suppress crash-left parents without first reading all their payloads.
+	Replaces []string         `json:"replaces,omitempty"`
+	Metadata *MetadataSummary `json:"metadata,omitempty"`
+	// SeriesPerRowGroup bounds the size of each cohort slice. NumRowGroups lets a
+	// reader validate its catalog without opening the sample Parquet payload.
+	SeriesPerRowGroup int64 `json:"series_per_row_group"`
+	NumRowGroups      int   `json:"num_row_groups"`
+}
+
+// WriteBlock writes a new block directory below dir containing series.
+//
+// The block is written to a temporary directory and renamed into place, so a
+// reader never observes a partially written block. Series are sorted by label
+// set, which gives the writer a deterministic layout and lets row groups hold
+// contiguous ranges of the label order.
+//
+// All timestamps of the block are taken from the samples themselves; mint and
+// maxt are not passed in, because a block that disagrees with its samples is
+// worse than one whose range is derived.
+func WriteBlock(dir string, series []Series, opts WriteOptions) (Meta, error) {
+	return writeBlock(dir, series, nil, opts, 0, nil, nil)
+}
+
+// writeBlock writes samples and an optional metadata snapshot. All relations
+// and their catalog summary enter the temporary block before its atomic rename.
+func writeBlock(dir string, series []Series, metadata *metadataRelations, opts WriteOptions, walSequence uint64, catalogOut *blockCatalog, intern func(labels.Labels) (labels.Labels, error)) (Meta, error) {
+	opts = opts.withDefaults()
+
+	series = slices.Clone(series)
+	for _, s := range series {
+		if err := s.Validate(); err != nil {
+			return Meta{}, err
+		}
+	}
+	slices.SortFunc(series, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
+
+	meta := Meta{
+		ULID:              ulid.Make().String(),
+		FormatVersion:     FormatVersion,
+		NumSeries:         len(series),
+		WALSequence:       walSequence,
+		Metadata:          metadata.summary(),
+		SeriesPerRowGroup: opts.MaxSeriesPerRowGroup,
+	}
+	if len(series) > 0 {
+		// An empty block has no meaningful range; leave it zero.
+		meta.MinTime = series[0].Timestamps[0]
+		meta.MaxTime = series[0].Timestamps[len(series[0].Timestamps)-1] + 1
+	}
+	for _, s := range series {
+		meta.NumSamples += len(s.Timestamps)
+		if len(s.Timestamps) == 0 {
+			continue
+		}
+		meta.MinTime = min(meta.MinTime, s.Timestamps[0])
+		meta.MaxTime = max(meta.MaxTime, s.Timestamps[len(s.Timestamps)-1]+1)
+	}
+	if meta.Metadata != nil {
+		meta.Metadata.IndexedAttributes = normalizeIndexedResourceAttributes(opts.IndexedResourceAttributes)
+	}
+
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return Meta{}, err
+	}
+	tmpDir := filepath.Join(dir, meta.ULID+tmpDirSuffix)
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		return Meta{}, err
+	}
+	// The temporary directory must not survive a failed write.
+	defer func() {
+		if _, err := os.Stat(tmpDir); err == nil {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
+
+	catalog, err := buildBlockCatalog(series, opts, intern)
+	if err != nil {
+		return Meta{}, err
+	}
+	meta.NumRowGroups = len(catalog.Cohorts)
+	if err := writeSegmentFiles(tmpDir, series, &catalog); err != nil {
+		return Meta{}, fmt.Errorf("writing block segments: %w", err)
+	}
+	if err := writeBlockCatalog(tmpDir, catalog); err != nil {
+		return Meta{}, fmt.Errorf("writing block catalog: %w", err)
+	}
+	if err := writeMetadataRelations(tmpDir, metadata, opts); err != nil {
+		return Meta{}, fmt.Errorf("writing block metadata: %w", err)
+	}
+
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return Meta{}, err
+	}
+	if err := os.WriteFile(blockMetaPath(tmpDir), raw, 0o600); err != nil {
+		return Meta{}, err
+	}
+
+	finalDir := filepath.Join(dir, meta.ULID)
+	if err := os.Rename(tmpDir, finalDir); err != nil {
+		return Meta{}, err
+	}
+	if catalogOut != nil {
+		*catalogOut = catalog
+	}
+	return meta, nil
+}
+
+// Block is a readable columnar block.
+type Block struct {
+	dir  string
+	meta Meta
+
+	mem   memory.Allocator
+	reads *readStats
+	// rowGroups is the number of row groups in the data file, used to expose
+	// scan granularity.
+	rowGroups int
+	catalog   blockCatalog
+
+	// readerMtx guards the lazily opened payload files.
+	readerMtx sync.Mutex
+	reader    *segmentReader
+}
+
+// Close releases cached reader state. Blocks are immutable, so this is safe to
+// call once the block is no longer queried.
+func (b *Block) Close() error {
+	b.readerMtx.Lock()
+	defer b.readerMtx.Unlock()
+	var err error
+	if b.reader != nil {
+		err = errors.Join(b.reader.segments.Close(), b.reader.timestamps.Close())
+		b.reader = nil
+	}
+	return err
+}
+
+// OpenBlock opens the block in dir.
+func OpenBlock(dir string) (*Block, error) {
+	return openBlock(dir, nil)
+}
+
+// openBlock optionally reuses the catalog produced by this process's block
+// writer. On-disk opens always decode and validate the persisted catalog.
+func openBlock(dir string, suppliedCatalog *blockCatalog) (*Block, error) {
+	raw, err := os.ReadFile(blockMetaPath(dir))
+	if err != nil {
+		return nil, err
+	}
+	var meta Meta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil, fmt.Errorf("parsing block metadata: %w", err)
+	}
+	if meta.FormatVersion != FormatVersion {
+		return nil, fmt.Errorf("block %s has format version %d, this build reads version %d", dir, meta.FormatVersion, FormatVersion)
+	}
+
+	catalog := suppliedCatalog
+	if catalog == nil {
+		diskCatalog, err := readBlockCatalog(dir, meta)
+		catalog = &diskCatalog
+		if err != nil {
+			return nil, fmt.Errorf("reading block catalog: %w", err)
+		}
+	} else {
+		validated, err := validateBlockCatalog(*catalog, meta)
+		if err != nil {
+			return nil, fmt.Errorf("validating in-memory block catalog: %w", err)
+		}
+		catalog = &validated
+	}
+
+	return &Block{
+		dir:       dir,
+		meta:      meta,
+		mem:       memory.NewGoAllocator(),
+		rowGroups: meta.NumRowGroups,
+		catalog:   *catalog,
+	}, nil
+}
+
+// Dir returns the block directory.
+func (b *Block) Dir() string { return b.dir }
+
+// BlockMetas returns copies of the currently published block manifests. It is
+// metadata for experimental inspection, not a TSDB lifecycle/compaction API.
+func (s *Storage) BlockMetas() []Meta {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	out := make([]Meta, len(s.blocks))
+	for i, block := range s.blocks {
+		out[i] = block.meta
+		out[i].Replaces = slices.Clone(block.meta.Replaces)
+	}
+	return out
+}
+
+// Meta returns the block manifest.
+func (b *Block) Meta() Meta { return b.meta }
+
+// NumRowGroups returns the number of row groups in the block.
+func (b *Block) NumRowGroups() int { return b.rowGroups }
+
+// Series reads every series of the block.
+//
+// This is the brute-force reader: it materialises the whole block. The query
+// path must not use it, because the only way Parquet lets a selector avoid work
+// is by skipping row groups, and this reads all of them.
+func (b *Block) Series(ctx context.Context) ([]Series, error) {
+	selections := make([]selectedBlockSeries, len(b.catalog.Series))
+	for i, entry := range b.catalog.Series {
+		selections[i] = selectedBlockSeries{entry: entry, segments: entry.Segments}
+	}
+	series, err := b.readSelectedSeries(ctx, selections)
+	slices.SortFunc(series, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
+	return series, err
+}
+
+// Overlaps reports whether the block may contain samples in the inclusive range
+// [mint, maxt].
+//
+// Both ends are inclusive because that is how PromQL queries storage: a query at
+// the block's first timestamp must still see the block. The block's own range is
+// half-open in meta.json, as in TSDB, so MaxTime is compared exclusively against
+// mint and MinTime inclusively against maxt.
+func (b *Block) Overlaps(mint, maxt int64) bool {
+	return b.meta.NumSeries > 0 && b.meta.MaxTime > mint && b.meta.MinTime <= maxt
+}
+
+// ErrNoBlocks is returned when a directory contains no blocks.
+var ErrNoBlocks = errors.New("no columnar blocks")
+
+// ListBlocks returns the blocks in dir, sorted by ULID, which sorts by creation
+// time.
+func ListBlocks(dir string) ([]*Block, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNoBlocks
+		}
+		return nil, err
+	}
+
+	blocks := make([]*Block, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == walDirName || filepath.Ext(entry.Name()) == tmpDirSuffix || strings.HasPrefix(entry.Name(), retiredBlockPrefix) {
+			continue
+		}
+		block, err := OpenBlock(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, block)
+	}
+	replaced := map[string]struct{}{}
+	for _, block := range blocks {
+		for _, parent := range block.meta.Replaces {
+			replaced[parent] = struct{}{}
+		}
+	}
+	if len(replaced) > 0 {
+		blocks = slices.DeleteFunc(blocks, func(block *Block) bool {
+			_, obsolete := replaced[block.meta.ULID]
+			return obsolete
+		})
+	}
+	if len(blocks) == 0 {
+		return nil, ErrNoBlocks
+	}
+	slices.SortFunc(blocks, func(a, b *Block) int {
+		if a.meta.WALSequence != 0 && b.meta.WALSequence != 0 && a.meta.WALSequence != b.meta.WALSequence {
+			if a.meta.WALSequence < b.meta.WALSequence {
+				return -1
+			}
+			return 1
+		}
+		switch {
+		case a.meta.ULID < b.meta.ULID:
+			return -1
+		case a.meta.ULID > b.meta.ULID:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return blocks, nil
+}

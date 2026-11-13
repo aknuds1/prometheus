@@ -22,8 +22,21 @@ import (
 // StableHash is a labels hashing implementation which is guaranteed to not change over time.
 // This function should be used whenever labels hashing backward compatibility must be guaranteed.
 func StableHash(ls Labels) uint64 {
+	h, _ := StableHashInto(ls, nil)
+	return h
+}
+
+// StableHashInto is StableHash reusing the caller's scratch buffer, which avoids
+// a fresh allocation per call on hot ingestion paths. It returns the buffer for
+// reuse; the hash is identical to StableHash.
+func StableHashInto(ls Labels, scratch []byte) (uint64, []byte) {
 	// Use xxhash.Sum64(b) for fast path as it's faster.
-	b := make([]byte, 0, 1024)
+	var b []byte
+	if cap(scratch) >= 1024 {
+		b = scratch[:0]
+	} else {
+		b = make([]byte, 0, 1024)
+	}
 	for i, v := range ls {
 		if len(b)+len(v.Name)+len(v.Value)+2 >= cap(b) {
 			// If labels entry is 1KB+ do not allocate whole entry.
@@ -35,7 +48,7 @@ func StableHash(ls Labels) uint64 {
 				_, _ = h.WriteString(v.Value)
 				_, _ = h.Write(seps)
 			}
-			return h.Sum64()
+			return h.Sum64(), b[:0]
 		}
 
 		b = append(b, v.Name...)
@@ -43,5 +56,5 @@ func StableHash(ls Labels) uint64 {
 		b = append(b, v.Value...)
 		b = append(b, sep)
 	}
-	return xxhash.Sum64(b)
+	return xxhash.Sum64(b), b
 }

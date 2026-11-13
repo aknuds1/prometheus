@@ -25,7 +25,8 @@ import (
 // A matrixIterator guards cancellation and input cost before its buffer grows.
 type matrixIterator struct {
 	*storage.BufferedSeriesIterator
-	guard *queryIterator
+	guard      *queryIterator
+	rangeBatch storage.RangeBatchIterator
 }
 
 func (ev *evaluator) newMatrixIterator(ctx context.Context, delta int64) *matrixIterator {
@@ -37,10 +38,20 @@ func (ev *evaluator) newMatrixIterator(ctx context.Context, delta int64) *matrix
 }
 
 func (it *matrixIterator) Reset(inner chunkenc.Iterator) {
+	it.rangeBatch = nil
 	if it.guard != nil {
 		it.guard.beginFrame(-1)
 		it.guard.Iterator = inner
 		inner = it.guard
+	}
+	if it.guard == nil {
+		if rangeBatch, ok := inner.(storage.RangeBatchIterator); ok {
+			it.rangeBatch = rangeBatch
+			// Do not advance the underlying page through BufferedSeriesIterator's
+			// initialization. The range reader owns direct matrix consumption.
+			it.BufferedSeriesIterator.Reset(chunkenc.NewNopIterator())
+			return
+		}
 	}
 	it.BufferedSeriesIterator.Reset(inner)
 }

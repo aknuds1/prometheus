@@ -1,0 +1,561 @@
+{
+  "series": [
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "samples": [
+        "1700000000000/4000000000000000/0/0",
+        "1700000015000/4002000000000000/0/0",
+        "1700000030000/4004000000000000/0/0",
+        "1700000075000/400c000000000000/0/0",
+        "1700000090000/400e000000000000/0/0",
+        "1700000105000/4010000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "samples": [
+        "1700000000000/0000000000000000/0/0",
+        "1700000015000/3fd0000000000000/0/0",
+        "1700000030000/3fe0000000000000/0/0",
+        "1700000075000/3ff8000000000000/0/0",
+        "1700000090000/3ffc000000000000/0/0",
+        "1700000105000/4000000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "samples": [
+        "1700000000000/4008000000000000/0/0",
+        "1700000015000/400a000000000000/0/0",
+        "1700000030000/400c000000000000/0/0",
+        "1700000075000/4012000000000000/0/0",
+        "1700000090000/4013000000000000/0/0",
+        "1700000105000/4014000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "samples": [
+        "1700000000000/3ff0000000000000/0/0",
+        "1700000015000/3ff4000000000000/0/0",
+        "1700000030000/3ff8000000000000/0/0",
+        "1700000075000/4004000000000000/0/0",
+        "1700000090000/4006000000000000/0/0",
+        "1700000105000/4008000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "samples": [
+        "1700000000000/4069000000000000/0/0",
+        "1700000015000/406c200000000000/0/0",
+        "1700000030000/406f400000000000/0/0",
+        "1700000075000/4075e00000000000/0/0",
+        "1700000090000/4077700000000000/0/0",
+        "1700000105000/4079000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "samples": [
+        "1700000000000/0000000000000000/0/0",
+        "1700000015000/4039000000000000/0/0",
+        "1700000030000/4049000000000000/0/0",
+        "1700000075000/4062c00000000000/0/0",
+        "1700000090000/4065e00000000000/0/0",
+        "1700000105000/4069000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "samples": [
+        "1700000000000/4072c00000000000/0/0",
+        "1700000015000/4074500000000000/0/0",
+        "1700000030000/4075e00000000000/0/0",
+        "1700000075000/407c200000000000/0/0",
+        "1700000090000/407db00000000000/0/0",
+        "1700000105000/407f400000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "samples": [
+        "1700000000000/4059000000000000/0/0",
+        "1700000015000/405f400000000000/0/0",
+        "1700000030000/4062c00000000000/0/0",
+        "1700000075000/406f400000000000/0/0",
+        "1700000090000/4071300000000000/0/0",
+        "1700000105000/4072c00000000000/0/0"
+      ]
+    }
+  ],
+  "owners": [
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "resource\u0000[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000030000
+        },
+        {
+          "content": "[\"deployment.environment\",\"prod\"]",
+          "effective_from": 1700000075000,
+          "observed_from": 1700000075000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "resource\u0000[\"service.instance.id\",\"instance-1\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000030000
+        },
+        {
+          "content": "[\"deployment.environment\",\"prod\"]",
+          "effective_from": 1700000075000,
+          "observed_from": 1700000075000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "resource\u0000[\"service.instance.id\",\"instance-2\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000030000
+        },
+        {
+          "content": "[\"deployment.environment\",\"prod\"]",
+          "effective_from": 1700000075000,
+          "observed_from": 1700000075000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "resource\u0000[\"service.instance.id\",\"instance-3\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000030000
+        },
+        {
+          "content": "[\"deployment.environment\",\"prod\"]",
+          "effective_from": 1700000075000,
+          "observed_from": 1700000075000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "resource_schema\u0000resource\u0000[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"schema_url\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "resource_schema\u0000resource\u0000[\"service.instance.id\",\"instance-1\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"schema_url\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "resource_schema\u0000resource\u0000[\"service.instance.id\",\"instance-2\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"schema_url\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "resource_schema\u0000resource\u0000[\"service.instance.id\",\"instance-3\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"schema_url\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "scope\u0000{\"name\":\"prometheus.primary.ingest\",\"version\":\"1.0.0\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"schema_url\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    },
+    {
+      "owner": "source\u0000otap",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"transport\",\"otap\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000105000
+        }
+      ]
+    }
+  ],
+  "owner_pages": {
+    "metric": [
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\\\", instance=\\\"instance-2\\\", job=\\\"checkout\\\", series=\\\"2\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"0\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\\\", instance=\\\"instance-3\\\", job=\\\"checkout\\\", series=\\\"3\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\\\", instance=\\\"instance-1\\\", job=\\\"checkout\\\", series=\\\"1\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\\\", instance=\\\"instance-2\\\", job=\\\"checkout\\\", series=\\\"2\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"0\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\\\", instance=\\\"instance-3\\\", job=\\\"checkout\\\", series=\\\"3\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\\\", instance=\\\"instance-1\\\", job=\\\"checkout\\\", series=\\\"1\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}"
+    ],
+    "resource": [
+      "{\"identifying\":{\"service.instance.id\":\"instance-0\",\"service.name\":\"checkout\",\"service.namespace\":\"\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000030000},{\"content\":\"[\\\"deployment.environment\\\",\\\"prod\\\"]\",\"effective_from\":1700000075000,\"observed_from\":1700000075000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"service.instance.id\":\"instance-1\",\"service.name\":\"checkout\",\"service.namespace\":\"\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000030000},{\"content\":\"[\\\"deployment.environment\\\",\\\"prod\\\"]\",\"effective_from\":1700000075000,\"observed_from\":1700000075000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"service.instance.id\":\"instance-2\",\"service.name\":\"checkout\",\"service.namespace\":\"\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000030000},{\"content\":\"[\\\"deployment.environment\\\",\\\"prod\\\"]\",\"effective_from\":1700000075000,\"observed_from\":1700000075000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"service.instance.id\":\"instance-3\",\"service.name\":\"checkout\",\"service.namespace\":\"\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000030000},{\"content\":\"[\\\"deployment.environment\\\",\\\"prod\\\"]\",\"effective_from\":1700000075000,\"observed_from\":1700000075000,\"observed_until\":1700000105000}]}"
+    ],
+    "resource_schema": [
+      "{\"identifying\":{\"resource\":\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"schema_url\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"resource\":\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-1\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"schema_url\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"resource\":\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-2\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"schema_url\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}",
+      "{\"identifying\":{\"resource\":\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-3\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"schema_url\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}"
+    ],
+    "scope": [
+      "{\"identifying\":{\"name\":\"prometheus.primary.ingest\",\"version\":\"1.0.0\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"schema_url\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}"
+    ],
+    "source": [
+      "{\"identifying\":{\"source\":\"otap\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"transport\\\",\\\"otap\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000105000}]}"
+    ]
+  },
+  "memberships": {
+    "metric": [
+      "series[0] owner=2fe6bc2400687a731873be3fdbbe0accd6cb246969aa1524252d6e2444056270 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\\\", instance=\\\"instance-2\\\", job=\\\"checkout\\\", series=\\\"2\\\"}\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[1] owner=f397c6f6580730878bafb4eea4569a4263cbaa1b3fa1abd8b736e85fd1322894 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"0\\\"}\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[2] owner=6274b5ae65a93b39746e97e96a683ad6dad6b4e8d990c5348070816c4aed72d8 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\\\", instance=\\\"instance-3\\\", job=\\\"checkout\\\", series=\\\"3\\\"}\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[3] owner=b3fec631018785c75022c20301569c4d71bb179ebe781be0b4cf479715474857 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\\\", instance=\\\"instance-1\\\", job=\\\"checkout\\\", series=\\\"1\\\"}\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[4] owner=e21d375c344d255217e3dba915d4285e77fd34b548b02da4e8c3db0d75517439 identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\\\", instance=\\\"instance-2\\\", job=\\\"checkout\\\", series=\\\"2\\\"}\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[5] owner=0ade142852654eb9387460f7e8eb7881fe2d0e1a793ef384a4ed4847353b66c0 identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"0\\\"}\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[6] owner=b52f6285a253088b582428919b09c2a72698c5538f6f014f6f35fbc4b3a27632 identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\\\", instance=\\\"instance-3\\\", job=\\\"checkout\\\", series=\\\"3\\\"}\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[7] owner=cae72cc9f6f87d5751c506b520f43567cca3947aa436fdcf1f860ff8e2ed9eaf identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\\\", instance=\\\"instance-1\\\", job=\\\"checkout\\\", series=\\\"1\\\"}\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000105000]]"
+    ],
+    "resource": [
+      "series[0] owner=02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7 identifying=[\"service.instance.id\",\"instance-2\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000105000 versions=[[]@1700000000000[1700000000000,1700000030000] [\"deployment.environment\",\"prod\"]@1700000075000[1700000075000,1700000105000]]",
+      "series[1] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000105000 versions=[[]@1700000000000[1700000000000,1700000030000] [\"deployment.environment\",\"prod\"]@1700000075000[1700000075000,1700000105000]]",
+      "series[2] owner=6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306 identifying=[\"service.instance.id\",\"instance-3\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000105000 versions=[[]@1700000000000[1700000000000,1700000030000] [\"deployment.environment\",\"prod\"]@1700000075000[1700000075000,1700000105000]]",
+      "series[3] owner=d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f identifying=[\"service.instance.id\",\"instance-1\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000105000 versions=[[]@1700000000000[1700000000000,1700000030000] [\"deployment.environment\",\"prod\"]@1700000075000[1700000075000,1700000105000]]",
+      "series[4] owner=02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7 identifying=[\"service.instance.id\",\"instance-2\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000105000 versions=[[]@1700000000000[1700000000000,1700000030000] [\"deployment.environment\",\"prod\"]@1700000075000[1700000075000,1700000105000]]",
+      "series[5] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000105000 versions=[[]@1700000000000[1700000000000,1700000030000] [\"deployment.environment\",\"prod\"]@1700000075000[1700000075000,1700000105000]]",
+      "series[6] owner=6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306 identifying=[\"service.instance.id\",\"instance-3\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000105000 versions=[[]@1700000000000[1700000000000,1700000030000] [\"deployment.environment\",\"prod\"]@1700000075000[1700000075000,1700000105000]]",
+      "series[7] owner=d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f identifying=[\"service.instance.id\",\"instance-1\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000105000 versions=[[]@1700000000000[1700000000000,1700000030000] [\"deployment.environment\",\"prod\"]@1700000075000[1700000075000,1700000105000]]"
+    ],
+    "resource_schema": [
+      "series[0] owner=3b10147f9d5461922c27772e1083656418db7284a7ebb23baa5f023571732b80 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-2\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[1] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[2] owner=4009602cd79b01a8b449d3eec6c3498907d87bd57abef7dcbda2003b6f674ce4 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-3\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[3] owner=07914238d475ded9ac1a1bed6c488ca4bf999085eb12b545e48b6711acb60c6e identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-1\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[4] owner=3b10147f9d5461922c27772e1083656418db7284a7ebb23baa5f023571732b80 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-2\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[5] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[6] owner=4009602cd79b01a8b449d3eec6c3498907d87bd57abef7dcbda2003b6f674ce4 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-3\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[7] owner=07914238d475ded9ac1a1bed6c488ca4bf999085eb12b545e48b6711acb60c6e identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-1\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]"
+    ],
+    "scope": [
+      "series[0] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[1] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[2] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[3] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[4] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[5] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[6] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[7] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000105000]]"
+    ],
+    "source": [
+      "series[0] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[1] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[2] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[3] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[4] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[5] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[6] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000105000]]",
+      "series[7] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000105000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000105000]]"
+    ]
+  },
+  "metadata_at_labels": [
+    "series[0] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[0] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[0] kind=resource at=1700000052500 found=true truncated=false content=[]",
+    "series[0] kind=resource at=1700000105001 found=true truncated=false content=[\"deployment.environment\",\"prod\"]",
+    "series[0] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[0] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[0] kind=scope at=1700000052500 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[0] kind=scope at=1700000105001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[0] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[0] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[0] kind=metric at=1700000052500 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[0] kind=metric at=1700000105001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[1] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[1] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[1] kind=resource at=1700000052500 found=true truncated=false content=[]",
+    "series[1] kind=resource at=1700000105001 found=true truncated=false content=[\"deployment.environment\",\"prod\"]",
+    "series[1] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[1] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[1] kind=scope at=1700000052500 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[1] kind=scope at=1700000105001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[1] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[1] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[1] kind=metric at=1700000052500 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[1] kind=metric at=1700000105001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[2] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[2] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[2] kind=resource at=1700000052500 found=true truncated=false content=[]",
+    "series[2] kind=resource at=1700000105001 found=true truncated=false content=[\"deployment.environment\",\"prod\"]",
+    "series[2] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[2] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[2] kind=scope at=1700000052500 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[2] kind=scope at=1700000105001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[2] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[2] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[2] kind=metric at=1700000052500 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[2] kind=metric at=1700000105001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[3] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[3] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[3] kind=resource at=1700000052500 found=true truncated=false content=[]",
+    "series[3] kind=resource at=1700000105001 found=true truncated=false content=[\"deployment.environment\",\"prod\"]",
+    "series[3] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[3] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[3] kind=scope at=1700000052500 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[3] kind=scope at=1700000105001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[3] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[3] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[3] kind=metric at=1700000052500 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[3] kind=metric at=1700000105001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[4] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[4] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[4] kind=resource at=1700000052500 found=true truncated=false content=[]",
+    "series[4] kind=resource at=1700000105001 found=true truncated=false content=[\"deployment.environment\",\"prod\"]",
+    "series[4] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[4] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[4] kind=scope at=1700000052500 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[4] kind=scope at=1700000105001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[4] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[4] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[4] kind=metric at=1700000052500 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[4] kind=metric at=1700000105001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[5] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[5] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[5] kind=resource at=1700000052500 found=true truncated=false content=[]",
+    "series[5] kind=resource at=1700000105001 found=true truncated=false content=[\"deployment.environment\",\"prod\"]",
+    "series[5] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[5] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[5] kind=scope at=1700000052500 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[5] kind=scope at=1700000105001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[5] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[5] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[5] kind=metric at=1700000052500 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[5] kind=metric at=1700000105001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[6] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[6] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[6] kind=resource at=1700000052500 found=true truncated=false content=[]",
+    "series[6] kind=resource at=1700000105001 found=true truncated=false content=[\"deployment.environment\",\"prod\"]",
+    "series[6] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[6] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[6] kind=scope at=1700000052500 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[6] kind=scope at=1700000105001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[6] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[6] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[6] kind=metric at=1700000052500 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[6] kind=metric at=1700000105001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[7] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[7] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[7] kind=resource at=1700000052500 found=true truncated=false content=[]",
+    "series[7] kind=resource at=1700000105001 found=true truncated=false content=[\"deployment.environment\",\"prod\"]",
+    "series[7] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[7] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[7] kind=scope at=1700000052500 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[7] kind=scope at=1700000105001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[7] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[7] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[7] kind=metric at=1700000052500 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[7] kind=metric at=1700000105001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]"
+  ],
+  "info": {
+    "all": [
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "1700000052500 {__name__=\"primary_gauge\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "1700000052500 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000052500 {__name__=\"primary_gauge\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000052500 {__name__=\"primary_gauge\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "1700000052500 {__name__=\"primary_requests_total\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "1700000052500 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000052500 {__name__=\"primary_requests_total\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000052500 {__name__=\"primary_requests_total\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "1700000105000 {__name__=\"primary_gauge\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", deployment_environment=\"prod\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "1700000105000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", deployment_environment=\"prod\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000105000 {__name__=\"primary_gauge\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", deployment_environment=\"prod\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000105000 {__name__=\"primary_gauge\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", deployment_environment=\"prod\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "1700000105000 {__name__=\"primary_requests_total\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", deployment_environment=\"prod\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "1700000105000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", deployment_environment=\"prod\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000105000 {__name__=\"primary_requests_total\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", deployment_environment=\"prod\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000105000 {__name__=\"primary_requests_total\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", deployment_environment=\"prod\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}"
+    ],
+    "gauge": [
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "1700000052500 {__name__=\"primary_gauge\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "1700000052500 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000052500 {__name__=\"primary_gauge\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000052500 {__name__=\"primary_gauge\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}",
+      "1700000105000 {__name__=\"primary_gauge\", __otel_resource__=\"02dadd6576404c0b8382f1e40029442c17db29030da2515a804515a74ecc5be7\", deployment_environment=\"prod\", instance=\"instance-2\", job=\"checkout\", series=\"2\"}",
+      "1700000105000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", deployment_environment=\"prod\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000105000 {__name__=\"primary_gauge\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", deployment_environment=\"prod\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000105000 {__name__=\"primary_gauge\", __otel_resource__=\"d08f4b27686757722203d6fb210c063efa12e90df11d8153ad934c147e051e2f\", deployment_environment=\"prod\", instance=\"instance-1\", job=\"checkout\", series=\"1\"}"
+    ],
+    "sum_selector": [
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000052500 {__name__=\"primary_requests_total\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}",
+      "1700000105000 {__name__=\"primary_requests_total\", __otel_resource__=\"6dcd526c6802c2192c2de8fcaac6e1db449570dcc58be82501bb8cafed8c6306\", deployment_environment=\"prod\", instance=\"instance-3\", job=\"checkout\", series=\"3\"}"
+    ]
+  }
+}
