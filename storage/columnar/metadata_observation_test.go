@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -115,11 +116,30 @@ func observationSeriesLabels(owner columnar.OwnerKey) labels.Labels {
 
 // observationPoint is one number data point of the fixture. resource carries the
 // complete attribute set, so a point can state changed descriptive content for
-// the same identifying identity.
+// the same identifying identity. resourceSchema and scopeSchema select the Resource
+// and Scope occurrence the point belongs to; empty means the fixture defaults.
 type observationPoint struct {
-	resource  map[string]string
-	route     string
-	timestamp int64
+	resource       map[string]string
+	resourceSchema string
+	scopeSchema    string
+	route          string
+	timestamp      int64
+}
+
+// observationResourceSchema and observationScopeSchema resolve a point's schema
+// URLs, defaulting to the single-occurrence fixture.
+func (p observationPoint) resourceURL() string {
+	if p.resourceSchema != "" {
+		return p.resourceSchema
+	}
+	return observationResource
+}
+
+func (p observationPoint) scopeURL() string {
+	if p.scopeSchema != "" {
+		return p.scopeSchema
+	}
+	return observationScope
 }
 
 // observationBatch returns the points of the unchanged context at timestamps.
@@ -139,20 +159,29 @@ func observationBatch(timestamps ...int64) []observationPoint {
 // reorder.
 func observationMetrics(points ...observationPoint) pmetric.Metrics {
 	md := pmetric.NewMetrics()
-	byKey := map[string]int{}
+	byResource := map[string]int{}
 	for _, point := range points {
-		key := fmt.Sprint(point.resource)
-		if _, seen := byKey[key]; seen {
+		key := fmt.Sprint(point.resource) + "\x00" + point.resourceURL()
+		if _, seen := byResource[key]; seen {
 			continue
 		}
-		byKey[key] = len(byKey)
+		byResource[key] = len(byResource)
 		rm := md.ResourceMetrics().AppendEmpty()
-		rm.SetSchemaUrl(observationResource)
+		rm.SetSchemaUrl(point.resourceURL())
 		for name, value := range point.resource {
 			rm.Resource().Attributes().PutStr(name, value)
 		}
-		sm := rm.ScopeMetrics().AppendEmpty()
-		sm.SetSchemaUrl(observationScope)
+	}
+	// Scopes are separate occurrences of their Resource, in first-appearance order.
+	byScope := map[string]int{}
+	for _, point := range points {
+		resource := byResource[fmt.Sprint(point.resource)+"\x00"+point.resourceURL()]
+		key := strconv.Itoa(resource) + "\x00" + point.scopeURL()
+		if _, seen := byScope[key]; seen {
+			continue
+		}
+		sm := md.ResourceMetrics().At(resource).ScopeMetrics().AppendEmpty()
+		sm.SetSchemaUrl(point.scopeURL())
 		sm.Scope().SetName("observation-sdk")
 		sm.Scope().SetVersion("v1")
 		metric := sm.Metrics().AppendEmpty()
@@ -160,9 +189,12 @@ func observationMetrics(points ...observationPoint) pmetric.Metrics {
 		metric.SetDescription("Observation bounds")
 		metric.SetUnit("1")
 		metric.SetEmptyGauge()
+		byScope[key] = md.ResourceMetrics().At(resource).ScopeMetrics().Len() - 1
 	}
 	for _, point := range points {
-		gauge := md.ResourceMetrics().At(byKey[fmt.Sprint(point.resource)]).ScopeMetrics().At(0).Metrics().At(0).Gauge()
+		resource := byResource[fmt.Sprint(point.resource)+"\x00"+point.resourceURL()]
+		scope := byScope[strconv.Itoa(resource)+"\x00"+point.scopeURL()]
+		gauge := md.ResourceMetrics().At(resource).ScopeMetrics().At(scope).Metrics().At(0).Gauge()
 		dp := gauge.DataPoints().AppendEmpty()
 		dp.SetTimestamp(pcommon.Timestamp(point.timestamp * 1_000_000))
 		dp.SetDoubleValue(float64(point.timestamp))

@@ -41,24 +41,41 @@ type otapResourceBounds struct {
 }
 
 // metadataBatchKey identifies one unchanged association within a batch: the same
-// series, owner and complete content. Two observations with the same key state the
-// same context at two times, so they describe one version and one membership.
+// series, owner and complete content. Observations with the same key state one
+// context at several times, so they describe one version and one membership.
 type metadataBatchKey struct {
 	seriesHash uint64
 	owner      OwnerKey
 	content    string
 }
 
+// metadataSeriesKind identifies the membership domain of one series and owner kind.
+type metadataSeriesKind struct {
+	seriesHash uint64
+	kind       MetadataKind
+}
+
 // metadataBatchObservation is the observation range of one unchanged association
-// within the batch being built. EffectiveFrom of the entry at first carries the
-// earliest observation, which stays the change point; the entry at last carries the
-// latest one, which extends the observation bound. Both entries are appended in the
-// order the context was first and last seen, so no change point is reordered: a key
-// holds one content, and each content of an owner arrives in its own contiguous
-// Resource block.
+// within the batch being built. The entry at first carries the earliest observation,
+// which stays the change point, and the entry at last carries the latest one, which
+// extends the observation bound.
+//
+// An observation may only be folded while its epoch is open in every temporal domain
+// it writes: its owner's version history and its series' membership for that kind.
+// revision records the owner's revision when the epoch opened, so an assertion that
+// intervenes in either domain closes the epoch instead of moving an already emitted
+// boundary across it.
 type metadataBatchObservation struct {
 	first, last      int
 	earliest, latest int64
+	revision         int
+}
+
+// metadataBatchOwner is one owner's content in the batch and the number of
+// assertions that ended an earlier observation epoch of it.
+type metadataBatchOwner struct {
+	content  string
+	revision int
 }
 
 type targetInfoBatchKey struct {
@@ -76,6 +93,8 @@ type otapBatchBuilder struct {
 
 	series         map[uint64]int
 	observations   map[metadataBatchKey]*metadataBatchObservation
+	owners         map[OwnerKey]metadataBatchOwner
+	seriesOwners   map[metadataSeriesKind]OwnerKey
 	translated     map[uint16]otapMetricTranslation
 	labelNames     map[string]otapLabelNameResult
 	resourceBounds map[uint16]otapResourceBounds
@@ -154,6 +173,8 @@ func (s *OTAPSink) buildBatch(records []*record_message.RecordMessage) (Batch, i
 		pointAttrs:     pointAttrs,
 		series:         map[uint64]int{},
 		observations:   map[metadataBatchKey]*metadataBatchObservation{},
+		owners:         map[OwnerKey]metadataBatchOwner{},
+		seriesOwners:   map[metadataSeriesKind]OwnerKey{},
 		translated:     map[uint16]otapMetricTranslation{},
 		labelNames:     map[string]otapLabelNameResult{},
 		resourceBounds: map[uint16]otapResourceBounds{},
@@ -383,33 +404,66 @@ func (b *otapBatchBuilder) appendSample(
 // the latest one as the observation bound. Coalescing them to the earliest timestamp
 // alone would lose the bound, and emitting one update per sample would make every
 // unchanged sample a metadata transaction.
+//
+// Folding is confined to one open epoch. An assertion that changes the owner's content
+// or moves a series' membership of that kind to another owner intervenes in the same
+// temporal domain, so a later re-statement of the earlier content is emitted as its own
+// ordered change point instead of rewriting an earlier observation bound.
 func (b *otapBatchBuilder) associate(ls labels.Labels, owner OwnerKey, content Content, effectiveFrom int64) {
 	key := metadataBatchKey{seriesHash: labels.StableHash(ls), owner: owner, content: content.Canonical()}
+	revision := b.observeOwnerContent(owner, key.content, key.seriesHash)
 	observation, exists := b.observations[key]
-	if !exists {
-		b.batch.Updates = append(b.batch.Updates, AssociationUpdate{Labels: ls, Update: Update{
-			Owner: owner, Content: content, EffectiveFrom: effectiveFrom,
-		}})
-		index := len(b.batch.Updates) - 1
-		b.observations[key] = &metadataBatchObservation{
-			first: index, last: index, earliest: effectiveFrom, latest: effectiveFrom,
+	if exists && observation.revision == revision {
+		observation.earliest = min(observation.earliest, effectiveFrom)
+		observation.latest = max(observation.latest, effectiveFrom)
+		b.batch.Updates[observation.first].Update.EffectiveFrom = observation.earliest
+		switch {
+		case observation.last != observation.first:
+			b.batch.Updates[observation.last].Update.EffectiveFrom = observation.latest
+		case observation.latest != observation.earliest:
+			// The context now spans two instants, so it needs a second assertion. The
+			// first entry keeps the change point.
+			b.batch.Updates = append(b.batch.Updates, AssociationUpdate{Labels: ls, Update: Update{
+				Owner: owner, Content: content, EffectiveFrom: observation.latest,
+			}})
+			observation.last = len(b.batch.Updates) - 1
 		}
 		return
 	}
-	observation.earliest = min(observation.earliest, effectiveFrom)
-	observation.latest = max(observation.latest, effectiveFrom)
-	b.batch.Updates[observation.first].Update.EffectiveFrom = observation.earliest
-	switch {
-	case observation.last != observation.first:
-		b.batch.Updates[observation.last].Update.EffectiveFrom = observation.latest
-	case observation.latest != observation.earliest:
-		// The context now spans two instants, so it needs a second assertion. The
-		// first entry keeps the change point.
-		b.batch.Updates = append(b.batch.Updates, AssociationUpdate{Labels: ls, Update: Update{
-			Owner: owner, Content: content, EffectiveFrom: observation.latest,
-		}})
-		observation.last = len(b.batch.Updates) - 1
+	b.batch.Updates = append(b.batch.Updates, AssociationUpdate{Labels: ls, Update: Update{
+		Owner: owner, Content: content, EffectiveFrom: effectiveFrom,
+	}})
+	b.observations[key] = &metadataBatchObservation{
+		first: len(b.batch.Updates) - 1, last: len(b.batch.Updates) - 1,
+		earliest: effectiveFrom, latest: effectiveFrom, revision: revision,
 	}
+}
+
+// observeOwnerContent records one assertion against the owner and series domains and
+// returns the owner's revision an epoch opened now must carry. A changed content for
+// the owner, or a different owner for the same series and kind, ends the observation
+// epochs that preceded it. A repeated assertion writes nothing, so the steady-state
+// path stays one map read per owner and series domain.
+func (b *otapBatchBuilder) observeOwnerContent(owner OwnerKey, content string, seriesHash uint64) int {
+	state := b.owners[owner]
+	if content != state.content {
+		if state.content != "" {
+			state.revision++
+		}
+		state.content = content
+		b.owners[owner] = state
+	}
+
+	seriesKind := metadataSeriesKind{seriesHash: seriesHash, kind: owner.Kind}
+	if previous, seen := b.seriesOwners[seriesKind]; !seen {
+		b.seriesOwners[seriesKind] = owner
+	} else if previous != owner {
+		previousState := b.owners[previous]
+		previousState.revision++
+		b.owners[previous] = previousState
+		b.seriesOwners[seriesKind] = owner
+	}
+	return state.revision
 }
 
 func (b *otapBatchBuilder) sortSamples() {
