@@ -84,9 +84,16 @@ func readOTAPMetricContexts(rec arrow.RecordBatch, resourceAttrs *commonotlp.Att
 
 	metrics := map[uint16]otapMetricContext{}
 	resources := map[uint16]otapResourceContext{}
-	var metricID uint16
+	// Every ID of this record is delta encoded: the first value of a record is the
+	// initial ID and each later value is that row's delta from the previous one.
+	// All three cursors therefore advance for every row, including rows this
+	// function filters out or that carry no data points, because a skipped row
+	// still occupies its position in the sequence.
+	var metricID, resourceID, scopeID uint16
 	for row := range int(rec.NumRows()) {
 		metricID += uint16(uintValue(idCol, row))
+		resourceID += uint16(uintValue(resourceIDs, row))
+		scopeID += uint16(uintValue(scopeIDs, row))
 		metric := pmetric.NewMetric()
 		metric.SetName(stringValue(nameCol, row))
 		metric.SetDescription(stringValue(descriptionCol, row))
@@ -108,7 +115,6 @@ func readOTAPMetricContexts(rec arrow.RecordBatch, resourceAttrs *commonotlp.Att
 			continue
 		}
 
-		resourceID := uint16(uintValue(resourceIDs, row))
 		resource, exists := resources[resourceID]
 		if !exists {
 			resource = newOTAPResourceContext(resourceID, otapAttributeStrings(resourceAttrs.AttributesByID(resourceID)))
@@ -119,7 +125,7 @@ func readOTAPMetricContexts(rec arrow.RecordBatch, resourceAttrs *commonotlp.Att
 		metrics[metricID] = otapMetricContext{
 			metric: metric, resource: resource,
 			hasScope:  scopeCol != nil && !scopeCol.IsNull(row),
-			scopeID:   uint16(uintValue(scopeIDs, row)),
+			scopeID:   scopeID,
 			scopeName: stringValue(scopeNames, row), scopeVersion: stringValue(scopeVersions, row),
 			scopeSchemaURL: stringValue(scopeSchemas, row),
 		}
