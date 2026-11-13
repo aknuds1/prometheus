@@ -550,8 +550,18 @@ func benchmarkOwnerCardinalityArm(b *testing.B, spec ownerCardinalitySpec) {
 		require.Equal(b, b.N, timed.metadataTransactions, "one metadata transaction per commit")
 	}
 	require.Zero(b, timed.versionsEvicted, "the controlled matrix is uncapped")
-	require.Zero(b, timed.versionDuplicateNoops)
 	require.Zero(b, timed.membershipDuplicateNoops)
+	// Every association reaches the observation-only path once, and exactly one
+	// observation per resident owner actually moves that version's bound; the rest
+	// repeat bounds the entry already extended.
+	if spec.associations() == 0 {
+		require.Zero(b, timed.versionBoundsExtended, "no association means no observation bound")
+		require.Zero(b, timed.versionDuplicateNoops)
+	} else {
+		require.Equal(b, b.N*spec.associations(), timed.versionBoundsExtended, "observation-only applies")
+		require.Equal(b, b.N*(spec.associations()-spec.owners), timed.versionDuplicateNoops,
+			"repeated observations of already-extended bounds")
+	}
 
 	require.Len(b, st.buffer, spec.series(), "every fixture series is resident")
 	require.Equal(b, spec.samples()*(b.N+1), st.bufferN, "exactly the fixture's samples are buffered")
