@@ -104,7 +104,7 @@ func (s *metadataStore) update(update Update) error {
 	if update.Owner.Kind > MetadataSource {
 		return fmt.Errorf("columnar: invalid metadata kind %d", update.Owner.Kind)
 	}
-	return s.updateHistory(s.ownerHistory(update.Owner), update)
+	return s.updateHistory(s.ownerHistory(update.Owner), update, nil)
 }
 
 func (s *metadataStore) canonicalVersion(owner OwnerKey, version Version) string {
@@ -177,15 +177,19 @@ func (s *metadataStore) ownerHistory(owner OwnerKey) *metadataOwnerHistory {
 
 // updateHistory applies a version after the batch metadata transaction has
 // resolved its owner once. Redundant observations update bounds only.
-func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Update) error {
+//
+// m, when set, attributes the canonicalizations and searches this update performs
+// to the ordinary path's accounting.
+func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Update, m *ordinaryDerivationStats) error {
 	// An equal-time assertion must agree exactly. Do this before changing any
 	// observation bounds so a rejected update leaves the owner untouched.
 	i := sort.Search(len(history.versions), func(i int) bool {
 		return history.versions[i].EffectiveFrom >= update.EffectiveFrom
 	})
+	countMembershipSearch(m)
 	if i < len(history.versions) && history.versions[i].EffectiveFrom == update.EffectiveFrom {
 		existing := &history.versions[i]
-		if !contentsEqual(existing.Content, update.Content) {
+		if !contentsEqualApplying(*existing, update, m) {
 			return ErrConflictingMetadata
 		}
 		existing.ObservedFrom = min(existing.ObservedFrom, update.EffectiveFrom)
@@ -195,7 +199,7 @@ func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Upda
 
 	// Re-observing the content already active at this instant is not a change
 	// point. This also handles a backfilled observation between two versions.
-	if i > 0 && contentsEqual(history.versions[i-1].Content, update.Content) {
+	if i > 0 && contentsEqualApplying(history.versions[i-1], update, m) {
 		existing := &history.versions[i-1]
 		existing.ObservedFrom = min(existing.ObservedFrom, update.EffectiveFrom)
 		existing.ObservedUntil = max(existing.ObservedUntil, update.EffectiveFrom)
@@ -212,7 +216,7 @@ func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Upda
 
 	// A backfilled change can make its successor redundant. Preserve both
 	// observation ranges while retaining only the actual change point.
-	if i+1 < len(history.versions) && contentsEqual(history.versions[i].Content, history.versions[i+1].Content) {
+	if i+1 < len(history.versions) && contentsEqualBoth(history.versions[i], history.versions[i+1], m) {
 		next := history.versions[i+1]
 		history.versions[i].ObservedFrom = min(history.versions[i].ObservedFrom, next.ObservedFrom)
 		history.versions[i].ObservedUntil = max(history.versions[i].ObservedUntil, next.ObservedUntil)
@@ -248,16 +252,60 @@ func contentsEqual(a, b Content) bool {
 	return a.Canonical() == b.Canonical()
 }
 
+// countMembershipSearch attributes one ordered search to the ordinary path.
+func countMembershipSearch(m *ordinaryDerivationStats) {
+	if m != nil {
+		m.MembershipSearches++
+	}
+}
+
+// countCompleteLabelCheck attributes one complete-label comparison to the
+// ordinary path.
+func countCompleteLabelCheck(m *ordinaryDerivationStats) {
+	if m != nil {
+		m.CompleteLabelChecks++
+	}
+}
+
+// contentsEqualApplying reports whether stored and update state equal content,
+// attributed to the ordinary apply phase. It performs the same two
+// canonicalizations contentsEqual performs.
+func contentsEqualApplying(stored Version, update Update, m *ordinaryDerivationStats) bool {
+	if m != nil {
+		m.ApplyContentCanonicalizations += 2
+	}
+	return contentsEqual(stored.Content, update.Content)
+}
+
+// contentsEqualBoth is contentsEqualApplying for two stored versions.
+func contentsEqualBoth(a, b Version, m *ordinaryDerivationStats) bool {
+	if m != nil {
+		m.ApplyContentCanonicalizations += 2
+	}
+	return contentsEqual(a.Content, b.Content)
+}
+
+// contentsEqualDetecting is the change-detection counterpart.
+func contentsEqualDetecting(a, b Content, m *ordinaryDerivationStats) bool {
+	if m != nil {
+		m.ChangeDetectionContentCanonicalizations += 2
+	}
+	return contentsEqual(a, b)
+}
+
 // associate links one series into the owner, with an effective time.
 // Owner history and membership are deliberately separate. A new member never
 // duplicates the Resource owner's descriptive attributes.
-func (s *metadataStore) associateWithHistory(seriesHash uint64, ls labels.Labels, update Update, history *metadataOwnerHistory) error {
+func (s *metadataStore) associateWithHistory(seriesHash uint64, ls labels.Labels, update Update, history *metadataOwnerHistory, m *ordinaryDerivationStats) error {
 	// Reject all identity conflicts before mutating the owner's history.
-	if err := s.validateLabels(update.Owner, ls); err != nil {
+	if err := s.validateLabels(update.Owner, ls, m); err != nil {
 		return err
 	}
-	if existing, ok := s.chains[seriesHash]; ok && !labels.Equal(existing, ls) {
-		return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
+	if existing, ok := s.chains[seriesHash]; ok {
+		countCompleteLabelCheck(m)
+		if !labels.Equal(existing, ls) {
+			return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
+		}
 	}
 	rows := s.bySeries[seriesHash][update.Owner.Kind]
 	for _, row := range rows {
@@ -266,21 +314,24 @@ func (s *metadataStore) associateWithHistory(seriesHash uint64, ls labels.Labels
 				ErrConflictingMembership, row.owner.ID, update.Owner.ID, update.EffectiveFrom)
 		}
 	}
-	if err := s.updateHistory(history, update); err != nil {
+	if err := s.updateHistory(history, update, m); err != nil {
 		return err
 	}
-	return s.attachMembership(seriesHash, ls, update.Owner, update.EffectiveFrom, update.EffectiveFrom)
+	return s.attachMembership(seriesHash, ls, update.Owner, update.EffectiveFrom, update.EffectiveFrom, m)
 }
 
 // attachMembership records only an owner relationship. Unlike associate, it
 // never creates an owner version. Restoring rows retains their observation bound.
-func (s *metadataStore) attachMembership(seriesHash uint64, ls labels.Labels, owner OwnerKey, effectiveFrom, observedUntil int64) error {
+func (s *metadataStore) attachMembership(seriesHash uint64, ls labels.Labels, owner OwnerKey, effectiveFrom, observedUntil int64, m *ordinaryDerivationStats) error {
 	s.copyMembershipForWrite(seriesHash, owner.Kind)
-	if err := s.validateLabels(owner, ls); err != nil {
+	if err := s.validateLabels(owner, ls, m); err != nil {
 		return err
 	}
-	if existing, ok := s.chains[seriesHash]; ok && !labels.Equal(existing, ls) {
-		return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
+	if existing, ok := s.chains[seriesHash]; ok {
+		countCompleteLabelCheck(m)
+		if !labels.Equal(existing, ls) {
+			return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
+		}
 	}
 	kinds := s.bySeries[seriesHash]
 	if kinds == nil {
@@ -292,6 +343,7 @@ func (s *metadataStore) attachMembership(seriesHash uint64, ls labels.Labels, ow
 	i := sort.Search(len(rows), func(i int) bool {
 		return rows[i].effectiveFrom >= effectiveFrom
 	})
+	countMembershipSearch(m)
 	if i < len(rows) && rows[i].effectiveFrom == effectiveFrom {
 		if rows[i].owner != owner {
 			return fmt.Errorf("%w: %s and %s at effective time %d", ErrConflictingMembership,
@@ -410,9 +462,15 @@ func attributeCondition(name, value string) string {
 
 // updateAndAssociate checks both side of a metadata update belongs to the same
 // real identity before recording any owner history.
-func (s *metadataStore) validateLabels(owner OwnerKey, ls labels.Labels) error {
-	if existing, ok := s.chains[metadataSeriesKey(ls)]; ok && !labels.Equal(existing, ls) {
-		return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
+func (s *metadataStore) validateLabels(owner OwnerKey, ls labels.Labels, m *ordinaryDerivationStats) error {
+	if m != nil {
+		m.ApplySeriesHashes++
+	}
+	if existing, ok := s.chains[metadataSeriesKey(ls)]; ok {
+		countCompleteLabelCheck(m)
+		if !labels.Equal(existing, ls) {
+			return fmt.Errorf("%w: %q vs %q", ErrSeriesHashCollision, existing, ls)
+		}
 	}
 	if owner.Kind == MetadataResource {
 		fromLabels := ls.Get(OTELResourceLabel)
@@ -427,7 +485,7 @@ func (s *metadataStore) validateLabels(owner OwnerKey, ls labels.Labels) error {
 // history or extend a recorded observation bound. A duplicate observation inside
 // the bounds a version already records is not a change: it would write the same
 // bounds again, so the transaction that would record it is skipped.
-func (s *metadataStore) ownerUpdateChanges(update Update) bool {
+func (s *metadataStore) ownerUpdateChanges(update Update, m *ordinaryDerivationStats) bool {
 	history, ok := s.byOwner[update.Owner]
 	if !ok {
 		return true
@@ -436,9 +494,9 @@ func (s *metadataStore) ownerUpdateChanges(update Update) bool {
 		return history.versions[i].EffectiveFrom >= update.EffectiveFrom
 	})
 	if i < len(history.versions) && history.versions[i].EffectiveFrom == update.EffectiveFrom {
-		return !contentsEqual(history.versions[i].Content, update.Content)
+		return !contentsEqualDetecting(history.versions[i].Content, update.Content, m)
 	}
-	if i > 0 && contentsEqual(history.versions[i-1].Content, update.Content) {
+	if i > 0 && contentsEqualDetecting(history.versions[i-1].Content, update.Content, m) {
 		version := history.versions[i-1]
 		return update.EffectiveFrom < version.ObservedFrom || update.EffectiveFrom > version.ObservedUntil
 	}
@@ -447,17 +505,21 @@ func (s *metadataStore) ownerUpdateChanges(update Update) bool {
 
 // associationChanges reports whether update would change owner history, extend an
 // observation bound, or change the series membership for its kind.
-func (s *metadataStore) associationChanges(seriesHash uint64, ls labels.Labels, update Update) bool {
-	if s.ownerUpdateChanges(update) {
+func (s *metadataStore) associationChanges(seriesHash uint64, ls labels.Labels, update Update, m *ordinaryDerivationStats) bool {
+	if s.ownerUpdateChanges(update, m) {
 		return true
 	}
-	if existing, ok := s.chains[seriesHash]; ok && !labels.Equal(existing, ls) {
-		return true
+	if existing, ok := s.chains[seriesHash]; ok {
+		countCompleteLabelCheck(m)
+		if !labels.Equal(existing, ls) {
+			return true
+		}
 	}
 	rows := s.bySeries[seriesHash][update.Owner.Kind]
 	i := sort.Search(len(rows), func(i int) bool {
 		return rows[i].effectiveFrom >= update.EffectiveFrom
 	})
+	countMembershipSearch(m)
 	if i < len(rows) && rows[i].effectiveFrom == update.EffectiveFrom {
 		return rows[i].owner != update.Owner
 	}
@@ -471,11 +533,14 @@ func (s *metadataStore) associationChanges(seriesHash uint64, ls labels.Labels, 
 
 // batchChanges reports whether any update in the batch would change the published
 // metadata state or extend an observation bound.
-func (s *metadataStore) batchChanges(batch Batch) bool {
+func (s *metadataStore) batchChanges(batch Batch, m *ordinaryDerivationStats) bool {
 	for _, association := range batch.Updates {
-		if s.associationChanges(metadataSeriesKey(association.Labels), association.Labels, association.Update) {
+		if m != nil {
+			m.ChangeDetectionSeriesHashes++
+		}
+		if s.associationChanges(metadataSeriesKey(association.Labels), association.Labels, association.Update, m) {
 			return true
 		}
 	}
-	return slices.ContainsFunc(batch.OwnerUpdates, s.ownerUpdateChanges)
+	return slices.ContainsFunc(batch.OwnerUpdates, func(update Update) bool { return s.ownerUpdateChanges(update, m) })
 }

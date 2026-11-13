@@ -158,6 +158,11 @@ type ingestShape struct {
 	// entries without changing the Resource identity. It is a metadata version
 	// change per commit, not a different series and not a different owner.
 	contentChurn bool
+	// metricHelpChurn changes the metric description on alternate ring entries without
+	// changing any series identity. It is a metadata context change stated by the
+	// ordinary translator's AOptions.Metadata, as distinct from re-observing the same
+	// content.
+	metricHelpChurn bool
 	// intervalMs overrides the dense interval, which the sparse shape uses.
 	intervalMs int64
 	// commitsPerEntry splits one ring entry into several commits.
@@ -220,6 +225,21 @@ type ingestEntry struct {
 
 	updates   []columnar.AssociationUpdate
 	ownerUpds []columnar.Update
+	// metricHelp is the metric description the ordinary translator states for this
+	// entry. It is empty unless the shape changes metadata context, which keeps every
+	// arm that does not use it byte-identical to the pre-existing corpus.
+	metricHelp string
+}
+
+// entryMetricHelp returns the metric description ring entry e states.
+func (s ingestShape) entryMetricHelp(e int) string {
+	if !s.metricHelpChurn {
+		return ""
+	}
+	if e%2 == 1 {
+		return "changed help"
+	}
+	return "observed help"
 }
 
 // entryResourceAttrs returns the Resource attributes record i states in ring entry
@@ -342,6 +362,7 @@ func buildIngestRing(shape ingestShape, ringSize int) []ingestEntry {
 			entry.series += 2
 		}
 		entry.updates, entry.ownerUpds = shape.metadataFor(entry.records)
+		entry.metricHelp = shape.entryMetricHelp(e)
 		ring[e] = entry
 	}
 	return ring
@@ -830,11 +851,13 @@ func otapMetrics(entry ingestEntry) pmetric.Metrics {
 		gauge := sm.Metrics().AppendEmpty()
 		gauge.SetName(primaryGaugeName)
 		gauge.SetUnit("1")
+		gauge.SetDescription(entry.metricHelp)
 		gaugePoints := gauge.SetEmptyGauge().DataPoints()
 
 		sum := sm.Metrics().AppendEmpty()
 		sum.SetName(primarySumName)
 		sum.SetUnit("1")
+		sum.SetDescription(entry.metricHelp)
 		summer := sum.SetEmptySum()
 		summer.SetIsMonotonic(true)
 		summer.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
@@ -872,6 +895,11 @@ func otlpRing(entries []ingestEntry) []pmetric.Metrics {
 // BenchmarkPrimaryIngestOTLP measures the ordinary OTLP ingestion consumer against
 // columnar and against stock TSDB. Requests are already decoded: no protobuf and no
 // network are involved.
+//
+// B-first-seen and B-metric-help-change exist because the ordinary appender has its
+// own identity and metadata-context cases: a first-seen corpus creates every series in
+// every commit, and a help change states a new exact metadata context for an
+// otherwise unchanged series. Neither is a native-receiver property.
 func BenchmarkPrimaryIngestOTLP(b *testing.B) {
 	ringSize := primaryRingSize(b)
 	for _, tc := range []struct {
@@ -881,6 +909,8 @@ func BenchmarkPrimaryIngestOTLP(b *testing.B) {
 		{"B-1000x100", ingestShape{series: 1_000, perSeries: 100}},
 		{"B-sparse", ingestShape{series: 1_000, perSeries: 10, intervalMs: 10 * primaryIntervalMs}},
 		{"C-10000x10", ingestShape{series: 10_000, perSeries: 10}},
+		{"B-first-seen", ingestShape{series: 1_000, perSeries: 100, firstSeen: true}},
+		{"B-metric-help-change", ingestShape{series: 1_000, perSeries: 100, metricHelpChurn: true}},
 	} {
 		entries := buildIngestRing(tc.shape, ringSize)
 		ring := primaryRingFor(b, entries[0].samples)

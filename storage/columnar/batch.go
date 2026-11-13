@@ -38,7 +38,10 @@ const (
 // The returned string is suitable for __otel_resource__. Other metadata kinds
 // must remain their own category, not be promoted into labels as a side effect.
 func (s *Storage) MetadataAssociate(ls labels.Labels, update Update) (string, error) {
-	err := s.AppendBatch(context.Background(), Batch{Updates: []AssociationUpdate{{Labels: ls, Update: update}}})
+	err := s.AppendBatch(context.Background(), Batch{
+		Updates:              []AssociationUpdate{{Labels: ls, Update: update}},
+		ordinaryAssociations: true,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -49,7 +52,7 @@ func (s *Storage) MetadataAssociate(ls labels.Labels, update Update) (string, er
 // series and without requiring a sample. This is useful for explicit owner
 // metadata inspection; it does not claim asynchronous transport delivery.
 func (s *Storage) MetadataUpdate(update Update) error {
-	return s.AppendBatch(context.Background(), Batch{OwnerUpdates: []Update{update}})
+	return s.AppendBatch(context.Background(), Batch{OwnerUpdates: []Update{update}, ordinaryAssociations: true})
 }
 
 // MetadataAtOwner returns the owner version effective at t without traversing a
@@ -125,6 +128,9 @@ type ingestCounts struct {
 	// native is the native OTAP builder's accounting for this transaction, carried
 	// from the built batch and published with the commit.
 	native NativeDerivationStats
+	// ordinary is the ordinary scalar appender's metadata-derivation accounting for
+	// this transaction. It is never mixed with native accounting.
+	ordinary ordinaryDerivationStats
 }
 
 // add accumulates other into c.
@@ -134,6 +140,75 @@ func (c *ingestCounts) add(other ingestCounts) {
 	c.prepareHash += other.prepareHash
 	c.refTrusted += other.refTrusted
 	c.refFallback += other.refFallback
+	c.ordinary.add(other.ordinary)
+}
+
+// OrdinaryDerivationNote explains what the ordinary counters are for.
+//
+// The ordinary OTLP consumer reaches storage through AppenderV2.Append and one
+// Commit, so its metadata cost is the per-sample derivation in the appender plus
+// the shared change detection and history recording that consumes the resulting
+// association. These counters exist to prove which of those derivations happen
+// per sample and which happen per distinct series and distinct metadata context,
+// so a timing change can be attributed to a mechanism rather than to a profile
+// share.
+//
+// They are deliberately not published on ReadStats: the ordinary path's exported
+// accounting surface stays as it was, and the counters are read by in-package
+// tests through the storage's own accumulator.
+type ordinaryDerivationStats struct {
+	// Appends counts appends that carried non-empty AOptions.Metadata.
+	Appends uint64
+	// SeriesWithMetadata counts the transaction's series that stated metadata at
+	// least once, so the distinct-series dimension of the derivation is visible.
+	SeriesWithMetadata uint64
+	// ContextRuns counts maximal runs of appends that stated equal metadata, so the
+	// locality a per-context reuse could exploit is visible without a per-sample set.
+	ContextRuns uint64
+	// OwnerDerivations counts MetricOwner constructions, each of which formats the
+	// complete label set.
+	OwnerDerivations uint64
+	// ContentBuilds counts type/unit/help attribute maps constructed.
+	ContentBuilds uint64
+	// Observations counts the AssociationUpdates an ordinary batch staged, which the
+	// store must still apply one by one. It is counted once per commit from the
+	// batch rather than per append call.
+	Observations uint64
+	// ChangeDetectionContentCanonicalizations counts Content.Canonical calls made to
+	// decide whether the batch changes the published catalog.
+	ChangeDetectionContentCanonicalizations uint64
+	// ApplyContentCanonicalizations counts Content.Canonical calls made while applying
+	// an association or owner update to the transaction's clone.
+	ApplyContentCanonicalizations uint64
+	// ChangeDetectionSeriesHashes and ApplySeriesHashes count complete-label hashes
+	// taken by each phase, so a reused association identity is visible as a fall.
+	ChangeDetectionSeriesHashes uint64
+	ApplySeriesHashes           uint64
+	// OwnerHistoryLookups counts owner histories this transaction had to resolve.
+	OwnerHistoryLookups uint64
+	// CompleteLabelChecks counts labels.Equal comparisons that keep a hash from
+	// aliasing a series.
+	CompleteLabelChecks uint64
+	// MembershipSearches counts ordered searches of owner versions and series
+	// memberships.
+	MembershipSearches uint64
+}
+
+// add accumulates other into o.
+func (o *ordinaryDerivationStats) add(other ordinaryDerivationStats) {
+	o.Appends += other.Appends
+	o.SeriesWithMetadata += other.SeriesWithMetadata
+	o.ContextRuns += other.ContextRuns
+	o.OwnerDerivations += other.OwnerDerivations
+	o.ContentBuilds += other.ContentBuilds
+	o.Observations += other.Observations
+	o.ChangeDetectionContentCanonicalizations += other.ChangeDetectionContentCanonicalizations
+	o.ApplyContentCanonicalizations += other.ApplyContentCanonicalizations
+	o.ChangeDetectionSeriesHashes += other.ChangeDetectionSeriesHashes
+	o.ApplySeriesHashes += other.ApplySeriesHashes
+	o.OwnerHistoryLookups += other.OwnerHistoryLookups
+	o.CompleteLabelChecks += other.CompleteLabelChecks
+	o.MembershipSearches += other.MembershipSearches
 }
 
 // NativeDerivationAssociationSites are the call sites that derive one owner
@@ -256,6 +331,10 @@ type Batch struct {
 	// nativeDerivation is the native builder's mechanism accounting for this batch.
 	// An in-package builder fills it; other callers leave it zero.
 	nativeDerivation NativeDerivationStats
+	// ordinaryAssociations marks Updates as the ordinary scalar path's metadata
+	// observations, so the shared store attributes its work to the ordinary
+	// counters and native batches stay untouched.
+	ordinaryAssociations bool
 }
 
 // BatchSeries is one series and its sample columns.
@@ -293,11 +372,17 @@ type AssociationUpdate struct {
 type batchMetadataTransaction struct {
 	store  *metadataStore
 	owners map[OwnerKey]*metadataOwnerHistory
+	// counts, when set, receives the ordinary path's call-site accounting for the
+	// associations and owner updates this transaction applies.
+	counts *ordinaryDerivationStats
 }
 
 func (t *batchMetadataTransaction) ownerHistory(owner OwnerKey) *metadataOwnerHistory {
 	if history, ok := t.owners[owner]; ok {
 		return history
+	}
+	if t.counts != nil {
+		t.counts.OwnerHistoryLookups++
 	}
 	history := t.store.ownerHistory(owner)
 	t.owners[owner] = history
@@ -306,14 +391,17 @@ func (t *batchMetadataTransaction) ownerHistory(owner OwnerKey) *metadataOwnerHi
 
 func (t *batchMetadataTransaction) associate(update AssociationUpdate) error {
 	history := t.ownerHistory(update.Update.Owner)
-	return t.store.associateWithHistory(metadataSeriesKey(update.Labels), update.Labels, update.Update, history)
+	if t.counts != nil {
+		t.counts.ApplySeriesHashes++
+	}
+	return t.store.associateWithHistory(metadataSeriesKey(update.Labels), update.Labels, update.Update, history, t.counts)
 }
 
 func (t *batchMetadataTransaction) update(update Update) error {
 	if update.Owner.Kind > MetadataSource {
 		return fmt.Errorf("columnar: invalid metadata kind %d", update.Owner.Kind)
 	}
-	return t.store.updateHistory(t.ownerHistory(update.Owner), update)
+	return t.store.updateHistory(t.ownerHistory(update.Owner), update, t.counts)
 }
 
 // AppendBatch validates and appends an entire batch in one atomic store
@@ -363,6 +451,14 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		}
 	}
 
+	// ordinaryAccounting is set only for the ordinary scalar path, so the shared
+	// store never attributes a native batch's work to the ordinary counters.
+	var ordinaryAccounting *ordinaryDerivationStats
+	if batch.ordinaryAssociations {
+		counts.ordinary.Observations += uint64(len(batch.Updates))
+		ordinaryAccounting = &counts.ordinary
+	}
+
 	metadataChanged := len(batch.Updates)+len(batch.OwnerUpdates) > 0
 	nextMetadata := s.metadata
 	if metadataChanged {
@@ -371,7 +467,7 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		}
 		// Repeated observations of unchanged content must not clone the whole
 		// catalog build a transaction. This is the common steady-state case.
-		if !s.metadata.batchChanges(batch) {
+		if !s.metadata.batchChanges(batch, ordinaryAccounting) {
 			metadataChanged = false
 			nextMetadata = s.metadata
 		}
@@ -387,6 +483,7 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 		}
 		transaction := batchMetadataTransaction{
 			store: nextMetadata, owners: make(map[OwnerKey]*metadataOwnerHistory, len(batch.Updates)+len(batch.OwnerUpdates)),
+			counts: ordinaryAccounting,
 		}
 		for i, update := range batch.Updates {
 			if err := transaction.associate(update); err != nil {

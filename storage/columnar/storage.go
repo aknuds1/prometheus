@@ -129,6 +129,10 @@ type headSeries struct {
 	v      []float64
 	kind   []SampleKind
 	hist   [][]byte
+	// metaObservations counts the transaction's metadata observations for this
+	// series, so a first observation per series is distinguishable from a repeated
+	// one. A staged series owns a fresh headSeries, so it starts at zero.
+	metaObservations int
 }
 
 // seriesState is the newest sample of a series, needed for immediate ordering
@@ -380,7 +384,11 @@ type appender struct {
 	order  []uint64
 	meta   []AssociationUpdate
 	counts ingestCounts
-	done   bool
+	// lastMetadata is the metadata context of the previous sample, so context runs
+	// can be counted without a per-sample set.
+	lastMetadata     metadata.Metadata
+	haveLastMetadata bool
+	done             bool
 }
 
 // Append implements the shared V2 appender, producing typed head arrays.
@@ -468,6 +476,18 @@ func (a *appender) Append(ref storage.SeriesRef, ls labels.Labels, st, t int64, 
 	hs.v = append(hs.v, v)
 	hs.kind = append(hs.kind, kind)
 	if !opts.Metadata.IsEmpty() {
+		ordinary := &a.counts.ordinary
+		ordinary.Appends++
+		if !a.haveLastMetadata || a.lastMetadata != opts.Metadata {
+			ordinary.ContextRuns++
+			a.lastMetadata, a.haveLastMetadata = opts.Metadata, true
+		}
+		if hs.metaObservations == 0 {
+			ordinary.SeriesWithMetadata++
+		}
+		hs.metaObservations++
+		ordinary.OwnerDerivations++
+		ordinary.ContentBuilds++
 		a.meta = append(a.meta, AssociationUpdate{
 			Labels: ls,
 			Update: Update{
@@ -560,7 +580,7 @@ func (a *appender) Commit() error {
 	}
 	a.done = true
 
-	batch := Batch{Updates: a.meta, Series: make([]BatchSeries, 0, len(a.order)), counts: a.counts}
+	batch := Batch{Updates: a.meta, Series: make([]BatchSeries, 0, len(a.order)), counts: a.counts, ordinaryAssociations: true}
 	for _, hash := range a.order {
 		tx := a.txs[hash]
 		if len(tx.ts) == 0 {

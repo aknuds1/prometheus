@@ -66,7 +66,7 @@ func (s *metadataStore) restoreRelations(relations metadataRelations) error {
 		}
 		if err := s.attachMembership(
 			membership.seriesHash, membership.labels, owner.key,
-			membership.effectiveFrom, membership.observedUntil,
+			membership.effectiveFrom, membership.observedUntil, nil,
 		); err != nil {
 			return err
 		}

@@ -161,6 +161,63 @@ type readStats struct {
 	refTrusted         atomic.Uint64
 	refFallback        atomic.Uint64
 	native             nativeDerivationAccumulator
+	ordinary           ordinaryDerivationAccumulator
+}
+
+// ordinaryDerivationAccumulator aggregates committed ordinary appender accounting.
+// It is written once per commit under the storage lock and read by an in-package
+// snapshot, so publication stays a fixed number of atomic adds and the ordinary
+// path adds no exported ReadStats surface.
+type ordinaryDerivationAccumulator struct {
+	appends, seriesWithMetadata, contextRuns       atomic.Uint64
+	ownerDerivations, contentBuilds                atomic.Uint64
+	observations                                   atomic.Uint64
+	changeDetectionCanonicalizations               atomic.Uint64
+	applyCanonicalizations                         atomic.Uint64
+	changeDetectionSeriesHashes, applySeriesHashes atomic.Uint64
+	ownerHistoryLookups                            atomic.Uint64
+	completeLabelChecks, membershipSearches        atomic.Uint64
+}
+
+func (a *ordinaryDerivationAccumulator) add(c ordinaryDerivationStats) {
+	a.appends.Add(c.Appends)
+	a.seriesWithMetadata.Add(c.SeriesWithMetadata)
+	a.contextRuns.Add(c.ContextRuns)
+	a.ownerDerivations.Add(c.OwnerDerivations)
+	a.contentBuilds.Add(c.ContentBuilds)
+	a.observations.Add(c.Observations)
+	a.changeDetectionCanonicalizations.Add(c.ChangeDetectionContentCanonicalizations)
+	a.applyCanonicalizations.Add(c.ApplyContentCanonicalizations)
+	a.changeDetectionSeriesHashes.Add(c.ChangeDetectionSeriesHashes)
+	a.applySeriesHashes.Add(c.ApplySeriesHashes)
+	a.ownerHistoryLookups.Add(c.OwnerHistoryLookups)
+	a.completeLabelChecks.Add(c.CompleteLabelChecks)
+	a.membershipSearches.Add(c.MembershipSearches)
+}
+
+func (a *ordinaryDerivationAccumulator) snapshot() ordinaryDerivationStats {
+	return ordinaryDerivationStats{
+		Appends:                                 a.appends.Load(),
+		SeriesWithMetadata:                      a.seriesWithMetadata.Load(),
+		ContextRuns:                             a.contextRuns.Load(),
+		OwnerDerivations:                        a.ownerDerivations.Load(),
+		ContentBuilds:                           a.contentBuilds.Load(),
+		Observations:                            a.observations.Load(),
+		ChangeDetectionContentCanonicalizations: a.changeDetectionCanonicalizations.Load(),
+		ApplyContentCanonicalizations:           a.applyCanonicalizations.Load(),
+		ChangeDetectionSeriesHashes:             a.changeDetectionSeriesHashes.Load(),
+		ApplySeriesHashes:                       a.applySeriesHashes.Load(),
+		OwnerHistoryLookups:                     a.ownerHistoryLookups.Load(),
+		CompleteLabelChecks:                     a.completeLabelChecks.Load(),
+		MembershipSearches:                      a.membershipSearches.Load(),
+	}
+}
+
+// ordinaryDerivationSnapshot returns the committed ordinary appender accounting.
+// It is unexported on purpose: the ordinary path's exported statistics surface is
+// unchanged, and in-package tests read the counters directly.
+func (r *readStats) ordinaryDerivationSnapshot() ordinaryDerivationStats {
+	return r.ordinary.snapshot()
 }
 
 // nativeDerivationAccumulator aggregates committed native builder accounting. It
@@ -467,6 +524,7 @@ func (r *readStats) observeIngestCounts(c ingestCounts) {
 	r.hashPrepare.Add(uint64(c.prepareHash))
 	r.refTrusted.Add(uint64(c.refTrusted))
 	r.refFallback.Add(uint64(c.refFallback))
+	r.ordinary.add(c.ordinary)
 	r.observeNativeDerivation(c.native)
 }
 
