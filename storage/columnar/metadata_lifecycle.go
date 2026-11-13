@@ -29,10 +29,13 @@ func (r metadataRelations) hasChanges() bool {
 	return len(r.owners)+len(r.contents)+len(r.versions)+len(r.memberships) > 0
 }
 
-// pendingSince returns changed metadata only. Observation-only extensions are
-// deliberately omitted: validity is defined by effective change points, not by
-// copying a new row on every observed sample. Replacement sets handle eviction,
-// coalescing and backfill without allowing old block state to reappear.
+// pendingSince returns changed metadata only. An append-only delta carries two
+// kinds of row: a version or membership that is new since the previous
+// publication, and one whose own observation bounds the new state extends. Both
+// are appended, because recovery merges observation bounds monotonically, so a
+// delta can extend a bound but never replace, shorten or re-order history.
+// Replacement sets handle eviction, coalescing and backfill without allowing old
+// block state to reappear.
 func (r metadataRelations) pendingSince(previous *metadataRelations) metadataRelations {
 	var previousRelations metadataRelations
 	if previous != nil {
@@ -67,14 +70,11 @@ func (r metadataRelations) pendingSince(previous *metadataRelations) metadataRel
 		prefix := metadataVersionPrefix(old, latest, oldContents, newContents)
 		var versions []metadataVersionRow
 		var replacement bool
-		switch {
-		case prefix && len(old) == len(latest) && oldOwner.truncated == newOwner.truncated:
-			continue
-		case prefix && oldOwner.truncated == newOwner.truncated:
-			versions = latest[len(old):]
-		default:
+		if !prefix || oldOwner.truncated != newOwner.truncated {
 			replacement = true
 			versions = latest
+		} else {
+			versions = append(versionObservationDeltas(old, latest), latest[len(old):]...)
 		}
 		if len(versions) == 0 && !replacement {
 			continue
@@ -96,14 +96,11 @@ func (r metadataRelations) pendingSince(previous *metadataRelations) metadataRel
 		prefix := metadataMembershipPrefix(old, latest, oldOwnerIDs, newOwnerIDs)
 		var memberships []metadataMembershipRow
 		var replacement bool
-		switch {
-		case prefix && len(old) == len(latest):
-			continue
-		case prefix:
-			memberships = latest[len(old):]
-		default:
+		if !prefix {
 			replacement = true
 			memberships = latest
+		} else {
+			memberships = append(membershipObservationDeltas(old, latest), latest[len(old):]...)
 		}
 		for _, membership := range memberships {
 			membership.replace = replacement
@@ -267,4 +264,31 @@ func metadataMembershipPrefix(old, latest []metadataMembershipRow, oldOwners, ne
 		}
 	}
 	return true
+}
+
+// versionObservationDeltas returns the published version rows whose own
+// observation bounds the new relations extend. A delta row restates an existing
+// change point, so publishing it cannot add a version or move a validity bound.
+func versionObservationDeltas(old, latest []metadataVersionRow) []metadataVersionRow {
+	var out []metadataVersionRow
+	for i := range old {
+		if old[i].observedFrom == latest[i].observedFrom && old[i].observedUntil == latest[i].observedUntil {
+			continue
+		}
+		out = append(out, latest[i])
+	}
+	return out
+}
+
+// membershipObservationDeltas returns the published membership rows whose own
+// observation bound the new relations extend.
+func membershipObservationDeltas(old, latest []metadataMembershipRow) []metadataMembershipRow {
+	var out []metadataMembershipRow
+	for i := range old {
+		if old[i].observedUntil == latest[i].observedUntil {
+			continue
+		}
+		out = append(out, latest[i])
+	}
+	return out
 }

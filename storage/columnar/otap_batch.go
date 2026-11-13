@@ -40,10 +40,25 @@ type otapResourceBounds struct {
 	min, max int64
 }
 
+// metadataBatchKey identifies one unchanged association within a batch: the same
+// series, owner and complete content. Two observations with the same key state the
+// same context at two times, so they describe one version and one membership.
 type metadataBatchKey struct {
 	seriesHash uint64
 	owner      OwnerKey
 	content    string
+}
+
+// metadataBatchObservation is the observation range of one unchanged association
+// within the batch being built. EffectiveFrom of the entry at first carries the
+// earliest observation, which stays the change point; the entry at last carries the
+// latest one, which extends the observation bound. Both entries are appended in the
+// order the context was first and last seen, so no change point is reordered: a key
+// holds one content, and each content of an owner arrives in its own contiguous
+// Resource block.
+type metadataBatchObservation struct {
+	first, last      int
+	earliest, latest int64
 }
 
 type targetInfoBatchKey struct {
@@ -60,7 +75,7 @@ type otapBatchBuilder struct {
 	pointAttrs    *commonotlp.AttributesStore[uint32]
 
 	series         map[uint64]int
-	associations   map[metadataBatchKey]int
+	observations   map[metadataBatchKey]*metadataBatchObservation
 	translated     map[uint16]otapMetricTranslation
 	labelNames     map[string]otapLabelNameResult
 	resourceBounds map[uint16]otapResourceBounds
@@ -138,7 +153,7 @@ func (s *OTAPSink) buildBatch(records []*record_message.RecordMessage) (Batch, i
 		scopeAttrs:     scopeAttrs,
 		pointAttrs:     pointAttrs,
 		series:         map[uint64]int{},
-		associations:   map[metadataBatchKey]int{},
+		observations:   map[metadataBatchKey]*metadataBatchObservation{},
 		translated:     map[uint16]otapMetricTranslation{},
 		labelNames:     map[string]otapLabelNameResult{},
 		resourceBounds: map[uint16]otapResourceBounds{},
@@ -362,17 +377,39 @@ func (b *otapBatchBuilder) appendSample(
 	return nil
 }
 
+// associate records one observation of a series' metadata context. Repeated
+// observations of unchanged content are not extra change points, but they are not
+// dropped either: the batch keeps the earliest observation as the change point and
+// the latest one as the observation bound. Coalescing them to the earliest timestamp
+// alone would lose the bound, and emitting one update per sample would make every
+// unchanged sample a metadata transaction.
 func (b *otapBatchBuilder) associate(ls labels.Labels, owner OwnerKey, content Content, effectiveFrom int64) {
 	key := metadataBatchKey{seriesHash: labels.StableHash(ls), owner: owner, content: content.Canonical()}
-	if index, exists := b.associations[key]; exists {
-		update := &b.batch.Updates[index].Update
-		update.EffectiveFrom = min(update.EffectiveFrom, effectiveFrom)
+	observation, exists := b.observations[key]
+	if !exists {
+		b.batch.Updates = append(b.batch.Updates, AssociationUpdate{Labels: ls, Update: Update{
+			Owner: owner, Content: content, EffectiveFrom: effectiveFrom,
+		}})
+		index := len(b.batch.Updates) - 1
+		b.observations[key] = &metadataBatchObservation{
+			first: index, last: index, earliest: effectiveFrom, latest: effectiveFrom,
+		}
 		return
 	}
-	b.batch.Updates = append(b.batch.Updates, AssociationUpdate{Labels: ls, Update: Update{
-		Owner: owner, Content: content, EffectiveFrom: effectiveFrom,
-	}})
-	b.associations[key] = len(b.batch.Updates) - 1
+	observation.earliest = min(observation.earliest, effectiveFrom)
+	observation.latest = max(observation.latest, effectiveFrom)
+	b.batch.Updates[observation.first].Update.EffectiveFrom = observation.earliest
+	switch {
+	case observation.last != observation.first:
+		b.batch.Updates[observation.last].Update.EffectiveFrom = observation.latest
+	case observation.latest != observation.earliest:
+		// The context now spans two instants, so it needs a second assertion. The
+		// first entry keeps the change point.
+		b.batch.Updates = append(b.batch.Updates, AssociationUpdate{Labels: ls, Update: Update{
+			Owner: owner, Content: content, EffectiveFrom: observation.latest,
+		}})
+		observation.last = len(b.batch.Updates) - 1
+	}
 }
 
 func (b *otapBatchBuilder) sortSamples() {

@@ -424,8 +424,9 @@ func (s *metadataStore) validateLabels(owner OwnerKey, ls labels.Labels) error {
 }
 
 // ownerUpdateChanges reports whether update would alter the published owner
-// history. Observation-only extensions do not count: publishing deliberately
-// omits them, so skipping the transaction keeps memory and WAL identical.
+// history or extend a recorded observation bound. A duplicate observation inside
+// the bounds a version already records is not a change: it would write the same
+// bounds again, so the transaction that would record it is skipped.
 func (s *metadataStore) ownerUpdateChanges(update Update) bool {
 	history, ok := s.byOwner[update.Owner]
 	if !ok {
@@ -438,13 +439,14 @@ func (s *metadataStore) ownerUpdateChanges(update Update) bool {
 		return !contentsEqual(history.versions[i].Content, update.Content)
 	}
 	if i > 0 && contentsEqual(history.versions[i-1].Content, update.Content) {
-		return false
+		version := history.versions[i-1]
+		return update.EffectiveFrom < version.ObservedFrom || update.EffectiveFrom > version.ObservedUntil
 	}
 	return true
 }
 
-// associationChanges reports whether update would change owner history or the
-// series membership for its kind.
+// associationChanges reports whether update would change owner history, extend an
+// observation bound, or change the series membership for its kind.
 func (s *metadataStore) associationChanges(seriesHash uint64, ls labels.Labels, update Update) bool {
 	if s.ownerUpdateChanges(update) {
 		return true
@@ -460,13 +462,15 @@ func (s *metadataStore) associationChanges(seriesHash uint64, ls labels.Labels, 
 		return rows[i].owner != update.Owner
 	}
 	if i > 0 && rows[i-1].owner == update.Owner {
-		return false
+		// A repeated observation of the active owner is a change only when it
+		// extends the membership's own observation bound.
+		return update.EffectiveFrom > rows[i-1].observedUntil
 	}
 	return true
 }
 
-// batchChanges reports whether any update in the batch would change the
-// published metadata state.
+// batchChanges reports whether any update in the batch would change the published
+// metadata state or extend an observation bound.
 func (s *metadataStore) batchChanges(batch Batch) bool {
 	for _, association := range batch.Updates {
 		if s.associationChanges(metadataSeriesKey(association.Labels), association.Labels, association.Update) {

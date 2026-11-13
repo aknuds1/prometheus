@@ -42,28 +42,46 @@ func TestMetadataChangeOnlyPublishingAndBoundedRestart(t *testing.T) {
 	associate(ls1, 100, "a")
 	require.NoError(t, s.Flush())
 	require.Len(t, s.blocks, 1)
+
+	// Re-observing the unchanged context extends the recorded observation bounds.
+	// That is an append-only relation delta: it restates the existing change point
+	// with the extended bound instead of inventing a version, a membership or a
+	// content, and the owner history is not replaced.
 	associate(ls1, 200, "a")
 	require.NoError(t, s.Flush())
-	require.Len(t, s.blocks, 1, "an unchanged historical observation creates no new block")
+	require.Len(t, s.blocks, 2)
+	extension, err := s.blocks[1].readMetadataRelations(t.Context())
+	require.NoError(t, err)
+	require.False(t, extension.owners[0].replace)
+	require.Len(t, extension.owners, 1)
+	require.Len(t, extension.contents, 1)
+	require.Len(t, extension.versions, 1)
+	require.Equal(t, int64(100), extension.versions[0].effectiveFrom)
+	require.Equal(t, int64(200), extension.versions[0].observedUntil)
+	require.Len(t, extension.memberships, 1)
+	require.Equal(t, int64(100), extension.memberships[0].effectiveFrom)
+	require.Equal(t, int64(200), extension.memberships[0].observedUntil)
 
-	// A new actual membership carries its owner reference, without re-exporting
-	// the unchanged owner version or content.
+	// A new actual membership carries its owner reference and the owner bound its
+	// own observation extended, without re-exporting unchanged content twice.
 	associate(ls2, 300, "a")
 	require.NoError(t, s.Flush())
-	require.Len(t, s.blocks, 2)
-	membershipBlock, err := s.blocks[1].readMetadataRelations(t.Context())
+	require.Len(t, s.blocks, 3)
+	membershipBlock, err := s.blocks[2].readMetadataRelations(t.Context())
 	require.NoError(t, err)
 	require.Len(t, membershipBlock.owners, 1)
-	require.Empty(t, membershipBlock.versions)
-	require.Empty(t, membershipBlock.contents)
-	require.Len(t, membershipBlock.memberships, 1)
 	require.False(t, membershipBlock.owners[0].replace)
+	require.Len(t, membershipBlock.versions, 1, "only the extended version row is restated")
+	require.Equal(t, int64(300), membershipBlock.versions[0].observedUntil)
+	require.Len(t, membershipBlock.contents, 1)
+	require.Len(t, membershipBlock.memberships, 1)
+	require.Equal(t, int64(300), membershipBlock.memberships[0].effectiveFrom)
 
 	// One new version appends normally beneath the cap.
 	associate(ls1, 400, "b")
 	require.NoError(t, s.Flush())
-	require.Len(t, s.blocks, 3)
-	appendedVersion, err := s.blocks[2].readMetadataRelations(t.Context())
+	require.Len(t, s.blocks, 4)
+	appendedVersion, err := s.blocks[3].readMetadataRelations(t.Context())
 	require.NoError(t, err)
 	require.Len(t, appendedVersion.versions, 1)
 	require.Equal(t, int64(400), appendedVersion.versions[0].effectiveFrom)
@@ -76,8 +94,8 @@ func TestMetadataChangeOnlyPublishingAndBoundedRestart(t *testing.T) {
 		Content: Content{Attributes: map[string]string{"host": "c"}},
 	}))
 	require.NoError(t, s.Flush())
-	require.Len(t, s.blocks, 4)
-	replacement, err := s.blocks[3].readMetadataRelations(t.Context())
+	require.Len(t, s.blocks, 5)
+	replacement, err := s.blocks[4].readMetadataRelations(t.Context())
 	require.NoError(t, err)
 	require.True(t, replacement.owners[0].replace)
 	require.True(t, replacement.owners[0].truncated)
@@ -91,6 +109,19 @@ func TestMetadataChangeOnlyPublishingAndBoundedRestart(t *testing.T) {
 	require.Equal(t, int64(400), history.versions[0].EffectiveFrom)
 	require.Equal(t, int64(500), history.versions[1].EffectiveFrom)
 	require.Len(t, history.index, 2, "evicted attribute values are not retained in the inverted-index candidate set")
+
+	// One more observation-only extension after the replacement must be recovered
+	// by monotone merge, and must not resurrect the evicted version.
+	associate(ls1, 600, "c")
+	require.NoError(t, s.Flush())
+	require.Len(t, s.blocks, 6)
+	lateExtension, err := s.blocks[5].readMetadataRelations(t.Context())
+	require.NoError(t, err)
+	require.False(t, lateExtension.owners[0].replace)
+	require.Len(t, lateExtension.versions, 1)
+	require.Equal(t, int64(500), lateExtension.versions[0].effectiveFrom)
+	require.Equal(t, int64(600), lateExtension.versions[0].observedUntil)
+	require.Equal(t, int64(600), lateExtension.memberships[0].observedUntil)
 	require.NoError(t, s.Close())
 
 	s, err = NewStorage(dir, opts)
@@ -109,6 +140,20 @@ func TestMetadataChangeOnlyPublishingAndBoundedRestart(t *testing.T) {
 	at500, ok, _ := s.MetadataAtLabels(ls2, MetadataResource, 500)
 	require.True(t, ok, "a later-added membership must share the same owner history")
 	require.Equal(t, "c", at500.Attributes["host"])
+	require.Equal(t, int64(500), recovered.Versions[1].ObservedFrom)
+	require.Equal(t, int64(600), recovered.Versions[1].ObservedUntil, "the recovered observation carries the late extension")
+	require.Equal(t, int64(400), recovered.Versions[0].ObservedUntil, "an older version keeps its own observation bound")
+	memberships, err := s.QueryMetadataSeries(t.Context(), MetadataSeriesQuery{
+		Kind: MetadataResource, Start: 0, End: 1000,
+	})
+	require.NoError(t, err)
+	require.Len(t, memberships.Series, 2)
+	observedTo := map[string]int64{}
+	for _, membership := range memberships.Series {
+		observedTo[membership.Labels.Get(labels.MetricName)] = membership.MembershipObservedTo
+	}
+	require.Equal(t, map[string]int64{"change_one": 600, "change_two": 300}, observedTo,
+		"each membership keeps its own observation bound")
 }
 
 func TestMetadataConflictDoesNotPublishWALPrefix(t *testing.T) {
