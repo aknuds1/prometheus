@@ -165,11 +165,23 @@ type ordinaryDerivationStats struct {
 	// ContextRuns counts maximal runs of appends that stated equal metadata, so the
 	// locality a per-context reuse could exploit is visible without a per-sample set.
 	ContextRuns uint64
+	// SeriesCacheHits counts observations whose owner and labels came from the
+	// transaction's per-series derivation instead of being derived again.
+	SeriesCacheHits uint64
+	// AliasedSeriesHashes counts observations whose series hash matched a cached
+	// identity but whose complete labels did not, so the identity was not reused.
+	AliasedSeriesHashes uint64
+	// ContextCacheHits counts observations whose content came from the transaction's
+	// per-context derivation instead of being derived again.
+	ContextCacheHits uint64
 	// OwnerDerivations counts MetricOwner constructions, each of which formats the
 	// complete label set.
 	OwnerDerivations uint64
 	// ContentBuilds counts type/unit/help attribute maps constructed.
 	ContentBuilds uint64
+	// ContextCanonicalizations counts canonical content identities derived for a
+	// metadata context. It is one per exact context, not one per observation.
+	ContextCanonicalizations uint64
 	// Observations counts the AssociationUpdates an ordinary batch staged, which the
 	// store must still apply one by one. It is counted once per commit from the
 	// batch rather than per append call.
@@ -199,8 +211,12 @@ func (o *ordinaryDerivationStats) add(other ordinaryDerivationStats) {
 	o.Appends += other.Appends
 	o.SeriesWithMetadata += other.SeriesWithMetadata
 	o.ContextRuns += other.ContextRuns
+	o.SeriesCacheHits += other.SeriesCacheHits
+	o.AliasedSeriesHashes += other.AliasedSeriesHashes
+	o.ContextCacheHits += other.ContextCacheHits
 	o.OwnerDerivations += other.OwnerDerivations
 	o.ContentBuilds += other.ContentBuilds
+	o.ContextCanonicalizations += other.ContextCanonicalizations
 	o.Observations += other.Observations
 	o.ChangeDetectionContentCanonicalizations += other.ChangeDetectionContentCanonicalizations
 	o.ApplyContentCanonicalizations += other.ApplyContentCanonicalizations
@@ -335,6 +351,40 @@ type Batch struct {
 	// observations, so the shared store attributes its work to the ordinary
 	// counters and native batches stay untouched.
 	ordinaryAssociations bool
+	// associationIdentities is index-aligned with Updates when the ordinary appender
+	// derived it. A zero entry means the store derives the series hash and the content
+	// identity for that observation itself, which is the unchanged path for every
+	// other caller.
+	associationIdentities []associationIdentity
+}
+
+// associationIdentity is the pre-derived identity of one staged metadata observation:
+// the series hash the appender verified against the complete labels, and the exact
+// canonical identity of the observed content. Both are values the shared store would
+// otherwise derive again for every observation. Neither replaces a semantic check: the
+// store still compares complete labels, full content and effective times.
+type associationIdentity struct {
+	seriesHash uint64
+	canonical  string
+}
+
+// associationIdentityAt returns the derived identity of association i, if the caller
+// supplied one.
+func associationIdentityAt(identities []associationIdentity, i int) associationIdentity {
+	if i < len(identities) {
+		return identities[i]
+	}
+	return associationIdentity{}
+}
+
+// associationDerivation is what one observation contributes to the store besides the
+// update itself: the content identity the caller already derived, and the transaction's
+// memo of the stored versions' identities. An empty canonical or a nil versions map means
+// the store derives what it needs, which is the unchanged path for callers that state no
+// identity.
+type associationDerivation struct {
+	canonical string
+	versions  map[metadataVersionKey]string
 }
 
 // BatchSeries is one series and its sample columns.
@@ -375,6 +425,11 @@ type batchMetadataTransaction struct {
 	// counts, when set, receives the ordinary path's call-site accounting for the
 	// associations and owner updates this transaction applies.
 	counts *ordinaryDerivationStats
+	// versionCanonicals memoizes the stored versions' canonical content for this
+	// transaction, so an observation that states its own identity compares two strings
+	// instead of canonicalizing stored content again. It is dropped with the
+	// transaction and never survives a commit.
+	versionCanonicals map[metadataVersionKey]string
 }
 
 func (t *batchMetadataTransaction) ownerHistory(owner OwnerKey) *metadataOwnerHistory {
@@ -389,19 +444,24 @@ func (t *batchMetadataTransaction) ownerHistory(owner OwnerKey) *metadataOwnerHi
 	return history
 }
 
-func (t *batchMetadataTransaction) associate(update AssociationUpdate) error {
+func (t *batchMetadataTransaction) associate(update AssociationUpdate, identity associationIdentity) error {
 	history := t.ownerHistory(update.Update.Owner)
-	if t.counts != nil {
-		t.counts.ApplySeriesHashes++
+	seriesHash := identity.seriesHash
+	if seriesHash == 0 {
+		if t.counts != nil {
+			t.counts.ApplySeriesHashes++
+		}
+		seriesHash = metadataSeriesKey(update.Labels)
 	}
-	return t.store.associateWithHistory(metadataSeriesKey(update.Labels), update.Labels, update.Update, history, t.counts)
+	derived := associationDerivation{canonical: identity.canonical, versions: t.versionCanonicals}
+	return t.store.associateWithHistory(seriesHash, update.Labels, update.Update, history, derived, t.counts)
 }
 
 func (t *batchMetadataTransaction) update(update Update) error {
 	if update.Owner.Kind > MetadataSource {
 		return fmt.Errorf("columnar: invalid metadata kind %d", update.Owner.Kind)
 	}
-	return t.store.updateHistory(t.ownerHistory(update.Owner), update, t.counts)
+	return t.store.updateHistory(t.ownerHistory(update.Owner), update, associationDerivation{}, t.counts)
 }
 
 // AppendBatch validates and appends an entire batch in one atomic store
@@ -485,8 +545,15 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 			store: nextMetadata, owners: make(map[OwnerKey]*metadataOwnerHistory, len(batch.Updates)+len(batch.OwnerUpdates)),
 			counts: ordinaryAccounting,
 		}
+		if ordinaryAccounting != nil && len(batch.associationIdentities) > 0 {
+			// Only an observation that states its own identity can compare against a
+			// memoized stored identity, so the memo exists only for such a batch. It is
+			// sized by growth: a commit states one identity per observation but holds far
+			// fewer distinct owner versions.
+			transaction.versionCanonicals = map[metadataVersionKey]string{}
+		}
 		for i, update := range batch.Updates {
-			if err := transaction.associate(update); err != nil {
+			if err := transaction.associate(update, associationIdentityAt(batch.associationIdentities, i)); err != nil {
 				return fmt.Errorf("metadata update %d: %w", i, err)
 			}
 		}

@@ -129,10 +129,6 @@ type headSeries struct {
 	v      []float64
 	kind   []SampleKind
 	hist   [][]byte
-	// metaObservations counts the transaction's metadata observations for this
-	// series, so a first observation per series is distinguishable from a repeated
-	// one. A staged series owns a fresh headSeries, so it starts at zero.
-	metaObservations int
 }
 
 // seriesState is the newest sample of a series, needed for immediate ordering
@@ -388,7 +384,40 @@ type appender struct {
 	// can be counted without a per-sample set.
 	lastMetadata     metadata.Metadata
 	haveLastMetadata bool
-	done             bool
+	// metadataCache holds this transaction's per-series and per-context metadata
+	// derivations. It is created on the first metadata observation and dropped at
+	// Commit or Rollback, so nothing outlives the transaction.
+	metadataCache ordinaryMetadataCache
+	// metadataIdentities is index-aligned with meta: the pre-derived identity of each
+	// staged observation, which the store reuses instead of deriving it again.
+	metadataIdentities []associationIdentity
+	done               bool
+}
+
+// ordinaryMetadataCache is the ordinary appender's derivation cache for one
+// transaction. Both maps are keyed exactly: the series map by the verified series hash,
+// whose hits are re-verified against the complete labels, and the context map by the
+// complete type/unit/help metadata.
+type ordinaryMetadataCache struct {
+	series   map[uint64]ordinarySeriesIdentity
+	contexts map[metadata.Metadata]ordinaryContentIdentity
+}
+
+// ordinarySeriesIdentity is the immutable derivation of one exact series: the Metric
+// owner the series states and an owned copy of the complete labels that identify it.
+type ordinarySeriesIdentity struct {
+	// labels is an owned immutable copy, so a cached observation never aliases a
+	// caller's label slice and a later caller cannot mutate a staged observation.
+	labels labels.Labels
+	owner  OwnerKey
+}
+
+// ordinaryContentIdentity is the immutable derivation of one exact metadata context:
+// the type/unit/help content and its canonical form. The store clones content when it
+// creates a version, so the shared map is never stored by reference.
+type ordinaryContentIdentity struct {
+	content   Content
+	canonical string
 }
 
 // Append implements the shared V2 appender, producing typed head arrays.
@@ -476,34 +505,76 @@ func (a *appender) Append(ref storage.SeriesRef, ls labels.Labels, st, t int64, 
 	hs.v = append(hs.v, v)
 	hs.kind = append(hs.kind, kind)
 	if !opts.Metadata.IsEmpty() {
-		ordinary := &a.counts.ordinary
-		ordinary.Appends++
-		if !a.haveLastMetadata || a.lastMetadata != opts.Metadata {
-			ordinary.ContextRuns++
-			a.lastMetadata, a.haveLastMetadata = opts.Metadata, true
-		}
-		if hs.metaObservations == 0 {
-			ordinary.SeriesWithMetadata++
-		}
-		hs.metaObservations++
-		ordinary.OwnerDerivations++
-		ordinary.ContentBuilds++
-		a.meta = append(a.meta, AssociationUpdate{
-			Labels: ls,
-			Update: Update{
-				Owner: MetricOwner(ls),
-				Content: Content{Attributes: map[string]string{
-					"type": string(opts.Metadata.Type), "unit": opts.Metadata.Unit, "help": opts.Metadata.Help,
-				}},
-				EffectiveFrom: t,
-			},
-		})
+		update, identity := a.metadataObservation(ls, hash, t, opts.Metadata)
+		a.meta = append(a.meta, update)
+		a.metadataIdentities = append(a.metadataIdentities, identity)
 	}
 	if reused {
 		return refForHash(hash), nil
 	}
 	a.counts.refForHash++
 	return refFor(ls), nil
+}
+
+// metadataObservation stages one metadata observation of one sample. The Metric owner,
+// the content and the series' immutable labels are derived once per exact series and
+// once per exact metadata context in this transaction; every sample still states its own
+// observation with its own effective time, in input order.
+//
+// seriesHash is the hash this transaction verified for ls, so the staged identity lets
+// the store skip re-hashing the complete labels and re-canonicalizing the content.
+func (a *appender) metadataObservation(ls labels.Labels, seriesHash uint64, t int64, md metadata.Metadata) (AssociationUpdate, associationIdentity) {
+	ordinary := &a.counts.ordinary
+	ordinary.Appends++
+	if !a.haveLastMetadata || a.lastMetadata != md {
+		ordinary.ContextRuns++
+		a.lastMetadata, a.haveLastMetadata = md, true
+	}
+
+	series, cached := a.metadataCache.series[seriesHash]
+	switch {
+	case !cached:
+		series = ordinarySeriesIdentity{labels: ls.Copy(), owner: MetricOwner(ls)}
+		if a.metadataCache.series == nil {
+			a.metadataCache.series = make(map[uint64]ordinarySeriesIdentity)
+		}
+		a.metadataCache.series[seriesHash] = series
+		ordinary.SeriesWithMetadata++
+		ordinary.OwnerDerivations++
+	case !labels.Equal(series.labels, ls):
+		// A hash only locates a candidate: the complete labels decide. An aliasing hash
+		// is derived for this observation, never merged into the cached identity, and its
+		// labels are retained exactly as the appender retained them before the reuse.
+		series = ordinarySeriesIdentity{labels: ls, owner: MetricOwner(ls)}
+		ordinary.OwnerDerivations++
+		ordinary.AliasedSeriesHashes++
+	default:
+		ordinary.SeriesCacheHits++
+	}
+
+	context, cached := a.metadataCache.contexts[md]
+	if !cached {
+		context = ordinaryContentIdentity{
+			content: Content{Attributes: map[string]string{
+				"type": string(md.Type), "unit": md.Unit, "help": md.Help,
+			}},
+		}
+		context.canonical = context.content.Canonical()
+		if a.metadataCache.contexts == nil {
+			a.metadataCache.contexts = make(map[metadata.Metadata]ordinaryContentIdentity)
+		}
+		a.metadataCache.contexts[md] = context
+		ordinary.ContentBuilds++
+		ordinary.ContextCanonicalizations++
+	} else {
+		ordinary.ContextCacheHits++
+	}
+
+	return AssociationUpdate{
+			Labels: series.labels,
+			Update: Update{Owner: series.owner, Content: context.content, EffectiveFrom: t},
+		},
+		associationIdentity{seriesHash: seriesHash, canonical: context.canonical}
 }
 
 // headSeriesPool reuses per-transaction headSeries objects. Labels are always
@@ -580,7 +651,10 @@ func (a *appender) Commit() error {
 	}
 	a.done = true
 
-	batch := Batch{Updates: a.meta, Series: make([]BatchSeries, 0, len(a.order)), counts: a.counts, ordinaryAssociations: true}
+	batch := Batch{
+		Updates: a.meta, Series: make([]BatchSeries, 0, len(a.order)), counts: a.counts,
+		ordinaryAssociations: true, associationIdentities: a.metadataIdentities,
+	}
 	for _, hash := range a.order {
 		tx := a.txs[hash]
 		if len(tx.ts) == 0 {
@@ -597,6 +671,7 @@ func (a *appender) Commit() error {
 		headSeriesPool.Put(tx)
 	}
 	a.txs, a.order, a.meta = nil, nil, nil
+	a.metadataIdentities, a.metadataCache = nil, ordinaryMetadataCache{}
 	return a.s.AppendBatch(context.Background(), batch)
 }
 
@@ -613,6 +688,7 @@ func (a *appender) Rollback() error {
 		}
 	}
 	a.txs, a.order, a.meta = nil, nil, nil
+	a.metadataIdentities, a.metadataCache = nil, ordinaryMetadataCache{}
 	return nil
 }
 

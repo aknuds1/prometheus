@@ -170,7 +170,10 @@ type readStats struct {
 // path adds no exported ReadStats surface.
 type ordinaryDerivationAccumulator struct {
 	appends, seriesWithMetadata, contextRuns       atomic.Uint64
+	seriesCacheHits, contextCacheHits              atomic.Uint64
+	aliasedSeriesHashes                            atomic.Uint64
 	ownerDerivations, contentBuilds                atomic.Uint64
+	contextCanonicalizations                       atomic.Uint64
 	observations                                   atomic.Uint64
 	changeDetectionCanonicalizations               atomic.Uint64
 	applyCanonicalizations                         atomic.Uint64
@@ -183,8 +186,12 @@ func (a *ordinaryDerivationAccumulator) add(c ordinaryDerivationStats) {
 	a.appends.Add(c.Appends)
 	a.seriesWithMetadata.Add(c.SeriesWithMetadata)
 	a.contextRuns.Add(c.ContextRuns)
+	a.seriesCacheHits.Add(c.SeriesCacheHits)
+	a.contextCacheHits.Add(c.ContextCacheHits)
+	a.aliasedSeriesHashes.Add(c.AliasedSeriesHashes)
 	a.ownerDerivations.Add(c.OwnerDerivations)
 	a.contentBuilds.Add(c.ContentBuilds)
+	a.contextCanonicalizations.Add(c.ContextCanonicalizations)
 	a.observations.Add(c.Observations)
 	a.changeDetectionCanonicalizations.Add(c.ChangeDetectionContentCanonicalizations)
 	a.applyCanonicalizations.Add(c.ApplyContentCanonicalizations)
@@ -200,8 +207,12 @@ func (a *ordinaryDerivationAccumulator) snapshot() ordinaryDerivationStats {
 		Appends:                                 a.appends.Load(),
 		SeriesWithMetadata:                      a.seriesWithMetadata.Load(),
 		ContextRuns:                             a.contextRuns.Load(),
+		SeriesCacheHits:                         a.seriesCacheHits.Load(),
+		ContextCacheHits:                        a.contextCacheHits.Load(),
+		AliasedSeriesHashes:                     a.aliasedSeriesHashes.Load(),
 		OwnerDerivations:                        a.ownerDerivations.Load(),
 		ContentBuilds:                           a.contentBuilds.Load(),
+		ContextCanonicalizations:                a.contextCanonicalizations.Load(),
 		Observations:                            a.observations.Load(),
 		ChangeDetectionContentCanonicalizations: a.changeDetectionCanonicalizations.Load(),
 		ApplyContentCanonicalizations:           a.applyCanonicalizations.Load(),

@@ -23,9 +23,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/prometheus/common/model"
+	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
@@ -40,15 +39,16 @@ type ordinaryCountFixture struct {
 	perSeries int
 }
 
-// metadata returns the metadata context of series i.
-func (f ordinaryCountFixture) metadataOf(i int) metadata.Metadata {
+// ordinaryContextMetadata returns the metadata context series i states.
+func ordinaryContextMetadata(i int) metadata.Metadata {
 	if i%2 == 1 {
 		return metadata.Metadata{Type: model.MetricTypeCounter, Unit: "1", Help: "ord_total"}
 	}
 	return metadata.Metadata{Type: model.MetricTypeGauge, Unit: "By", Help: "ord_gauge"}
 }
 
-func (f ordinaryCountFixture) labelsOf(i int) labels.Labels {
+// ordinaryContextLabels returns the complete labels of series i.
+func ordinaryContextLabels(i int) labels.Labels {
 	name := "ord_gauge"
 	if i%2 == 1 {
 		name = "ord_total"
@@ -66,8 +66,8 @@ func appendOrdinary(t *testing.T, s *Storage, f ordinaryCountFixture, base int64
 	t.Helper()
 	app := s.appender()
 	for i := range f.series {
-		ls := f.labelsOf(i)
-		md := f.metadataOf(i)
+		ls := ordinaryContextLabels(i)
+		md := ordinaryContextMetadata(i)
 		for j := range f.perSeries {
 			ts := base + int64(j)*15_000
 			if _, err := app.Append(0, ls, 0, ts, float64(j), nil, nil, storage.AOptions{Metadata: md}); err != nil {
@@ -80,35 +80,24 @@ func appendOrdinary(t *testing.T, s *Storage, f ordinaryCountFixture, base int64
 
 // ordinaryDerivationDelta returns the counts one commit added.
 func ordinaryDerivationDelta(after, before ordinaryDerivationStats) ordinaryDerivationStats {
-	var out ordinaryDerivationStats
-	out.add(after)
-	var negated ordinaryDerivationStats
-	negated.Appends = before.Appends
-	negated.SeriesWithMetadata = before.SeriesWithMetadata
-	negated.ContextRuns = before.ContextRuns
-	negated.OwnerDerivations = before.OwnerDerivations
-	negated.ContentBuilds = before.ContentBuilds
-	negated.Observations = before.Observations
-	negated.ChangeDetectionContentCanonicalizations = before.ChangeDetectionContentCanonicalizations
-	negated.ApplyContentCanonicalizations = before.ApplyContentCanonicalizations
-	negated.ChangeDetectionSeriesHashes = before.ChangeDetectionSeriesHashes
-	negated.ApplySeriesHashes = before.ApplySeriesHashes
-	negated.OwnerHistoryLookups = before.OwnerHistoryLookups
-	negated.CompleteLabelChecks = before.CompleteLabelChecks
-	negated.MembershipSearches = before.MembershipSearches
-	out.Appends -= negated.Appends
-	out.SeriesWithMetadata -= negated.SeriesWithMetadata
-	out.ContextRuns -= negated.ContextRuns
-	out.OwnerDerivations -= negated.OwnerDerivations
-	out.ContentBuilds -= negated.ContentBuilds
-	out.Observations -= negated.Observations
-	out.ChangeDetectionContentCanonicalizations -= negated.ChangeDetectionContentCanonicalizations
-	out.ApplyContentCanonicalizations -= negated.ApplyContentCanonicalizations
-	out.ChangeDetectionSeriesHashes -= negated.ChangeDetectionSeriesHashes
-	out.ApplySeriesHashes -= negated.ApplySeriesHashes
-	out.OwnerHistoryLookups -= negated.OwnerHistoryLookups
-	out.CompleteLabelChecks -= negated.CompleteLabelChecks
-	out.MembershipSearches -= negated.MembershipSearches
+	out := after
+	out.Appends -= before.Appends
+	out.SeriesWithMetadata -= before.SeriesWithMetadata
+	out.ContextRuns -= before.ContextRuns
+	out.SeriesCacheHits -= before.SeriesCacheHits
+	out.AliasedSeriesHashes -= before.AliasedSeriesHashes
+	out.ContextCacheHits -= before.ContextCacheHits
+	out.OwnerDerivations -= before.OwnerDerivations
+	out.ContentBuilds -= before.ContentBuilds
+	out.ContextCanonicalizations -= before.ContextCanonicalizations
+	out.Observations -= before.Observations
+	out.ChangeDetectionContentCanonicalizations -= before.ChangeDetectionContentCanonicalizations
+	out.ApplyContentCanonicalizations -= before.ApplyContentCanonicalizations
+	out.ChangeDetectionSeriesHashes -= before.ChangeDetectionSeriesHashes
+	out.ApplySeriesHashes -= before.ApplySeriesHashes
+	out.OwnerHistoryLookups -= before.OwnerHistoryLookups
+	out.CompleteLabelChecks -= before.CompleteLabelChecks
+	out.MembershipSearches -= before.MembershipSearches
 	return out
 }
 
@@ -131,34 +120,33 @@ func TestOrdinaryDerivationCounts(t *testing.T) {
 	appendOrdinary(t, s, fixture, 1_000_000)
 	first := s.reads.ordinaryDerivationSnapshot()
 
-	// The appender's own derivation is one per sample on the incumbent: every sample
-	// re-derives the Metric owner (a complete label string) and rebuilds the
-	// type/unit/help attribute map, and stages one association.
+	// The derivation now scales with the exact series and the exact metadata context.
+	// Before the reuse it was one complete owner string and one type/unit/help map per
+	// sample (2,000 each), and the store canonicalized observed content twice for every
+	// observation (3,920 here).
 	require.Equal(t, uint64(appends), first.Appends)
-	require.Equal(t, uint64(appends), first.Observations)
-	require.Equal(t, uint64(appends), first.OwnerDerivations)
-	require.Equal(t, uint64(appends), first.ContentBuilds)
-	require.Equal(t, uint64(series), first.SeriesWithMetadata,
-		"distinct series stating metadata is a property of the corpus, not of the append count")
-	require.Equal(t, uint64(series), first.ContextRuns,
-		"adjacent series alternate contexts, so the corpus has one metadata run per series")
+	require.Equal(t, uint64(appends), first.Observations, "one ordered observation per sample, as before")
+	require.Equal(t, uint64(series), first.SeriesWithMetadata)
+	require.Equal(t, uint64(series), first.OwnerDerivations, "one Metric owner per exact series")
+	require.Equal(t, uint64(2), first.ContentBuilds, "one type/unit/help map per exact metadata context")
+	require.Equal(t, uint64(2), first.ContextCanonicalizations)
+	require.Equal(t, uint64(appends-series), first.SeriesCacheHits)
+	require.Equal(t, uint64(appends-2), first.ContextCacheHits)
+	require.Zero(t, first.AliasedSeriesHashes, "no hash in this fixture aliases two label sets")
 
-	// The shared store then re-derives what the appender already knew. Change
-	// detection stops at the first association that changes the published catalog,
-	// so it is cheap on a first commit; the apply phase pays for every observation.
-	require.Equal(t, uint64(1), first.ChangeDetectionSeriesHashes)
-	require.Equal(t, uint64(0), first.ChangeDetectionContentCanonicalizations,
-		"the first association of a new owner is a change without a content comparison")
-	require.Equal(t, uint64(3*appends), first.ApplySeriesHashes,
-		"association, owner-version and membership validation each hash the complete labels")
-	require.Equal(t, uint64(2*(appends-series)), first.ApplyContentCanonicalizations,
-		"every re-observation compares content; each comparison canonicalizes both sides")
-	require.Equal(t, uint64(series), first.OwnerHistoryLookups,
-		"one owner history per distinct Metric owner")
+	// The observation-dependent work is unchanged: it is what makes the metadata model
+	// exact, so it must not move. The pre-derived identity removes the label hashes and
+	// the repeated canonicalizations, nothing else.
+	require.Equal(t, uint64(series), first.ContextRuns)
+	require.Zero(t, first.ChangeDetectionSeriesHashes, "the staged identity carries the verified hash")
+	require.Zero(t, first.ApplySeriesHashes, "association and membership validation reuse that hash")
+	require.Equal(t, uint64(series), first.OwnerHistoryLookups)
+	require.Equal(t, uint64(series), first.ApplyContentCanonicalizations,
+		"one canonical identity per stored version per transaction, not per observation")
 	require.Equal(t, uint64(4*(appends-series)), first.CompleteLabelChecks,
-		"a repeated association of an established series is checked in each collision guard")
+		"every repeated association of an established series is still checked in each collision guard")
 	require.Equal(t, uint64(2*appends), first.MembershipSearches,
-		"the apply phase searches the owner history and the series membership once per observation")
+		"the apply phase still searches the owner history and the series membership per observation")
 
 	require.Equal(t, uint64(appends), s.ReadStats().RefFallback,
 		"the ordinary consumer appends with a zero reference, so every append hashes")
@@ -166,38 +154,35 @@ func TestOrdinaryDerivationCounts(t *testing.T) {
 	require.Zero(t, s.ReadStats().NativeDerivation.Samples,
 		"ordinary ingestion must not contaminate the native builder's accounting")
 
-	// A second commit re-observes the same content at later timestamps: an
-	// observation extends the recorded bounds, so it is a change, and the store pays
-	// the same per-observation apply cost again, having resolved the same owners.
+	// A second commit re-observes the same content at later timestamps: an observation
+	// extends the recorded bounds, so it is still a change, and the transaction derives
+	// its series and contexts again because the cache dies with the first transaction.
 	appendOrdinary(t, s, fixture, 2_000_000)
 	second := s.reads.ordinaryDerivationSnapshot()
 	repeated := ordinaryDerivationDelta(second, first)
 
 	require.Equal(t, uint64(appends), repeated.Appends)
 	require.Equal(t, uint64(appends), repeated.Observations)
-	require.Equal(t, uint64(appends), repeated.OwnerDerivations,
-		"the incumbent derives the owner again for every sample of the second commit")
-	require.Equal(t, uint64(appends), repeated.ContentBuilds)
+	require.Equal(t, uint64(series), repeated.OwnerDerivations)
+	require.Equal(t, uint64(2), repeated.ContentBuilds)
+	require.Equal(t, uint64(appends-series), repeated.SeriesCacheHits)
 	require.Equal(t, uint64(series), repeated.SeriesWithMetadata)
 	require.Equal(t, uint64(series), repeated.ContextRuns)
 	require.Equal(t, uint64(series), repeated.OwnerHistoryLookups,
 		"owner histories are resolved once per transaction, so a commit resolves them again")
-	require.Equal(t, uint64(1), repeated.ChangeDetectionSeriesHashes)
-	require.Equal(t, uint64(2), repeated.ChangeDetectionContentCanonicalizations,
-		"a re-observation is a change: the bound it extends is compared once")
-	require.Equal(t, uint64(3*appends), repeated.ApplySeriesHashes)
-	require.Equal(t, uint64(2*appends), repeated.ApplyContentCanonicalizations,
-		"every established owner now compares content on re-observation")
+	require.Zero(t, repeated.ApplySeriesHashes)
+	require.Equal(t, uint64(1), repeated.ChangeDetectionContentCanonicalizations,
+		"one comparison about the first association, with the observation's identity reused")
+	require.Equal(t, uint64(series), repeated.ApplyContentCanonicalizations)
 	require.Equal(t, uint64(4*appends), repeated.CompleteLabelChecks)
 	require.Equal(t, uint64(2*appends), repeated.MembershipSearches)
 
-	// A changed metadata context for half the series is a new owner version, so it
-	// stops being a re-observation: the content comparison moves from the extended
-	// bound to the change that creates the version.
+	// A changed metadata context for half the series is a new owner version: the same
+	// observation, a different exact context. Nothing is applied retroactively.
 	app := s.appender()
 	for i := range series {
-		ls := fixture.labelsOf(i)
-		md := fixture.metadataOf(i)
+		ls := ordinaryContextLabels(i)
+		md := ordinaryContextMetadata(i)
 		if i%2 == 0 {
 			md.Help = "ord_gauge_v2"
 		}
@@ -212,17 +197,14 @@ func TestOrdinaryDerivationCounts(t *testing.T) {
 	changed := ordinaryDerivationDelta(s.reads.ordinaryDerivationSnapshot(), second)
 	require.Equal(t, uint64(appends), changed.Appends)
 	require.Equal(t, uint64(series), changed.OwnerHistoryLookups)
-	// Every observation still compares its content with the version active before it:
-	// the half that keeps its context to extend a bound, the other half to establish
-	// that its content really differs before inserting a version.
-	require.Equal(t, uint64(2*appends), changed.ApplyContentCanonicalizations)
+	require.Equal(t, uint64(2), changed.ContentBuilds,
+		"the changed gauge help is one exact context in this commit and the counter context is reused")
 
-	// The metadata itself must still be exactly right: the incumbent records one
-	// version per context and extends the last version's observation bound over the
-	// whole third commit.
+	// The metadata itself must still be exactly right: one version per context, with the
+	// last version's observation bound covering the whole third commit.
 	for i := range series {
-		ls := fixture.labelsOf(i)
-		wantVersions, wantEffective, wantHelp := 1, int64(1_000_000), fixture.metadataOf(i).Help
+		ls := ordinaryContextLabels(i)
+		wantVersions, wantEffective, wantHelp := 1, int64(1_000_000), ordinaryContextMetadata(i).Help
 		if i%2 == 0 {
 			wantVersions, wantEffective, wantHelp = 2, int64(3_000_000), "ord_gauge_v2"
 		}
@@ -233,8 +215,36 @@ func TestOrdinaryDerivationCounts(t *testing.T) {
 		require.Equal(t, wantHelp, last.Content.Attributes["help"])
 		require.Equal(t, wantEffective, last.EffectiveFrom)
 		require.Equal(t, wantEffective, last.ObservedFrom)
-		require.Equal(t, int64(3_000_000+int64(perSeries-1)*15_000), last.ObservedUntil)
+		require.Equal(t, 3_000_000+int64(perSeries-1)*15_000, last.ObservedUntil)
 	}
+}
+
+// TestOrdinaryMetadataCacheRejectsAliasedHash proves the reuse verification: a hit is a
+// hash that locates a candidate, and the complete labels decide. Two label sets forced
+// onto one hash must not share an owner, a label set or a content identity.
+func TestOrdinaryMetadataCacheRejectsAliasedHash(t *testing.T) {
+	s := newOrdinaryCountStorage(t)
+	app := s.appender()
+	first := labels.FromStrings(labels.MetricName, "aliased_a")
+	second := labels.FromStrings(labels.MetricName, "aliased_b")
+	md := metadata.Metadata{Type: model.MetricTypeGauge, Unit: "1", Help: "aliased help"}
+
+	firstUpdate, firstIdentity := app.metadataObservation(first, 42, 1_000, md)
+	secondUpdate, secondIdentity := app.metadataObservation(second, 42, 2_000, md)
+
+	require.Equal(t, first.String(), firstUpdate.Labels.String())
+	require.Equal(t, second.String(), secondUpdate.Labels.String(),
+		"the aliasing observation must keep its own complete labels")
+	require.NotEqual(t, firstUpdate.Update.Owner, secondUpdate.Update.Owner,
+		"an aliasing hash must not move a series to another owner")
+	require.Equal(t, MetricOwner(second), secondUpdate.Update.Owner)
+	require.Equal(t, uint64(1), app.counts.ordinary.AliasedSeriesHashes)
+	require.Zero(t, app.counts.ordinary.SeriesCacheHits,
+		"an aliasing hash is derived instead of counted as a hit")
+	// The identity the store is given is the caller's verified hash, so the store still
+	// hashes nothing; the aliasing guard lives in the cache, not in the identity.
+	require.Equal(t, firstIdentity.seriesHash, secondIdentity.seriesHash)
+	require.Equal(t, firstIdentity.canonical, secondIdentity.canonical)
 }
 
 // TestOrdinaryDerivationCountsIgnoreNativeBatches proves the gating that keeps the

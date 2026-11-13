@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -35,11 +36,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
-
-	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/labels"
@@ -283,12 +283,8 @@ func ordinarySeriesLabels() []labels.Labels {
 		}
 		with := func(name string, extra map[string]string) labels.Labels {
 			l := map[string]string{labels.MetricName: name}
-			for k, v := range base {
-				l[k] = v
-			}
-			for k, v := range extra {
-				l[k] = v
-			}
+			maps.Copy(l, base)
+			maps.Copy(l, extra)
 			return labels.FromMap(l)
 		}
 		for _, route := range ordinaryRoutes() {
@@ -464,7 +460,7 @@ func TestOrdinaryOTLPLogicalState(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "gauge", content.Attributes["type"])
 	require.Equal(t, "Target metadata", content.Attributes["help"])
-	require.Equal(t, "", content.Attributes["unit"], "the translator states no unit for target_info")
+	require.Empty(t, content.Attributes["unit"], "the translator states no unit for target_info")
 
 	// An explicit flush then a reopen must reproduce the same complete state.
 	require.NoError(t, col.Flush())
@@ -490,10 +486,11 @@ func canonicalSampleCount(t *testing.T, line string) int {
 func canonicalSeriesName(t *testing.T, line string) string {
 	t.Helper()
 	const prefix = `__name__="`
-	i := strings.Index(line, prefix)
-	require.GreaterOrEqual(t, i, 0, "canonical line must start with a __name__ label: %s", line)
-	rest := line[i+len(prefix):]
-	return rest[:strings.Index(rest, `"`)]
+	rest, ok := strings.CutPrefix(line, "{"+prefix)
+	require.True(t, ok, "canonical line must start with a __name__ label: %s", line)
+	name, _, ok := strings.Cut(rest, `"`)
+	require.True(t, ok, "canonical line must close its __name__ label: %s", line)
+	return name
 }
 
 // ordinarySeriesNamed returns the single stored series carrying name.

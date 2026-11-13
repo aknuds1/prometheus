@@ -112,8 +112,8 @@ func TestOrdinaryOTLPBoundaryCounts(t *testing.T) {
 			// metric description states two contexts for the same series, while a
 			// first-seen shape states a new identity per entry.
 			wantSeries, wantContexts := ordinaryDistinctShape(entries)
-			require.Equal(t, wantSeries, len(counts.series), "distinct series the receiver appends to")
-			require.Equal(t, wantContexts, len(counts.contexts),
+			require.Len(t, counts.series, wantSeries, "distinct series the receiver appends to")
+			require.Len(t, counts.contexts, wantContexts,
 				"distinct (series, exact metadata context) pairs")
 
 			mint, maxt := fixtureRange(entries)
@@ -240,11 +240,12 @@ func TestOrdinaryOTLPCompleteStateDigest(t *testing.T) {
 						wantType = "gauge"
 					}
 					require.Equal(t, wantType, version.Content.Attributes["type"], "series %s version %d", ls, i)
-					require.Equal(t, "", version.Content.Attributes["unit"])
+					require.Empty(t, version.Content.Attributes["unit"])
 					require.Equal(t, entries[i].metricHelp, version.Content.Attributes["help"], "series %s version %d", ls, i)
 				}
 			}
 
+			require.NotEmpty(t, owners)
 			digest := ordinaryStateDigest(colSamples, owners)
 			t.Logf("%s: series=%d samples=%d owners=%d versions=%d digest=%s",
 				tc.name, len(series), len(colSamples), len(owners), wantVersions, digest)
