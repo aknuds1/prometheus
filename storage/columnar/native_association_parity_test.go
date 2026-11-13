@@ -49,9 +49,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/prometheus/common/model"
+	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql"
@@ -365,7 +364,8 @@ func captureNativeParityState(
 			dump.Memberships[kind] = append(dump.Memberships[kind], fmt.Sprintf(
 				"series[%d] owner=%s identifying=%s start=%d until=%s observed=%d versions=%s",
 				index, row.Owner, nativeParityCanonical(row.OwnerIdentifying), row.MembershipStart, until,
-				row.MembershipObservedTo, nativeParityVersionList(nativeParityValueViews(row.Versions))))
+				row.MembershipObservedTo, nativeParityVersionList(nativeParityValueViews(row.Versions)),
+			))
 		}
 	}
 

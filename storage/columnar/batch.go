@@ -175,6 +175,18 @@ type NativeDerivationStats struct {
 	// observation epoch: a changed owner content or a moved series membership.
 	OwnerRevisionChanges uint64
 
+	// PointContextCanonicalizations counts the canonical identity of one point
+	// attribute set. It runs once per sample row that states point attributes,
+	// because the encoder assigns a fresh attribute row to every data point even
+	// when the content repeats, so the content is the only reusable identity.
+	PointContextCanonicalizations uint64
+	// TemplateHits and TemplateMisses count series-context derivations served from
+	// the batch's reuse cache and derived for the first time. A context is either an
+	// exact hit on the reference tuple or derived; there is no conservative or
+	// approximate fallback, because the key names the metric row and point attribute
+	// set exactly rather than a projection of the final labels.
+	TemplateHits   uint64
+	TemplateMisses uint64
 	// SeriesLookupHashes counts the complete-label hashes taken to find or create a
 	// series. It runs once per sample before the derivation reuse and once per
 	// distinct context after it.
@@ -185,7 +197,8 @@ type NativeDerivationStats struct {
 	SeriesLookupNew  uint64
 	// AssocKeyHashes counts complete-label hashes taken to form an association key,
 	// indexed by NativeDerivation* site. It is the hash that a reusable per-context
-	// association removes without removing the site itself.
+	// association removes without removing the site itself: an association keyed
+	// from a reused context takes no label hash of its own.
 	AssocKeyHashes [NativeDerivationAssociationSites]uint64
 	// ContentCanonicalizations counts Content.Canonical calls made to form an
 	// association key, one per association call.

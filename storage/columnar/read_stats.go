@@ -170,6 +170,8 @@ type nativeDerivationAccumulator struct {
 	batches, samples, series, resources           atomic.Uint64
 	ownersByKind                                  [6]atomic.Uint64
 	ownerRevisionChanges                          atomic.Uint64
+	pointCanonicalizations                        atomic.Uint64
+	templateHits, templateMisses                  atomic.Uint64
 	seriesLookupHashes, seriesLookupHits          atomic.Uint64
 	seriesLookupNew                               atomic.Uint64
 	assocKeyHashes                                [NativeDerivationAssociationSites]atomic.Uint64
@@ -197,6 +199,9 @@ func (a *nativeDerivationAccumulator) add(c NativeDerivationStats) {
 		a.assocKeyHashes[i].Add(c.AssocKeyHashes[i])
 	}
 	a.ownerRevisionChanges.Add(c.OwnerRevisionChanges)
+	a.pointCanonicalizations.Add(c.PointContextCanonicalizations)
+	a.templateHits.Add(c.TemplateHits)
+	a.templateMisses.Add(c.TemplateMisses)
 	a.seriesLookupHashes.Add(c.SeriesLookupHashes)
 	a.seriesLookupHits.Add(c.SeriesLookupHits)
 	a.seriesLookupNew.Add(c.SeriesLookupNew)
@@ -219,29 +224,32 @@ func (a *nativeDerivationAccumulator) add(c NativeDerivationStats) {
 
 func (a *nativeDerivationAccumulator) snapshot() NativeDerivationStats {
 	out := NativeDerivationStats{
-		Batches:                  a.batches.Load(),
-		Samples:                  a.samples.Load(),
-		Series:                   a.series.Load(),
-		Resources:                a.resources.Load(),
-		OwnerRevisionChanges:     a.ownerRevisionChanges.Load(),
-		SeriesLookupHashes:       a.seriesLookupHashes.Load(),
-		SeriesLookupHits:         a.seriesLookupHits.Load(),
-		SeriesLookupNew:          a.seriesLookupNew.Load(),
-		ContentCanonicalizations: a.contentCanonicalizations.Load(),
-		ContentDerivations:       a.contentDerivations.Load(),
-		SchemaContentDerivations: a.schemaContentDerivations.Load(),
-		OwnerReferences:          a.ownerReferences.Load(),
-		LabelBuilds:              a.labelBuilds.Load(),
-		LabelNameHits:            a.labelNameHits.Load(),
-		LabelNameMisses:          a.labelNameMisses.Load(),
-		TranslationHits:          a.translationHits.Load(),
-		TranslationMisses:        a.translationMisses.Load(),
-		EpochOwnerChecks:         a.epochOwnerChecks.Load(),
-		EpochMembershipChecks:    a.epochMembershipChecks.Load(),
-		EmittedChangePoints:      a.emittedChangePoints.Load(),
-		EmittedObservationBounds: a.emittedObservationBounds.Load(),
-		FoldedObservations:       a.foldedObservations.Load(),
-		EpochRestatements:        a.epochRestatements.Load(),
+		Batches:                       a.batches.Load(),
+		Samples:                       a.samples.Load(),
+		Series:                        a.series.Load(),
+		Resources:                     a.resources.Load(),
+		OwnerRevisionChanges:          a.ownerRevisionChanges.Load(),
+		PointContextCanonicalizations: a.pointCanonicalizations.Load(),
+		TemplateHits:                  a.templateHits.Load(),
+		TemplateMisses:                a.templateMisses.Load(),
+		SeriesLookupHashes:            a.seriesLookupHashes.Load(),
+		SeriesLookupHits:              a.seriesLookupHits.Load(),
+		SeriesLookupNew:               a.seriesLookupNew.Load(),
+		ContentCanonicalizations:      a.contentCanonicalizations.Load(),
+		ContentDerivations:            a.contentDerivations.Load(),
+		SchemaContentDerivations:      a.schemaContentDerivations.Load(),
+		OwnerReferences:               a.ownerReferences.Load(),
+		LabelBuilds:                   a.labelBuilds.Load(),
+		LabelNameHits:                 a.labelNameHits.Load(),
+		LabelNameMisses:               a.labelNameMisses.Load(),
+		TranslationHits:               a.translationHits.Load(),
+		TranslationMisses:             a.translationMisses.Load(),
+		EpochOwnerChecks:              a.epochOwnerChecks.Load(),
+		EpochMembershipChecks:         a.epochMembershipChecks.Load(),
+		EmittedChangePoints:           a.emittedChangePoints.Load(),
+		EmittedObservationBounds:      a.emittedObservationBounds.Load(),
+		FoldedObservations:            a.foldedObservations.Load(),
+		EpochRestatements:             a.epochRestatements.Load(),
 	}
 	for i := range out.OwnersByKind {
 		out.OwnersByKind[i] = a.ownersByKind[i].Load()
@@ -266,6 +274,9 @@ func (a *nativeDerivationAccumulator) reset() {
 		a.assocKeyHashes[i].Store(0)
 	}
 	a.ownerRevisionChanges.Store(0)
+	a.pointCanonicalizations.Store(0)
+	a.templateHits.Store(0)
+	a.templateMisses.Store(0)
 	a.seriesLookupHashes.Store(0)
 	a.seriesLookupHits.Store(0)
 	a.seriesLookupNew.Store(0)

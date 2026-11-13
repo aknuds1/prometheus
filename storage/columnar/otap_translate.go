@@ -385,11 +385,13 @@ func (b *otapBatchBuilder) appendTargetInfo() error {
 		if b.settings.KeepIdentifyingResourceAttributes {
 			attributes = resource.attributes
 		}
-		ls, err := b.buildLabels(ctx, translation, attributes)
+		// One template per Resource: every synthetic target_info sample of this
+		// Resource states the same context.
+		template, err := b.buildSeriesTemplate(ctx, translation, attributes)
 		if err != nil {
 			return err
 		}
-		if ls.Get(model.JobLabel) == "" && ls.Get(model.InstanceLabel) == "" {
+		if template.labels.Get(model.JobLabel) == "" && template.labels.Get(model.InstanceLabel) == "" {
 			continue
 		}
 
@@ -399,7 +401,7 @@ func (b *otapBatchBuilder) appendTargetInfo() error {
 		}
 		stepMilliseconds := max(int64(1), (lookback / 2).Milliseconds())
 		for timestamp := bounds.min; timestamp < bounds.max; {
-			if err := b.appendTargetInfoSample(ls, ctx, translation.content, timestamp); err != nil {
+			if err := b.appendTargetInfoSample(template, timestamp); err != nil {
 				return err
 			}
 			next := timestamp + stepMilliseconds
@@ -408,18 +410,18 @@ func (b *otapBatchBuilder) appendTargetInfo() error {
 			}
 			timestamp = next
 		}
-		if err := b.appendTargetInfoSample(ls, ctx, translation.content, bounds.max); err != nil {
+		if err := b.appendTargetInfoSample(template, bounds.max); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (b *otapBatchBuilder) appendTargetInfoSample(ls labels.Labels, ctx otapMetricContext, content Content, timestamp int64) error {
-	key := targetInfoBatchKey{seriesHash: labels.StableHash(ls), timestamp: timestamp}
+func (b *otapBatchBuilder) appendTargetInfoSample(template *otapSeriesTemplate, timestamp int64) error {
+	key := targetInfoBatchKey{seriesHash: template.hash, timestamp: timestamp}
 	if _, exists := b.targetInfoSeen[key]; exists {
 		return nil
 	}
 	b.targetInfoSeen[key] = struct{}{}
-	return b.appendSample(ls, ctx, content, timestamp, 0, 1, SampleFloat)
+	return b.appendSample(template, timestamp, 0, 1, SampleFloat)
 }

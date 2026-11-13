@@ -83,6 +83,57 @@ type targetInfoBatchKey struct {
 	timestamp  int64
 }
 
+// otapPointContext identifies one point attribute set of a metric row. The zero
+// value states "no point attributes".
+type otapPointContext struct {
+	id  uint32
+	set bool
+}
+
+// otapSeriesContext is the exact semantic context of one series in a batch: the
+// metric row reference fixes the metric name, type and content, the Resource
+// identity and content, the Resource schema URL, and the Scope identity, name,
+// version and schema URL; the canonical point attribute content fixes the
+// complete point attribute set.
+//
+// The point part is the attribute content rather than the Arrow attribute row,
+// because the encoder writes one attribute row per data point even when the
+// content repeats, so a row reference would never be reused. Content therefore
+// participates in full: the canonical bytes are injective and are compared as a
+// map key, never reduced to a hash.
+type otapSeriesContext struct {
+	metric uint16
+	point  string
+}
+
+// otapAssociationTemplate is one owner association derived once for a series
+// context. It carries everything the ordered fold needs except the observation
+// time. The canonical content is both a map key and compared in full, so a hash
+// collision can never merge two associations.
+type otapAssociationTemplate struct {
+	owner   OwnerKey
+	content Content
+	key     metadataBatchKey
+}
+
+// otapSeriesTemplate is the reusable derivation of one complete native series
+// context: its labels, its series hash, the resolved batch series and the owner
+// associations of every sample that states this context.
+//
+// It holds only values the builder owns and never mutates: one immutable label
+// allocation from labels.Builder, its JSON-encoded owner and content strings, and
+// content maps the builder constructed. No Arrow record, child array, point
+// attribute map or caller map is retained, and the template cache lives and dies
+// with one buildBatch, so nothing outlives ConsumeRecords.
+type otapSeriesTemplate struct {
+	labels       labels.Labels
+	hash         uint64
+	associations []otapAssociationTemplate
+	// index is the resolved index of labels in the batch series, or -1 until the
+	// first sample of this context resolves it.
+	index int
+}
+
 type otapBatchBuilder struct {
 	settings otlpprw.Settings
 	batch    Batch
@@ -99,6 +150,7 @@ type otapBatchBuilder struct {
 	labelNames     map[string]otapLabelNameResult
 	resourceBounds map[uint16]otapResourceBounds
 	targetInfoSeen map[targetInfoBatchKey]struct{}
+	templates      map[otapSeriesContext]*otapSeriesTemplate
 	appended       int
 	// counts is plain batch-local mechanism accounting. It is copied onto the
 	// batch when the build succeeds and published by the commit, so nothing here
@@ -183,6 +235,7 @@ func (s *OTAPSink) buildBatch(records []*record_message.RecordMessage) (Batch, i
 		labelNames:     map[string]otapLabelNameResult{},
 		resourceBounds: map[uint16]otapResourceBounds{},
 		targetInfoSeen: map[targetInfoBatchKey]struct{}{},
+		templates:      map[otapSeriesContext]*otapSeriesTemplate{},
 	}
 	if err := builder.appendNumberDataPoints(numberDPRecord.Record(), metrics); err != nil {
 		return Batch{}, 0, err
@@ -315,10 +368,10 @@ func (b *otapBatchBuilder) appendNumberDataPoints(rec arrow.RecordBatch, metrics
 				ErrUnsupportedPayload, row, metricID)
 		}
 
-		var attributes map[string]string
+		var point otapPointContext
 		if idCol != nil && !idCol.IsNull(row) {
 			pointID += uint32(uintValue(idCol, row))
-			attributes = otapAttributeStrings(b.pointAttrs.AttributesByID(pointID))
+			point = otapPointContext{id: pointID, set: true}
 		}
 		start := int64(0)
 		if startCol != nil && !startCol.IsNull(row) {
@@ -349,15 +402,11 @@ func (b *otapBatchBuilder) appendNumberDataPoints(rec arrow.RecordBatch, metrics
 				ErrUnsupportedPayload, row, ctx.metric.Name())
 		}
 
-		translation, err := b.translateMetric(metricID, ctx)
+		template, err := b.seriesTemplate(metricID, point, ctx)
 		if err != nil {
 			return err
 		}
-		ls, err := b.buildLabels(ctx, translation, attributes)
-		if err != nil {
-			return err
-		}
-		if err := b.appendSample(ls, ctx, translation.content, t, start, value, kind); err != nil {
+		if err := b.appendSample(template, t, start, value, kind); err != nil {
 			return err
 		}
 
@@ -380,26 +429,127 @@ func otapFloatValue(column arrow.Array, row int) float64 {
 	return column.(*array.Float64).Value(row)
 }
 
-func (b *otapBatchBuilder) appendSample(
-	ls labels.Labels,
-	ctx otapMetricContext,
-	metricContent Content,
-	t, start int64,
-	value float64,
-	kind SampleKind,
-) error {
-	hash := stableSeriesHash(ls)
+// seriesTemplate returns the derivation of one series context, building it once per
+// batch. Every sample of the context then reuses the same labels, series hash,
+// owner keys, contents and canonical contents instead of re-deriving them, while
+// the ordered fold below still sees one observation per sample.
+func (b *otapBatchBuilder) seriesTemplate(
+	metricID uint16, point otapPointContext, ctx otapMetricContext,
+) (*otapSeriesTemplate, error) {
+	attributes := b.pointAttributes(point)
+	context := otapSeriesContext{metric: metricID}
+	if attributes != nil {
+		// The point attribute content is the part of the context that varies within
+		// one metric row, so it has to be identified exactly on every row. A canonical
+		// content always starts with '[', so the empty key cannot collide with one and
+		// a row without point attributes needs no canonicalization at all.
+		context.point = Content{Attributes: attributes}.Canonical()
+		b.counts.PointContextCanonicalizations++
+	}
+	if template, ok := b.templates[context]; ok {
+		b.counts.TemplateHits++
+		return template, nil
+	}
+	translation, err := b.translateMetric(metricID, ctx)
+	if err != nil {
+		return nil, err
+	}
+	template, err := b.buildSeriesTemplate(ctx, translation, attributes)
+	if err != nil {
+		return nil, err
+	}
+	b.counts.TemplateMisses++
+	b.templates[context] = template
+	return template, nil
+}
+
+// pointAttributes resolves one point's attributes, or nil when the row states
+// none.
+func (b *otapBatchBuilder) pointAttributes(point otapPointContext) map[string]string {
+	if !point.set {
+		return nil
+	}
+	return otapAttributeStrings(b.pointAttrs.AttributesByID(point.id))
+}
+
+// buildSeriesTemplate derives one series context. The five associations are the
+// same five the sink always states, derived once for every sample of the context.
+func (b *otapBatchBuilder) buildSeriesTemplate(
+	ctx otapMetricContext, translation otapMetricTranslation, attributes map[string]string,
+) (*otapSeriesTemplate, error) {
+	ls, err := b.buildLabels(ctx, translation, attributes)
+	if err != nil {
+		return nil, err
+	}
+	template := &otapSeriesTemplate{labels: ls, hash: stableSeriesHash(ls), index: -1}
 	b.counts.SeriesLookupHashes++
-	index, exists := b.series[hash]
+
+	template.associations = []otapAssociationTemplate{
+		b.associationTemplate(template.hash, MetadataResource, ctx.resource.owner,
+			Content{Attributes: ctx.resource.descriptive}),
+		b.associationTemplate(template.hash, MetadataResourceSchema, ResourceSchemaOwner(ctx.resource.owner),
+			schemaContent(ctx.resource.schemaURL)),
+	}
+	schemaContents := 1 // The Resource schema URL is always stated.
+	if ctx.hasScope {
+		template.associations = append(template.associations, b.associationTemplate(template.hash,
+			MetadataScope, ScopeOwner(ctx.scopeName, ctx.scopeVersion), schemaContent(ctx.scopeSchemaURL)))
+		schemaContents++
+	}
+	// OTAP has no authoritative scrape cadence, so no Scrape owner is invented.
+	template.associations = append(template.associations,
+		b.associationTemplate(template.hash, MetadataSource, SourceOwner("otap"),
+			Content{Attributes: map[string]string{"transport": "otap"}}),
+		b.associationTemplate(template.hash, MetadataMetric, MetricOwner(ls), translation.content),
+	)
+	b.counts.ContentDerivations += uint64(len(template.associations))
+	b.counts.SchemaContentDerivations += uint64(schemaContents)
+	return template, nil
+}
+
+// associationTemplate derives one association of a series context.
+func (b *otapBatchBuilder) associationTemplate(
+	hash uint64, kind MetadataKind, owner OwnerKey, content Content,
+) otapAssociationTemplate {
+	b.counts.OwnerConstructors[kind]++
+	b.counts.ContentCanonicalizations++
+	canonical := content.Canonical()
+	return otapAssociationTemplate{
+		owner: owner, content: content,
+		key: metadataBatchKey{seriesHash: hash, owner: owner, content: canonical},
+	}
+}
+
+// seriesIndex returns the batch series of a context, adding it on first use and
+// verifying the complete labels so a hash collision cannot merge two series.
+func (b *otapBatchBuilder) seriesIndex(template *otapSeriesTemplate) (int, error) {
+	if template.index >= 0 {
+		return template.index, nil
+	}
+	index, exists := b.series[template.hash]
 	if !exists {
 		index = len(b.batch.Series)
-		b.series[hash] = index
-		b.batch.Series = append(b.batch.Series, BatchSeries{Labels: ls.Copy()})
+		b.series[template.hash] = index
+		// The template owns an immutable label allocation that outlives the
+		// builder's map, so the batch and the associations can share it.
+		b.batch.Series = append(b.batch.Series, BatchSeries{Labels: template.labels})
 		b.counts.SeriesLookupNew++
-	} else if !labels.Equal(b.batch.Series[index].Labels, ls) {
-		return fmt.Errorf("%w: %q and %q", ErrSeriesHashCollision, b.batch.Series[index].Labels, ls)
 	} else {
+		// A hash only locates a candidate: the complete labels decide.
+		if !labels.Equal(b.batch.Series[index].Labels, template.labels) {
+			return 0, fmt.Errorf("%w: %q and %q", ErrSeriesHashCollision, b.batch.Series[index].Labels, template.labels)
+		}
 		b.counts.SeriesLookupHits++
+	}
+	template.index = index
+	return index, nil
+}
+
+// appendSample appends one sample of an already derived series context.
+func (b *otapBatchBuilder) appendSample(template *otapSeriesTemplate, t, start int64, value float64, kind SampleKind) error {
+	index, err := b.seriesIndex(template)
+	if err != nil {
+		return err
 	}
 	series := &b.batch.Series[index]
 	series.Timestamps = append(series.Timestamps, t)
@@ -409,26 +559,9 @@ func (b *otapBatchBuilder) appendSample(
 	series.Histograms = append(series.Histograms, nil)
 	b.appended++
 
-	b.counts.OwnerConstructors[MetadataResource]++
-	b.counts.AssocKeyHashes[NativeDerivationResource]++
-	b.associate(ls, ctx.resource.owner, Content{Attributes: ctx.resource.descriptive}, t)
-	b.counts.OwnerConstructors[MetadataResourceSchema]++
-	b.counts.AssocKeyHashes[NativeDerivationResourceSchema]++
-	b.counts.SchemaContentDerivations++
-	b.associate(ls, ResourceSchemaOwner(ctx.resource.owner), schemaContent(ctx.resource.schemaURL), t)
-	if ctx.hasScope {
-		b.counts.OwnerConstructors[MetadataScope]++
-		b.counts.AssocKeyHashes[NativeDerivationScope]++
-		b.counts.SchemaContentDerivations++
-		b.associate(ls, ScopeOwner(ctx.scopeName, ctx.scopeVersion), schemaContent(ctx.scopeSchemaURL), t)
+	for i := range template.associations {
+		b.associate(template.labels, &template.associations[i], t)
 	}
-	// OTAP has no authoritative scrape cadence, so no Scrape owner is invented.
-	b.counts.OwnerConstructors[MetadataSource]++
-	b.counts.AssocKeyHashes[NativeDerivationSource]++
-	b.associate(ls, SourceOwner("otap"), Content{Attributes: map[string]string{"transport": "otap"}}, t)
-	b.counts.OwnerConstructors[MetadataMetric]++
-	b.counts.AssocKeyHashes[NativeDerivationMetric]++
-	b.associate(ls, MetricOwner(ls), metricContent, t)
 	return nil
 }
 
@@ -443,10 +576,9 @@ func (b *otapBatchBuilder) appendSample(
 // or moves a series' membership of that kind to another owner intervenes in the same
 // temporal domain, so a later re-statement of the earlier content is emitted as its own
 // ordered change point instead of rewriting an earlier observation bound.
-func (b *otapBatchBuilder) associate(ls labels.Labels, owner OwnerKey, content Content, effectiveFrom int64) {
-	b.counts.ContentDerivations++
-	key := metadataBatchKey{seriesHash: labels.StableHash(ls), owner: owner, content: content.Canonical()}
-	b.counts.ContentCanonicalizations++
+func (b *otapBatchBuilder) associate(ls labels.Labels, association *otapAssociationTemplate, effectiveFrom int64) {
+	key := association.key
+	owner, content := association.owner, association.content
 	revision := b.observeOwnerContent(owner, key.content, key.seriesHash)
 	observation, exists := b.observations[key]
 	if exists && observation.revision == revision {
