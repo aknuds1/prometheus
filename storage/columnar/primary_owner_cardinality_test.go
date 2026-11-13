@@ -27,6 +27,7 @@ package columnar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -34,6 +35,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -1052,6 +1054,18 @@ func TestPrimaryIngestOwnerCardinalityCounts(t *testing.T) {
 						work.versionBoundsExtended, "entry %d apply-call extensions", e)
 					require.Equal(t, inserted, work.indexCalls,
 						"entry %d rebuilds exactly one index per inserted Resource version", e)
+					// Each touched attribute-index bucket is copied at most once per
+					// transaction: the two buckets every owner shares, plus one singleton
+					// bucket per changed owner.
+					wantClones, wantEntries := 0, 0
+					if inserted > 0 {
+						wantClones = work.changedOwners + 2
+						wantEntries = 2*fx.spec.owners + work.changedOwners
+					}
+					require.Equal(t, wantClones, work.indexBucketClones,
+						"entry %d copies each touched index bucket once", e)
+					require.Equal(t, wantEntries, work.indexBucketClonedEntries,
+						"entry %d copies the shared buckets once and each singleton once", e)
 					require.Zero(t, work.versionsEvicted, "entry %d evictions", e)
 					require.Zero(t, work.versionsCoalesced, "entry %d coalescing", e)
 					// Re-observing content several times in one entry extends a version
@@ -1073,6 +1087,13 @@ func TestPrimaryIngestOwnerCardinalityCounts(t *testing.T) {
 						require.Equal(t, wantSeries, work.residentSeries, "entry %d resident series", e)
 						require.Equal(t, changedOwnersOf(before, after), work.changedOwners,
 							"entry %d distinct changed owners", e)
+					}
+					if fx.spec.mode == ownerCardinalityNoMetadata {
+						require.Empty(t, st.metadata.attributeIndex,
+							"entry %d creates no index bucket without metadata", e)
+					} else {
+						require.Len(t, st.metadata.attributeIndex, fx.spec.owners+2,
+							"entry %d keeps exactly the resident shared and singleton buckets", e)
 					}
 
 					page, err := st.QueryMetadataSeries(context.Background(), MetadataSeriesQuery{
@@ -1221,6 +1242,58 @@ func TestPrimaryIngestOwnerCardinalityRejectedCommit(t *testing.T) {
 				"no metadata becomes visible")
 			require.Equal(t, beforeWAL, walBytes(t, dir), "no WAL prefix is published")
 		})
+	}
+}
+
+// TestPrimaryIngestOwnerCardinalityRejectedAfterSharedBucketMutations proves that a
+// transaction which mutates several owners sharing an attribute bucket and then fails
+// publishes neither the copied buckets nor any logical metadata change.
+func TestPrimaryIngestOwnerCardinalityRejectedAfterSharedBucketMutations(t *testing.T) {
+	spec := ownerCardinalitySpec{
+		mode: ownerCardinalityVersionAndAssociations, records: 8, points: 4, owners: 8, timed: 2,
+	}
+	fx := buildOwnerCardinalityFixture(t, spec)
+	st, err := NewStorage(t.TempDir(), StorageOptions{FlushSamples: 1 << 40, MetadataVersionCap: -1})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, st.Close()) })
+	require.NoError(t, st.AppendBatch(context.Background(), fx.entries[0].batch))
+
+	published := st.metadata
+	beforeCatalog := ownerCardinalityCatalogOf(t, st)
+	beforeWork := st.reads.metadataWorkSnapshot()
+	beforeSamples := st.bufferN
+	beforeSeries := len(st.buffer)
+
+	rejectedAt := fx.spec.mid(1)
+	updates := make([]Update, 0, spec.owners+1)
+	for j := 0; j < spec.owners; j++ {
+		updates = append(updates, Update{
+			Owner: fx.owners[j], Content: ownerCardinalityContent(j, 20), EffectiveFrom: rejectedAt,
+		})
+	}
+	// The last update conflicts with owner 0 at the same effective time, after every
+	// owner and every shared bucket has already been mutated in the transaction.
+	updates = append(updates, Update{
+		Owner: fx.owners[0], Content: ownerCardinalityContent(0, 21), EffectiveFrom: rejectedAt,
+	})
+	require.ErrorIs(t, st.AppendBatch(context.Background(), Batch{OwnerUpdates: updates}), ErrConflictingMetadata)
+
+	afterWork := st.reads.metadataWorkSnapshot()
+	require.Equal(t, beforeWork.attempts+1, afterWork.attempts, "the attempt is visible")
+	require.Equal(t, ownerCardinalityWorkWithoutAttempts(beforeWork),
+		ownerCardinalityWorkWithoutAttempts(afterWork), "no committed metadata work is published")
+	require.Same(t, published, st.metadata, "the rejected transaction's clone is discarded")
+	require.Equal(t, beforeCatalog, ownerCardinalityCatalogOf(t, st), "no metadata becomes visible")
+	require.Equal(t, beforeSamples, st.bufferN, "no sample becomes visible")
+	require.Len(t, st.buffer, beforeSeries, "no series becomes visible")
+	require.Len(t, published.attributeIndex[attributeCondition("service.name", "checkout")], spec.owners,
+		"the published shared bucket still names exactly the resident owners")
+	for j, owner := range fx.owners {
+		require.Len(t, published.byOwner[owner].versions, 2,
+			"owner %d keeps the prewarm and entry-1 versions", j)
+		content, found, _ := st.MetadataAtOwner(owner, fx.spec.mid(0))
+		require.True(t, found, "owner %d keeps its published content", j)
+		require.Equal(t, ownerCardinalityContent(j, 1), content)
 	}
 }
 
@@ -1388,6 +1461,11 @@ func TestPrimaryIngestOwnerCardinalityLegacyAccounting(t *testing.T) {
 		require.Equal(t, fx.spec.records, work.changedOwners,
 			"entry %d changes every owner, twice", e)
 		require.Equal(t, inserted, work.indexCalls, "entry %d index rebuilds", e)
+		// The restoring version repeats the same identity conditions, so the two
+		// shared buckets and each owner's singleton are copied once per transaction
+		// rather than once per version mutation.
+		require.Equal(t, fx.spec.owners+2, work.indexBucketClones, "entry %d bucket clones", e)
+		require.Equal(t, 3*fx.spec.owners, work.indexBucketClonedEntries, "entry %d bucket entries", e)
 		t.Logf("entry=%d associations=%d owner-updates=%d inserted=%d evicted=%d resident=%d "+
 			"index-calls=%d bucket-clones=%d bucket-entries=%d clone-owners=%d",
 			e, len(fx.entries[e].batch.Updates), len(fx.entries[e].batch.OwnerUpdates),
@@ -1541,4 +1619,88 @@ func TestPrimaryIngestOwnerCardinalityInfo(t *testing.T) {
 	require.Equal(t, ownerCardinalityLabels(1, 1, fx.owners[1], ownerCostGaugeName).String(),
 		vector[0].Metric.String(), "the unassociated series is not enriched")
 	query.Close()
+}
+
+// TestPrimaryIngestOwnerCardinalityConcurrentReaders proves that a commit publishes the
+// catalog and its index atomically: readers racing the commit observe complete owner
+// histories, memberships and index buckets, never a partially mutated one.
+//
+// The readers use the synchronized read paths. QueryMetadata and QueryMetadataSeries
+// read Storage.metadata before taking Storage.mtx, which is a pre-existing unsynchronized
+// nil check unrelated to this repair, so they are not used here.
+func TestPrimaryIngestOwnerCardinalityConcurrentReaders(t *testing.T) {
+	spec := ownerCardinalitySpec{
+		mode: ownerCardinalityVersionAndAssociations, records: 16, points: 4, owners: 4, timed: 4,
+	}
+	fx := buildOwnerCardinalityFixture(t, spec)
+	st := newOwnerCardinalityStorage(t)
+	require.NoError(t, st.AppendBatch(context.Background(), fx.entries[0].batch))
+	seriesHash := metadataSeriesKey(ownerCardinalityLabels(0, 0, fx.owners[0], ownerCostSumName))
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	report := func(err error) {
+		select {
+		case errs <- err:
+		default:
+		}
+	}
+	for range 4 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, owner := range fx.owners {
+					history, ok := st.MetadataHistory(owner)
+					if !ok || len(history.Versions) == 0 {
+						report(fmt.Errorf("owner %s published no history", owner.ID))
+						return
+					}
+					for i := 1; i < len(history.Versions); i++ {
+						if history.Versions[i].EffectiveFrom <= history.Versions[i-1].EffectiveFrom {
+							report(fmt.Errorf("owner %s versions are not strictly ordered", owner.ID))
+							return
+						}
+					}
+				}
+				if _, ok := st.SeriesMetadataAssociation(seriesHash, MetadataResource, spec.base(0)); !ok {
+					report(errors.New("series lost its membership"))
+					return
+				}
+				// The attribute index is read under the same storage lock every
+				// synchronized query takes, so a partly mutating transaction cannot
+				// be observed.
+				st.mtx.Lock()
+				store := st.metadata
+				candidates, err := store.ownersMatchingAttributes(MetadataResource,
+					[]MetadataAttributeCondition{{Name: "service.name", Value: "checkout"}},
+					spec.base(0), spec.mid(spec.timed))
+				bucket := len(store.attributeIndex[attributeCondition("service.name", "checkout")])
+				st.mtx.Unlock()
+				if err != nil {
+					report(err)
+					return
+				}
+				if len(candidates) != spec.owners || bucket != spec.owners {
+					report(fmt.Errorf("index saw %d candidates in a %d-entry bucket, want %d",
+						len(candidates), bucket, spec.owners))
+					return
+				}
+			}
+		})
+	}
+	for e := 1; e <= spec.timed; e++ {
+		require.NoError(t, st.AppendBatch(context.Background(), fx.entries[e].batch))
+	}
+	close(stop)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	verifyOwnerCardinalityState(t, st, fx, spec.timed)
 }

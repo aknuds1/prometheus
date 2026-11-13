@@ -265,6 +265,7 @@ func TestRetentionCollectsChurnOwnersWithinVersionCap(t *testing.T) {
 		appendResourceFloat(t, s, latestLabels, latestOwner, first+2, Content{Attributes: map[string]string{"host": "second"}}, 2)
 	}
 	require.Len(t, s.metadata.byOwner, 7, "six sample owners plus one owner-only delivery")
+	publishedStore := s.metadata
 	removed, err := s.RetainBefore(t.Context(), 51)
 	require.NoError(t, err)
 	require.Equal(t, 11, removed)
@@ -285,6 +286,14 @@ func TestRetentionCollectsChurnOwnersWithinVersionCap(t *testing.T) {
 	require.Len(t, candidates, 1, "expired owner candidates leave the global inverted index")
 	_, ok = candidates[latestOwner]
 	require.True(t, ok)
+	_, indexed := s.metadata.attributeIndex[attributeCondition("host", "ghost")]
+	require.False(t, indexed, "the pruned owner's emptied bucket is gone")
+	// Retention deletes owners from a cloned catalog: the buckets it prunes must be
+	// copied, never cut out of the published catalog that preceded the clone.
+	require.Len(t, publishedStore.byOwner, 7, "the published owner set is untouched")
+	require.Len(t, publishedStore.attributeIndex[attributeCondition("host", "first")], 6,
+		"the published shared bucket still names every churn owner")
+	require.Len(t, publishedStore.attributeIndex[attributeCondition("host", "ghost")], 1)
 }
 
 func copyBlockForLifecycleTest(t *testing.T, src, dst string) {

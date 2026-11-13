@@ -112,5 +112,8 @@ func (s *metadataStore) clone(w *metadataWork) (*metadataStore, error) {
 	maps.Copy(clone.attributeIndex, s.attributeIndex)
 	clone.copyOnWrite = true
 	clone.copiedMemberships = map[metadataMembershipGroup]struct{}{}
+	// Attribute-bucket ownership never crosses a clone: this transaction must copy
+	// each bucket it touches even when its predecessor's transaction owned it.
+	clone.ownedAttributeBuckets = map[string]struct{}{}
 	return clone, nil
 }

@@ -77,6 +77,14 @@ type metadataStore struct {
 	copyOnWrite       bool
 	copiedMemberships map[metadataMembershipGroup]struct{}
 	canonicalVersions map[metadataVersionKey]string
+
+	// ownedAttributeBuckets holds the attribute-index conditions whose bucket this
+	// cloned transaction has already cloned or created. A bucket is copied at most
+	// once per transaction, on its first mutation, so repeated owner-version
+	// mutations do not clone the same shared bucket again. The set belongs to one
+	// cloned transaction: clone allocates a fresh set and it is never reused across
+	// batches or after publication.
+	ownedAttributeBuckets map[string]struct{}
 }
 
 type metadataVersionKey struct {
@@ -128,6 +136,10 @@ func (s *metadataStore) deleteOwner(owner OwnerKey) {
 		}
 	}
 	for condition := range s.ownerIndex[owner] {
+		// Retention deletes owners from a cloned catalog, so a bucket still shared
+		// with the published catalog must be copied before this transaction removes
+		// an entry from it.
+		s.ownAttributeBucket(condition, nil)
 		delete(s.attributeIndex[condition], owner)
 		if len(s.attributeIndex[condition]) == 0 {
 			delete(s.attributeIndex, condition)

@@ -76,6 +76,9 @@ func (s *metadataStore) setIndexedResourceAttrs(attributes []string) {
 	}
 	clear(s.attributeIndex)
 	clear(s.ownerIndex)
+	// The rebuild below replaces every bucket, so ownership recorded for the old
+	// buckets does not apply to the new ones.
+	clear(s.ownedAttributeBuckets)
 	for owner, history := range s.byOwner {
 		history.index = map[string]struct{}{}
 		s.indexResourceOwner(owner, history, nil)
@@ -148,7 +151,8 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 	if s.copyOnWrite {
 		// Shared attribute/value maps are cloned before an owner mutation, for
 		// both conditions being removed and newly introduced conditions. This
-		// happens before old conditions are deleted from the shared maps.
+		// happens before old conditions are deleted from the shared maps, and each
+		// condition is copied at most once per transaction.
 		toCopy := map[string]struct{}{}
 		for condition := range previous {
 			toCopy[condition] = struct{}{}
@@ -157,11 +161,7 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 			toCopy[condition] = struct{}{}
 		}
 		for condition := range toCopy {
-			if w != nil {
-				w.indexBucketClones++
-				w.indexBucketClonedEntries += len(s.attributeIndex[condition])
-			}
-			s.attributeIndex[condition] = maps.Clone(s.attributeIndex[condition])
+			s.ownAttributeBucket(condition, w)
 		}
 	}
 	for condition := range previous {
@@ -188,10 +188,49 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 		}
 		if s.attributeIndex[condition] == nil {
 			s.attributeIndex[condition] = map[OwnerKey]metadataIndexedRange{}
+			// A bucket created in this transaction is owned immediately, so a later
+			// mutation in the same transaction reuses it instead of copying it.
+			if s.copyOnWrite {
+				s.markAttributeBucketOwned(condition)
+			}
 		}
 		s.attributeIndex[condition][owner] = candidate
 	}
 	s.ownerIndex[owner] = newConditions
+}
+
+// ownAttributeBucket makes condition's bucket writable by this cloned transaction.
+// A cloned catalog shares every bucket it has not touched with the published catalog,
+// so the first mutation of a condition clones the published bucket once and marks the
+// condition as owned; later mutations reuse the owned bucket. A condition whose bucket
+// does not exist yet is marked owned as well, so the bucket the caller creates is never
+// treated as published state and never copied later in the transaction.
+func (s *metadataStore) ownAttributeBucket(condition string, w *metadataWork) {
+	if !s.copyOnWrite {
+		return
+	}
+	if _, owned := s.ownedAttributeBuckets[condition]; owned {
+		return
+	}
+	// The first touch records the same clone the published-bucket copy performs, so
+	// the clone counters keep describing bucket copies rather than mutations. A
+	// condition with no published bucket contributes one clone and zero entries.
+	if w != nil {
+		w.indexBucketClones++
+		w.indexBucketClonedEntries += len(s.attributeIndex[condition])
+	}
+	if bucket, published := s.attributeIndex[condition]; published {
+		s.attributeIndex[condition] = maps.Clone(bucket)
+	}
+	s.markAttributeBucketOwned(condition)
+}
+
+// markAttributeBucketOwned records that this transaction owns condition's bucket.
+func (s *metadataStore) markAttributeBucketOwned(condition string) {
+	if s.ownedAttributeBuckets == nil {
+		s.ownedAttributeBuckets = map[string]struct{}{}
+	}
+	s.ownedAttributeBuckets[condition] = struct{}{}
 }
 
 // indexedOwners returns exact name/value candidates with overlapping current
