@@ -161,10 +161,8 @@ func ordinaryDistinctShape(entries []ingestEntry) (series, contexts int) {
 	return 2 * len(identities), len(pairs)
 }
 
-// ordinaryOwners enumerates the Metric owners the ordinary corpus recorded. It asks
-// for one unpaginated page: QueryMetadata's owner cursor does not advance past an
-// already-returned page, which is a pre-existing pagination defect outside this
-// experiment's scope.
+// ordinaryOwners enumerates the Metric owners the ordinary corpus recorded in one
+// unpaginated query.
 func ordinaryOwners(t *testing.T, s *columnar.Storage, mint, maxt int64) []string {
 	t.Helper()
 	page, err := s.QueryMetadata(context.Background(), columnar.MetadataQuery{
