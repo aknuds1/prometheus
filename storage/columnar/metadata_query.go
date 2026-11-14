@@ -98,6 +98,10 @@ func (s *Storage) QueryMetadata(ctx context.Context, query MetadataQuery) (Metad
 	sortOwnerKeys(owners)
 	explicit := projectionSet(query.Projection)
 	var out MetadataOwnerPage
+	// lastRetained is the owner key of the last row kept on the page. The cursor must name
+	// it rather than a position in the candidate list, which also counts owners the loop
+	// below filters out, or the look-ahead owner that only proves another page exists.
+	var lastRetained OwnerKey
 	for _, owner := range owners {
 		if err := ctx.Err(); err != nil {
 			return MetadataOwnerPage{}, err
@@ -122,12 +126,14 @@ func (s *Storage) QueryMetadata(ctx context.Context, query MetadataQuery) (Metad
 		if len(view.Versions) == 0 {
 			continue
 		}
-		out.Owners = append(out.Owners, view)
-		if query.Limit > 0 && len(out.Owners) > query.Limit {
-			out.NextToken = ownerCursor(owners[query.Limit-1])
-			out.Owners = out.Owners[:query.Limit]
+		if query.Limit > 0 && len(out.Owners) == query.Limit {
+			// This owner shows that another page exists, so the page is complete and
+			// continues after the owner it last reported.
+			out.NextToken = ownerCursor(lastRetained)
 			return out, nil
 		}
+		out.Owners = append(out.Owners, view)
+		lastRetained = owner
 	}
 	if out.Owners == nil {
 		out.Owners = []MetadataOwnerView{}
