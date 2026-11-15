@@ -16,27 +16,19 @@ package remote
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
-	deltatocumulative "github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/pdata/pmetric"
-	"go.opentelemetry.io/collector/processor"
-	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/storage"
-	otlptranslator "github.com/prometheus/prometheus/storage/remote/otlptranslator/prometheusremotewrite"
 )
 
 type OTLPOptions struct {
@@ -56,119 +48,15 @@ type OTLPOptions struct {
 // NewOTLPWriteHandler creates a http.Handler that accepts OTLP write requests and
 // writes them to the provided appendable.
 func NewOTLPWriteHandler(logger *slog.Logger, reg prometheus.Registerer, appendable storage.AppendableV2, configFunc func() config.Config, opts OTLPOptions) http.Handler {
-	if opts.NativeDelta && opts.ConvertDelta {
-		// This should be validated when iterating through feature flags, so not expected to fail here.
-		panic("cannot enable native delta ingestion and delta2cumulative conversion at the same time")
+	return &otlpWriteHandler{
+		logger:   logger,
+		consumer: NewMetricsConsumer(logger, reg, appendable, configFunc, opts),
 	}
-
-	ex := &rwExporter{
-		logger:                  logger,
-		appendable:              newOTLPInstrumentedAppendable(reg, appendable),
-		config:                  configFunc,
-		allowDeltaTemporality:   opts.NativeDelta,
-		lookbackDelta:           opts.LookbackDelta,
-		enableTypeAndUnitLabels: opts.EnableTypeAndUnitLabels,
-		converterPool: sync.Pool{
-			New: func() any {
-				return otlptranslator.NewPrometheusConverter(nil)
-			},
-		},
-		translationWarnings: promauto.With(reg).NewCounterVec(prometheus.CounterOpts{
-			Namespace: "prometheus",
-			Subsystem: "api",
-			Name:      "otlp_translation_warnings_total",
-			Help:      "The total number of warnings produced while translating OTLP metrics to the Prometheus model, by category.",
-		}, []string{"category"}),
-	}
-
-	wh := &otlpWriteHandler{logger: logger, defaultConsumer: ex}
-
-	if opts.ConvertDelta {
-		fac := deltatocumulative.NewFactory()
-		set := processor.Settings{
-			ID:                component.NewID(fac.Type()),
-			TelemetrySettings: component.TelemetrySettings{MeterProvider: noop.NewMeterProvider()},
-		}
-		d2c, err := fac.CreateMetrics(context.Background(), set, fac.CreateDefaultConfig(), wh.defaultConsumer)
-		if err != nil {
-			// fac.CreateMetrics directly calls [deltatocumulativeprocessor.createMetricsProcessor],
-			// which only errors if:
-			//   - cfg.(type) != *Config
-			//   - telemetry.New fails due to bad set.TelemetrySettings
-			//
-			// both cannot be the case, as we pass a valid *Config and valid TelemetrySettings.
-			// as such, we assume this error to never occur.
-			// if it is, our assumptions are broken in which case a panic seems acceptable.
-			panic(fmt.Errorf("failed to create metrics processor: %w", err))
-		}
-		if err := d2c.Start(context.Background(), nil); err != nil {
-			// deltatocumulative does not error on start. see above for panic reasoning
-			panic(err)
-		}
-		wh.d2cConsumer = d2c
-	}
-
-	return wh
-}
-
-type rwExporter struct {
-	logger                  *slog.Logger
-	appendable              storage.AppendableV2
-	config                  func() config.Config
-	allowDeltaTemporality   bool
-	lookbackDelta           time.Duration
-	enableTypeAndUnitLabels bool
-	translationWarnings     *prometheus.CounterVec
-	converterPool           sync.Pool
-}
-
-func (rw *rwExporter) ConsumeMetrics(ctx context.Context, md pmetric.Metrics) error {
-	otlpCfg := rw.config().OTLPConfig
-	app := rw.appendable.AppenderV2(ctx)
-	converter := rw.converterPool.Get().(*otlptranslator.PrometheusConverter)
-	converter.Reset(app)
-	annots, err := converter.FromMetrics(ctx, md, otlptranslator.Settings{
-		AddMetricSuffixes:                    otlpCfg.TranslationStrategy.ShouldAddSuffixes(),
-		AllowUTF8:                            !otlpCfg.TranslationStrategy.ShouldEscape(),
-		PromoteResourceAttributes:            otlptranslator.NewPromoteResourceAttributes(otlpCfg),
-		KeepIdentifyingResourceAttributes:    otlpCfg.KeepIdentifyingResourceAttributes,
-		ConvertHistogramsToNHCB:              otlpCfg.ConvertHistogramsToNHCB,
-		PromoteScopeMetadata:                 otlpCfg.PromoteScopeMetadata,
-		AllowDeltaTemporality:                rw.allowDeltaTemporality,
-		LookbackDelta:                        rw.lookbackDelta,
-		EnableTypeAndUnitLabels:              rw.enableTypeAndUnitLabels,
-		LabelNameUnderscoreSanitization:      otlpCfg.LabelNameUnderscoreSanitization,
-		LabelNamePreserveMultipleUnderscores: otlpCfg.LabelNamePreserveMultipleUnderscores,
-	})
-
-	defer func() {
-		if err != nil {
-			_ = app.Rollback()
-		} else {
-			err = app.Commit()
-		}
-		converter.Reset(nil)
-		rw.converterPool.Put(converter)
-	}()
-	ws, _ := annots.AsStrings("", 0, 0)
-	if len(ws) > 0 {
-		for category, count := range otlptranslator.CountWarningsByCategory(annots) {
-			rw.translationWarnings.WithLabelValues(string(category)).Add(float64(count))
-		}
-		rw.logger.Warn("Warnings translating OTLP metrics to Prometheus write request", "warnings", ws)
-	}
-	return err
-}
-
-func (*rwExporter) Capabilities() consumer.Capabilities {
-	return consumer.Capabilities{MutatesData: false}
 }
 
 type otlpWriteHandler struct {
-	logger *slog.Logger
-
-	defaultConsumer consumer.Metrics // stores deltas as-is
-	d2cConsumer     consumer.Metrics // converts deltas to cumulative
+	logger   *slog.Logger
+	consumer consumer.Metrics
 }
 
 func (h *otlpWriteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -179,17 +67,7 @@ func (h *otlpWriteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	md := req.Metrics()
-	// If deltatocumulative conversion enabled AND delta samples exist, use slower conversion path.
-	// While deltatocumulative can also accept cumulative metrics (and then just forwards them as-is), it currently
-	// holds a sync.Mutex when entering ConsumeMetrics. This is slow and not necessary when ingesting cumulative metrics.
-	if h.d2cConsumer != nil && hasDelta(md) {
-		err = h.d2cConsumer.ConsumeMetrics(r.Context(), md)
-	} else {
-		// Otherwise use default consumer (alongside cumulative samples, this will accept delta samples and write as-is
-		// if native-delta-support is enabled).
-		err = h.defaultConsumer.ConsumeMetrics(r.Context(), md)
-	}
+	err = h.consumer.ConsumeMetrics(r.Context(), req.Metrics())
 
 	switch {
 	case err == nil:
@@ -204,31 +82,6 @@ func (h *otlpWriteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-}
-
-func hasDelta(md pmetric.Metrics) bool {
-	for i := range md.ResourceMetrics().Len() {
-		sms := md.ResourceMetrics().At(i).ScopeMetrics()
-		for i := range sms.Len() {
-			ms := sms.At(i).Metrics()
-			for i := range ms.Len() {
-				temporality := pmetric.AggregationTemporalityUnspecified
-				m := ms.At(i)
-				switch ms.At(i).Type() {
-				case pmetric.MetricTypeSum:
-					temporality = m.Sum().AggregationTemporality()
-				case pmetric.MetricTypeExponentialHistogram:
-					temporality = m.ExponentialHistogram().AggregationTemporality()
-				case pmetric.MetricTypeHistogram:
-					temporality = m.Histogram().AggregationTemporality()
-				}
-				if temporality == pmetric.AggregationTemporalityDelta {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 type otlpInstrumentedAppendable struct {

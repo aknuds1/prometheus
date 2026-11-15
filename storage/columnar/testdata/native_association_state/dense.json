@@ -1,0 +1,967 @@
+{
+  "series": [
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "samples": [
+        "1700000000000/0000000000000000/0/0",
+        "1700000015000/3fd0000000000000/0/0",
+        "1700000030000/3fe0000000000000/0/0",
+        "1700000045000/3fe8000000000000/0/0",
+        "1700000060000/3ff0000000000000/0/0",
+        "1700000105000/3ff8000000000000/0/0",
+        "1700000120000/3ffc000000000000/0/0",
+        "1700000135000/4000000000000000/0/0",
+        "1700000150000/4002000000000000/0/0",
+        "1700000165000/4004000000000000/0/0",
+        "1700000210000/4008000000000000/0/0",
+        "1700000225000/400a000000000000/0/0",
+        "1700000240000/400c000000000000/0/0",
+        "1700000255000/400e000000000000/0/0",
+        "1700000270000/4010000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "samples": [
+        "1700000000000/3ff0000000000000/0/0",
+        "1700000015000/3ff4000000000000/0/0",
+        "1700000030000/3ff8000000000000/0/0",
+        "1700000045000/3ffc000000000000/0/0",
+        "1700000060000/4000000000000000/0/0",
+        "1700000105000/4004000000000000/0/0",
+        "1700000120000/4006000000000000/0/0",
+        "1700000135000/4008000000000000/0/0",
+        "1700000150000/400a000000000000/0/0",
+        "1700000165000/400c000000000000/0/0",
+        "1700000210000/4010000000000000/0/0",
+        "1700000225000/4011000000000000/0/0",
+        "1700000240000/4012000000000000/0/0",
+        "1700000255000/4013000000000000/0/0",
+        "1700000270000/4014000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "samples": [
+        "1700000000000/4000000000000000/0/0",
+        "1700000015000/4002000000000000/0/0",
+        "1700000030000/4004000000000000/0/0",
+        "1700000045000/4006000000000000/0/0",
+        "1700000060000/4008000000000000/0/0",
+        "1700000105000/400c000000000000/0/0",
+        "1700000120000/400e000000000000/0/0",
+        "1700000135000/4010000000000000/0/0",
+        "1700000150000/4011000000000000/0/0",
+        "1700000165000/4012000000000000/0/0",
+        "1700000210000/4014000000000000/0/0",
+        "1700000225000/4015000000000000/0/0",
+        "1700000240000/4016000000000000/0/0",
+        "1700000255000/4017000000000000/0/0",
+        "1700000270000/4018000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "samples": [
+        "1700000000000/4008000000000000/0/0",
+        "1700000015000/400a000000000000/0/0",
+        "1700000030000/400c000000000000/0/0",
+        "1700000045000/400e000000000000/0/0",
+        "1700000060000/4010000000000000/0/0",
+        "1700000105000/4012000000000000/0/0",
+        "1700000120000/4013000000000000/0/0",
+        "1700000135000/4014000000000000/0/0",
+        "1700000150000/4015000000000000/0/0",
+        "1700000165000/4016000000000000/0/0",
+        "1700000210000/4018000000000000/0/0",
+        "1700000225000/4019000000000000/0/0",
+        "1700000240000/401a000000000000/0/0",
+        "1700000255000/401b000000000000/0/0",
+        "1700000270000/401c000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "samples": [
+        "1700000000000/4010000000000000/0/0",
+        "1700000015000/4011000000000000/0/0",
+        "1700000030000/4012000000000000/0/0",
+        "1700000045000/4013000000000000/0/0",
+        "1700000060000/4014000000000000/0/0",
+        "1700000105000/4016000000000000/0/0",
+        "1700000120000/4017000000000000/0/0",
+        "1700000135000/4018000000000000/0/0",
+        "1700000150000/4019000000000000/0/0",
+        "1700000165000/401a000000000000/0/0",
+        "1700000210000/401c000000000000/0/0",
+        "1700000225000/401d000000000000/0/0",
+        "1700000240000/401e000000000000/0/0",
+        "1700000255000/401f000000000000/0/0",
+        "1700000270000/4020000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "samples": [
+        "1700000000000/4014000000000000/0/0",
+        "1700000015000/4015000000000000/0/0",
+        "1700000030000/4016000000000000/0/0",
+        "1700000045000/4017000000000000/0/0",
+        "1700000060000/4018000000000000/0/0",
+        "1700000105000/401a000000000000/0/0",
+        "1700000120000/401b000000000000/0/0",
+        "1700000135000/401c000000000000/0/0",
+        "1700000150000/401d000000000000/0/0",
+        "1700000165000/401e000000000000/0/0",
+        "1700000210000/4020000000000000/0/0",
+        "1700000225000/4020800000000000/0/0",
+        "1700000240000/4021000000000000/0/0",
+        "1700000255000/4021800000000000/0/0",
+        "1700000270000/4022000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "samples": [
+        "1700000000000/4018000000000000/0/0",
+        "1700000015000/4019000000000000/0/0",
+        "1700000030000/401a000000000000/0/0",
+        "1700000045000/401b000000000000/0/0",
+        "1700000060000/401c000000000000/0/0",
+        "1700000105000/401e000000000000/0/0",
+        "1700000120000/401f000000000000/0/0",
+        "1700000135000/4020000000000000/0/0",
+        "1700000150000/4020800000000000/0/0",
+        "1700000165000/4021000000000000/0/0",
+        "1700000210000/4022000000000000/0/0",
+        "1700000225000/4022800000000000/0/0",
+        "1700000240000/4023000000000000/0/0",
+        "1700000255000/4023800000000000/0/0",
+        "1700000270000/4024000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "samples": [
+        "1700000000000/401c000000000000/0/0",
+        "1700000015000/401d000000000000/0/0",
+        "1700000030000/401e000000000000/0/0",
+        "1700000045000/401f000000000000/0/0",
+        "1700000060000/4020000000000000/0/0",
+        "1700000105000/4021000000000000/0/0",
+        "1700000120000/4021800000000000/0/0",
+        "1700000135000/4022000000000000/0/0",
+        "1700000150000/4022800000000000/0/0",
+        "1700000165000/4023000000000000/0/0",
+        "1700000210000/4024000000000000/0/0",
+        "1700000225000/4024800000000000/0/0",
+        "1700000240000/4025000000000000/0/0",
+        "1700000255000/4025800000000000/0/0",
+        "1700000270000/4026000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "samples": [
+        "1700000000000/0000000000000000/0/0",
+        "1700000015000/4039000000000000/0/0",
+        "1700000030000/4049000000000000/0/0",
+        "1700000045000/4052c00000000000/0/0",
+        "1700000060000/4059000000000000/0/0",
+        "1700000105000/4062c00000000000/0/0",
+        "1700000120000/4065e00000000000/0/0",
+        "1700000135000/4069000000000000/0/0",
+        "1700000150000/406c200000000000/0/0",
+        "1700000165000/406f400000000000/0/0",
+        "1700000210000/4072c00000000000/0/0",
+        "1700000225000/4074500000000000/0/0",
+        "1700000240000/4075e00000000000/0/0",
+        "1700000255000/4077700000000000/0/0",
+        "1700000270000/4079000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "samples": [
+        "1700000000000/4059000000000000/0/0",
+        "1700000015000/405f400000000000/0/0",
+        "1700000030000/4062c00000000000/0/0",
+        "1700000045000/4065e00000000000/0/0",
+        "1700000060000/4069000000000000/0/0",
+        "1700000105000/406f400000000000/0/0",
+        "1700000120000/4071300000000000/0/0",
+        "1700000135000/4072c00000000000/0/0",
+        "1700000150000/4074500000000000/0/0",
+        "1700000165000/4075e00000000000/0/0",
+        "1700000210000/4079000000000000/0/0",
+        "1700000225000/407a900000000000/0/0",
+        "1700000240000/407c200000000000/0/0",
+        "1700000255000/407db00000000000/0/0",
+        "1700000270000/407f400000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "samples": [
+        "1700000000000/4069000000000000/0/0",
+        "1700000015000/406c200000000000/0/0",
+        "1700000030000/406f400000000000/0/0",
+        "1700000045000/4071300000000000/0/0",
+        "1700000060000/4072c00000000000/0/0",
+        "1700000105000/4075e00000000000/0/0",
+        "1700000120000/4077700000000000/0/0",
+        "1700000135000/4079000000000000/0/0",
+        "1700000150000/407a900000000000/0/0",
+        "1700000165000/407c200000000000/0/0",
+        "1700000210000/407f400000000000/0/0",
+        "1700000225000/4080680000000000/0/0",
+        "1700000240000/4081300000000000/0/0",
+        "1700000255000/4081f80000000000/0/0",
+        "1700000270000/4082c00000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "samples": [
+        "1700000000000/4072c00000000000/0/0",
+        "1700000015000/4074500000000000/0/0",
+        "1700000030000/4075e00000000000/0/0",
+        "1700000045000/4077700000000000/0/0",
+        "1700000060000/4079000000000000/0/0",
+        "1700000105000/407c200000000000/0/0",
+        "1700000120000/407db00000000000/0/0",
+        "1700000135000/407f400000000000/0/0",
+        "1700000150000/4080680000000000/0/0",
+        "1700000165000/4081300000000000/0/0",
+        "1700000210000/4082c00000000000/0/0",
+        "1700000225000/4083880000000000/0/0",
+        "1700000240000/4084500000000000/0/0",
+        "1700000255000/4085180000000000/0/0",
+        "1700000270000/4085e00000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "samples": [
+        "1700000000000/4079000000000000/0/0",
+        "1700000015000/407a900000000000/0/0",
+        "1700000030000/407c200000000000/0/0",
+        "1700000045000/407db00000000000/0/0",
+        "1700000060000/407f400000000000/0/0",
+        "1700000105000/4081300000000000/0/0",
+        "1700000120000/4081f80000000000/0/0",
+        "1700000135000/4082c00000000000/0/0",
+        "1700000150000/4083880000000000/0/0",
+        "1700000165000/4084500000000000/0/0",
+        "1700000210000/4085e00000000000/0/0",
+        "1700000225000/4086a80000000000/0/0",
+        "1700000240000/4087700000000000/0/0",
+        "1700000255000/4088380000000000/0/0",
+        "1700000270000/4089000000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "samples": [
+        "1700000000000/407f400000000000/0/0",
+        "1700000015000/4080680000000000/0/0",
+        "1700000030000/4081300000000000/0/0",
+        "1700000045000/4081f80000000000/0/0",
+        "1700000060000/4082c00000000000/0/0",
+        "1700000105000/4084500000000000/0/0",
+        "1700000120000/4085180000000000/0/0",
+        "1700000135000/4085e00000000000/0/0",
+        "1700000150000/4086a80000000000/0/0",
+        "1700000165000/4087700000000000/0/0",
+        "1700000210000/4089000000000000/0/0",
+        "1700000225000/4089c80000000000/0/0",
+        "1700000240000/408a900000000000/0/0",
+        "1700000255000/408b580000000000/0/0",
+        "1700000270000/408c200000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "samples": [
+        "1700000000000/4082c00000000000/0/0",
+        "1700000015000/4083880000000000/0/0",
+        "1700000030000/4084500000000000/0/0",
+        "1700000045000/4085180000000000/0/0",
+        "1700000060000/4085e00000000000/0/0",
+        "1700000105000/4087700000000000/0/0",
+        "1700000120000/4088380000000000/0/0",
+        "1700000135000/4089000000000000/0/0",
+        "1700000150000/4089c80000000000/0/0",
+        "1700000165000/408a900000000000/0/0",
+        "1700000210000/408c200000000000/0/0",
+        "1700000225000/408ce80000000000/0/0",
+        "1700000240000/408db00000000000/0/0",
+        "1700000255000/408e780000000000/0/0",
+        "1700000270000/408f400000000000/0/0"
+      ]
+    },
+    {
+      "labels": "{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "samples": [
+        "1700000000000/4085e00000000000/0/0",
+        "1700000015000/4086a80000000000/0/0",
+        "1700000030000/4087700000000000/0/0",
+        "1700000045000/4088380000000000/0/0",
+        "1700000060000/4089000000000000/0/0",
+        "1700000105000/408a900000000000/0/0",
+        "1700000120000/408b580000000000/0/0",
+        "1700000135000/408c200000000000/0/0",
+        "1700000150000/408ce80000000000/0/0",
+        "1700000165000/408db00000000000/0/0",
+        "1700000210000/408f400000000000/0/0",
+        "1700000225000/4090040000000000/0/0",
+        "1700000240000/4090680000000000/0/0",
+        "1700000255000/4090cc0000000000/0/0",
+        "1700000270000/4091300000000000/0/0"
+      ]
+    }
+  ],
+  "owners": [
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "metric\u0000{__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "resource\u0000[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "resource_schema\u0000resource\u0000[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"]",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"schema_url\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "scope\u0000{\"name\":\"prometheus.primary.ingest\",\"version\":\"1.0.0\"}",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"schema_url\",\"\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    },
+    {
+      "owner": "source\u0000otap",
+      "truncated": false,
+      "versions": [
+        {
+          "content": "[\"transport\",\"otap\"]",
+          "effective_from": 1700000000000,
+          "observed_from": 1700000000000,
+          "observed_until": 1700000270000
+        }
+      ]
+    }
+  ],
+  "owner_pages": {
+    "metric": [
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"0\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"1\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"2\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"3\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"4\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"5\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"6\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"7\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"gauge\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"0\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"1\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"2\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"3\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"4\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"5\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"6\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}",
+      "{\"identifying\":{\"series\":\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"7\\\"}\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"help\\\",\\\"\\\",\\\"type\\\",\\\"counter\\\",\\\"unit\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}"
+    ],
+    "resource": [
+      "{\"identifying\":{\"service.instance.id\":\"instance-0\",\"service.name\":\"checkout\",\"service.namespace\":\"\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}"
+    ],
+    "resource_schema": [
+      "{\"identifying\":{\"resource\":\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"schema_url\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}"
+    ],
+    "scope": [
+      "{\"identifying\":{\"name\":\"prometheus.primary.ingest\",\"version\":\"1.0.0\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"schema_url\\\",\\\"\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}"
+    ],
+    "source": [
+      "{\"identifying\":{\"source\":\"otap\"},\"history_truncated\":false,\"versions\":[{\"content\":\"[\\\"transport\\\",\\\"otap\\\"]\",\"effective_from\":1700000000000,\"observed_from\":1700000000000,\"observed_until\":1700000270000}]}"
+    ]
+  },
+  "memberships": {
+    "metric": [
+      "series[0] owner=f397c6f6580730878bafb4eea4569a4263cbaa1b3fa1abd8b736e85fd1322894 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"0\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[1] owner=935cd38d87aca8bf2d45208ba9d4ad8747e648e5e4a1948db09045ddb1781cce identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"1\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[2] owner=08ba1975f89d54665094bb0e2a38f8cd3090bcb4c4d789c8fd4808f0ebccd467 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"2\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[3] owner=98c4c913f2be4b14c4001d211e462280ba83d91b27d26c003a725a18c3f0e1c6 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"3\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[4] owner=f31c7162beabb4c4a9c33f0a2a10875ca6b331d5dbde49657bde3b14c751f794 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"4\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[5] owner=e91654206c61c0f77237a68d997ebfaa85c3dcb1c07ab8092a43381031e8a5dc identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"5\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[6] owner=78129afbb0d076ff190ae05d65703c13d20b23401d030d51d83df3d6e4c5ced7 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"6\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[7] owner=e95bb559b4cd1f57d0eec7e6defef3c379450d87cd5dcaf41a00761e5cdf8cf0 identifying=[\"series\",\"{__name__=\\\"primary_gauge\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"7\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[8] owner=0ade142852654eb9387460f7e8eb7881fe2d0e1a793ef384a4ed4847353b66c0 identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"0\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[9] owner=5f16d8ef9a55c1f116b9fdbec99a3367702a90c5f29a333f06e08b3c189b887e identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"1\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[10] owner=db1c40a18192a7ea72ce6b50444c94f881a3b14d1c13849741e3980e58125a5d identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"2\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[11] owner=b659672830e089c9d6fca6df633c51b9179c22fc6aa5ab76b34f76a53771591c identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"3\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[12] owner=5f03ce352187c77ee0fd30d8700626eb1ae0a83d2539491da702ab29c293b4de identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"4\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[13] owner=4f39ff11abf854e7ebe9caf3534ab2c5bd16339c31b32073b5660ae3244ef903 identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"5\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[14] owner=00941e13aae289fe63cfc9b9a82e85fe18116a3a6d814742b15a0a02bf6a37e1 identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"6\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[15] owner=15e2aed3002b1be2b3d9c721f3369a60205bec33b981eb360a794fc80571c54a identifying=[\"series\",\"{__name__=\\\"primary_requests_total\\\", __otel_resource__=\\\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\\\", instance=\\\"instance-0\\\", job=\\\"checkout\\\", series=\\\"7\\\"}\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]@1700000000000[1700000000000,1700000270000]]"
+    ],
+    "resource": [
+      "series[0] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[1] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[2] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[3] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[4] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[5] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[6] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[7] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[8] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[9] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[10] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[11] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[12] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[13] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[14] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]",
+      "series[15] owner=5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a identifying=[\"service.instance.id\",\"instance-0\",\"service.name\",\"checkout\",\"service.namespace\",\"\"] start=1700000000000 until=open observed=1700000270000 versions=[[]@1700000000000[1700000000000,1700000270000]]"
+    ],
+    "resource_schema": [
+      "series[0] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[1] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[2] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[3] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[4] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[5] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[6] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[7] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[8] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[9] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[10] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[11] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[12] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[13] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[14] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[15] owner=d91d8539b9d54980ba907bf448777345df2ffa10e9b871cebaacc14b5add12f0 identifying=[\"resource\",\"resource\\u0000[\\\"service.instance.id\\\",\\\"instance-0\\\",\\\"service.name\\\",\\\"checkout\\\",\\\"service.namespace\\\",\\\"\\\"]\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]"
+    ],
+    "scope": [
+      "series[0] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[1] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[2] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[3] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[4] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[5] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[6] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[7] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[8] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[9] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[10] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[11] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[12] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[13] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[14] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[15] owner=de9ae4afc2bbbd5d1dd30740bd49a37b0db353483969dc09d4cf75fceb4b6590 identifying=[\"name\",\"prometheus.primary.ingest\",\"version\",\"1.0.0\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"schema_url\",\"\"]@1700000000000[1700000000000,1700000270000]]"
+    ],
+    "source": [
+      "series[0] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[1] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[2] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[3] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[4] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[5] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[6] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[7] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[8] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[9] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[10] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[11] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[12] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[13] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[14] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]",
+      "series[15] owner=b2f674050530be9b8143808309ba205ac25df49e455554681b704365dac25e8a identifying=[\"source\",\"otap\"] start=1700000000000 until=open observed=1700000270000 versions=[[\"transport\",\"otap\"]@1700000000000[1700000000000,1700000270000]]"
+    ]
+  },
+  "metadata_at_labels": [
+    "series[0] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[0] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[0] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[0] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[0] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[0] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[0] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[0] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[0] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[0] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[0] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[0] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[1] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[1] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[1] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[1] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[1] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[1] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[1] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[1] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[1] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[1] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[1] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[1] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[2] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[2] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[2] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[2] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[2] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[2] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[2] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[2] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[2] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[2] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[2] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[2] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[3] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[3] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[3] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[3] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[3] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[3] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[3] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[3] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[3] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[3] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[3] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[3] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[4] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[4] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[4] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[4] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[4] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[4] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[4] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[4] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[4] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[4] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[4] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[4] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[5] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[5] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[5] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[5] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[5] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[5] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[5] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[5] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[5] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[5] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[5] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[5] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[6] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[6] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[6] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[6] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[6] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[6] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[6] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[6] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[6] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[6] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[6] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[6] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[7] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[7] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[7] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[7] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[7] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[7] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[7] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[7] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[7] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[7] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[7] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[7] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"gauge\",\"unit\",\"\"]",
+    "series[8] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[8] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[8] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[8] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[8] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[8] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[8] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[8] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[8] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[8] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[8] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[8] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[9] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[9] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[9] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[9] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[9] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[9] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[9] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[9] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[9] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[9] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[9] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[9] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[10] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[10] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[10] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[10] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[10] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[10] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[10] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[10] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[10] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[10] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[10] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[10] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[11] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[11] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[11] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[11] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[11] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[11] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[11] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[11] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[11] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[11] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[11] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[11] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[12] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[12] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[12] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[12] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[12] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[12] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[12] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[12] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[12] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[12] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[12] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[12] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[13] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[13] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[13] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[13] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[13] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[13] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[13] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[13] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[13] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[13] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[13] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[13] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[14] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[14] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[14] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[14] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[14] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[14] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[14] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[14] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[14] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[14] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[14] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[14] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[15] kind=resource at=1699999999999 found=false truncated=false content=[]",
+    "series[15] kind=resource at=1700000000000 found=true truncated=false content=[]",
+    "series[15] kind=resource at=1700000135000 found=true truncated=false content=[]",
+    "series[15] kind=resource at=1700000270001 found=true truncated=false content=[]",
+    "series[15] kind=scope at=1699999999999 found=false truncated=false content=[]",
+    "series[15] kind=scope at=1700000000000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[15] kind=scope at=1700000135000 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[15] kind=scope at=1700000270001 found=true truncated=false content=[\"schema_url\",\"\"]",
+    "series[15] kind=metric at=1699999999999 found=false truncated=false content=[]",
+    "series[15] kind=metric at=1700000000000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[15] kind=metric at=1700000135000 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]",
+    "series[15] kind=metric at=1700000270001 found=true truncated=false content=[\"help\",\"\",\"type\",\"counter\",\"unit\",\"\"]"
+  ],
+  "info": {
+    "all": [
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "1700000135000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000135000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "1700000135000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "1700000135000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000135000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "1700000135000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "1700000135000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "1700000135000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "1700000270000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000270000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "1700000270000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "1700000270000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000270000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "1700000270000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "1700000270000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "1700000270000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}"
+    ],
+    "gauge": [
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "1700000000000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "1700000135000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"0\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"1\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"2\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"4\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"5\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"6\"}",
+      "1700000270000 {__name__=\"primary_gauge\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"7\"}"
+    ],
+    "sum_selector": [
+      "1700000000000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000135000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}",
+      "1700000270000 {__name__=\"primary_requests_total\", __otel_resource__=\"5f089d74596248462fe00be92f219ea69a64ead1faac915e53d6bf51c2eac25a\", instance=\"instance-0\", job=\"checkout\", series=\"3\"}"
+    ]
+  }
+}

@@ -183,6 +183,10 @@ var expectedConf = &Config{
 		LabelNamePreserveMultipleUnderscores: true,
 	},
 
+	OTAPConfig: OTAPConfig{
+		ListenAddress: "localhost:4318",
+	},
+
 	RemoteReadConfigs: []*RemoteReadConfig{
 		{
 			URL:              mustParseURL("http://remote1/read"),
@@ -2951,6 +2955,27 @@ func TestTSDBChunkEncoding(t *testing.T) {
 	c, err := Load("", promslog.NewNopLogger())
 	require.NoError(t, err)
 	require.Empty(t, c.StorageConfig.TSDBConfig.ChunkEncoding.Floats)
+}
+
+func TestOTAPConfig(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		c, err := Load("", promslog.NewNopLogger())
+		require.NoError(t, err)
+		require.Equal(t, DefaultOTAPConfig, c.OTAPConfig)
+		require.Equal(t, "localhost:4317", c.OTAPConfig.ListenAddress)
+	})
+
+	t.Run("empty section keeps the default address", func(t *testing.T) {
+		c, err := Load("otap:\n", promslog.NewNopLogger())
+		require.NoError(t, err)
+		require.Equal(t, DefaultOTAPConfig, c.OTAPConfig)
+	})
+
+	t.Run("explicitly empty address falls back to the default", func(t *testing.T) {
+		c, err := Load("otap:\n  listen_address: \"\"\n", promslog.NewNopLogger())
+		require.NoError(t, err)
+		require.Equal(t, DefaultOTAPConfig, c.OTAPConfig)
+	})
 }
 
 func TestBadStaticConfigsYML(t *testing.T) {

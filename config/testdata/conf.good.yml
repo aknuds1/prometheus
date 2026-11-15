@@ -51,6 +51,9 @@ remote_write:
 otlp:
   promote_resource_attributes: ["k8s.cluster.name", "k8s.job.name", "k8s.namespace.name"]
 
+otap:
+  listen_address: "localhost:4318"
+
 remote_read:
   - url: http://remote1/read
     read_recent: true

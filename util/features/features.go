@@ -21,6 +21,7 @@ import (
 // Category constants define the standard feature flag categories used in Prometheus.
 const (
 	API                       = "api"
+	OTAPReceiver              = "otap_receiver"
 	OTLPReceiver              = "otlp_receiver"
 	Prometheus                = "prometheus"
 	PromQL                    = "promql"

@@ -14,6 +14,7 @@
 package labels
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -28,5 +29,23 @@ func TestStableHash(t *testing.T) {
 		0xcbab40540f26097d: FromStrings(MetricName, "metric", "label", "value"),
 	} {
 		require.Equal(t, expectedHash, StableHash(lbls))
+	}
+}
+
+func TestStableHashIntoMatchesStableHash(t *testing.T) {
+	sets := []Labels{
+		EmptyLabels(),
+		FromStrings("__name__", "up"),
+		FromStrings("__name__", "node_cpu_seconds_total", "cpu", "0", "mode", "idle"),
+		FromStrings("a", strings.Repeat("x", 2000), "b", "y"),
+	}
+	for _, ls := range sets {
+		require.Equal(t, StableHash(ls), func() uint64 { h, _ := StableHashInto(ls, nil); return h }())
+		scratch := make([]byte, 0, 1024)
+		for range 3 {
+			h, out := StableHashInto(ls, scratch)
+			require.Equal(t, StableHash(ls), h)
+			scratch = out
+		}
 	}
 }

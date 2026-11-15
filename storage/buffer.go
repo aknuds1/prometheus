@@ -16,6 +16,7 @@ package storage
 import (
 	"fmt"
 	"math"
+	"sort"
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
@@ -33,6 +34,11 @@ type BufferedSeriesIterator struct {
 
 	lastTime  int64
 	valueType chunkenc.ValueType
+
+	batchIt  BatchIterator
+	batch    SampleBatch
+	batchPos int
+	batching bool
 }
 
 // NewBuffer returns a new iterator that buffers the values within the time range
@@ -61,6 +67,20 @@ func (b *BufferedSeriesIterator) Reset(it chunkenc.Iterator) {
 	b.lastTime = math.MinInt64
 	b.buf.reset()
 	b.buf.delta = b.delta
+	b.batchIt, b.batching = nil, false
+	b.batch = SampleBatch{}
+	if batchIt, ok := it.(BatchIterator); ok {
+		b.batchIt, b.batching = batchIt, true
+		if batchIt.NextBatch(0) {
+			b.batch = batchIt.Batch()
+			b.batchPos = 0
+			b.valueType = b.batch.ValueType(0)
+			b.lastTime = b.batch.Timestamps[0]
+			return
+		}
+		b.valueType = chunkenc.ValNone
+		return
+	}
 	b.valueType = it.Next()
 }
 
@@ -85,11 +105,23 @@ func (b *BufferedSeriesIterator) Buffer() *SampleRingIterator {
 func (b *BufferedSeriesIterator) Seek(t int64) chunkenc.ValueType {
 	t0 := t - b.buf.delta
 
-	// If the delta would cause us to seek backwards, preserve the buffer
-	// and just continue regular advancement while filling the buffer on the way.
-	if b.valueType != chunkenc.ValNone && t0 > b.lastTime {
+	// A batch can seek forwards within its borrowed arrays even though the raw
+	// iterator already points at that batch tail. Reset the lookback buffer just
+	// as the scalar path does for an actual raw seek.
+	if b.batching && b.valueType != chunkenc.ValNone && t0 > b.lastTime && t0 <= b.batch.Timestamps[b.batch.Len()-1] {
+		b.buf.reset()
+		b.batchPos = sort.Search(b.batch.Len(), func(i int) bool { return b.batch.Timestamps[i] >= t0 })
+		b.valueType = b.batch.ValueType(b.batchPos)
+		b.lastTime = b.batch.Timestamps[b.batchPos]
+	} else if b.valueType != chunkenc.ValNone && t0 > b.lastTime {
 		b.buf.reset()
 
+		if b.batching {
+			// Seeking beyond the current batch invalidates its borrowed view.
+			b.batching = false
+			b.batchIt = nil
+			b.batch = SampleBatch{}
+		}
 		b.valueType = b.it.Seek(t0)
 		switch b.valueType {
 		case chunkenc.ValNone:
@@ -118,22 +150,36 @@ func (b *BufferedSeriesIterator) Next() chunkenc.ValueType {
 	case chunkenc.ValNone:
 		return chunkenc.ValNone
 	case chunkenc.ValFloat:
-		t, f := b.it.At()
-		st := b.it.AtST()
+		t, f := b.At()
+		st := b.AtST()
 		b.buf.addF(fSample{st: st, t: t, f: f})
 	case chunkenc.ValHistogram:
-		t, h := b.it.AtHistogram(&b.hReader)
-		st := b.it.AtST()
+		t, h := b.AtHistogram(&b.hReader)
+		st := b.AtST()
 		b.buf.addH(hSample{st: st, t: t, h: h})
 	case chunkenc.ValFloatHistogram:
-		t, fh := b.it.AtFloatHistogram(&b.fhReader)
-		st := b.it.AtST()
+		t, fh := b.AtFloatHistogram(&b.fhReader)
+		st := b.AtST()
 		b.buf.addFH(fhSample{st: st, t: t, fh: fh})
 	default:
 		panic(fmt.Errorf("BufferedSeriesIterator: unknown value type %v", b.valueType))
 	}
 
-	b.valueType = b.it.Next()
+	if b.batching {
+		if b.batchPos+1 >= b.batch.Len() {
+			if !b.batchIt.NextBatch(0) {
+				b.valueType = chunkenc.ValNone
+				return b.valueType
+			}
+			b.batch = b.batchIt.Batch()
+			b.batchPos = 0
+		} else {
+			b.batchPos++
+		}
+		b.valueType = b.batch.ValueType(b.batchPos)
+	} else {
+		b.valueType = b.it.Next()
+	}
 	if b.valueType != chunkenc.ValNone {
 		b.lastTime = b.AtT()
 	}
@@ -142,26 +188,54 @@ func (b *BufferedSeriesIterator) Next() chunkenc.ValueType {
 
 // At returns the current float element of the iterator.
 func (b *BufferedSeriesIterator) At() (int64, float64) {
+	if b.batching {
+		return b.batch.Timestamps[b.batchPos], b.batch.Values[b.batchPos]
+	}
 	return b.it.At()
 }
 
 // AtHistogram returns the current histogram element of the iterator.
-func (b *BufferedSeriesIterator) AtHistogram(fh *histogram.Histogram) (int64, *histogram.Histogram) {
-	return b.it.AtHistogram(fh)
+func (b *BufferedSeriesIterator) AtHistogram(reuse *histogram.Histogram) (int64, *histogram.Histogram) {
+	if b.batching {
+		h := b.batch.Histograms[b.batchPos]
+		if reuse != nil && h != nil {
+			h.CopyTo(reuse)
+			h = reuse
+		}
+		return b.batch.Timestamps[b.batchPos], h
+	}
+	return b.it.AtHistogram(reuse)
 }
 
 // AtFloatHistogram returns the current float-histogram element of the iterator.
-func (b *BufferedSeriesIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
-	return b.it.AtFloatHistogram(fh)
+func (b *BufferedSeriesIterator) AtFloatHistogram(reuse *histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
+	if b.batching {
+		if b.batch.ValueType(b.batchPos) == chunkenc.ValHistogram {
+			return b.batch.Timestamps[b.batchPos], b.batch.Histograms[b.batchPos].ToFloat(reuse)
+		}
+		fh := b.batch.FloatHistograms[b.batchPos]
+		if reuse != nil && fh != nil {
+			fh.CopyTo(reuse)
+			fh = reuse
+		}
+		return b.batch.Timestamps[b.batchPos], fh
+	}
+	return b.it.AtFloatHistogram(reuse)
 }
 
 // AtT returns the current timestamp of the iterator.
 func (b *BufferedSeriesIterator) AtT() int64 {
+	if b.batching {
+		return b.batch.Timestamps[b.batchPos]
+	}
 	return b.it.AtT()
 }
 
 // AtST returns the current sample's start timestamp of the iterator.
 func (b *BufferedSeriesIterator) AtST() int64 {
+	if b.batching {
+		return b.batch.StartTimestamp(b.batchPos)
+	}
 	return b.it.AtST()
 }
 

@@ -317,6 +317,13 @@ otlp:
   # consecutive underscores are preserved during label name sanitization.
   [ label_name_preserve_multiple_underscores: <boolean> | default = true ]
 
+# Settings related to the experimental OTAP receiver. The receiver is only
+# started when Prometheus is run with --web.enable-otap-receiver.
+otap:
+  # Address the OTAP gRPC receiver listens on. Only read at startup: changing it
+  # requires a restart.
+  [ listen_address: <string> | default = "localhost:4317" ]
+
 # Settings related to the remote read feature.
 remote_read:
   [ - <remote_read> ... ]

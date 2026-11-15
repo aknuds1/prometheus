@@ -53,9 +53,11 @@ import (
 	promslogflag "github.com/prometheus/common/promslog/flag"
 	"github.com/prometheus/common/version"
 	toolkit_web "github.com/prometheus/exporter-toolkit/web"
+	"go.opentelemetry.io/collector/consumer"
 	"go.uber.org/atomic"
 	"go.uber.org/automaxprocs/maxprocs"
 	"go.yaml.in/yaml/v2"
+	"google.golang.org/grpc"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog"
 	klogv2 "k8s.io/klog/v2"
@@ -74,7 +76,10 @@ import (
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/storage/columnar"
 	"github.com/prometheus/prometheus/storage/remote"
+	"github.com/prometheus/prometheus/storage/remote/otap"
+	otlpprw "github.com/prometheus/prometheus/storage/remote/otlptranslator/prometheusremotewrite"
 	"github.com/prometheus/prometheus/template"
 	"github.com/prometheus/prometheus/tracing"
 	"github.com/prometheus/prometheus/tsdb"
@@ -207,6 +212,11 @@ type flagConfig struct {
 
 	enableAutoReload   bool
 	autoReloadInterval model.Duration
+
+	enableColumnarPrototype bool
+	columnarAddress         string
+	columnarQueryTimings    bool
+	columnarFlushSamples    int
 
 	maxprocsEnable          bool
 	memlimitEnable          bool
@@ -356,6 +366,9 @@ func (c *flagConfig) setFeatureListOptions(logger *slog.Logger) error {
 			case "fast-startup":
 				c.tsdb.EnableFastStartup = true
 				logger.Info("Experimental fast startup is enabled.")
+			case "columnar-prototype":
+				c.enableColumnarPrototype = true
+				logger.Warn("Experimental columnar prototype enabled. Its WAL, lifecycle operations and format are experiments without TSDB durability, compatibility or production-readiness guarantees; do not use it for real data.")
 			case "search-api":
 				c.web.EnableSearch = true
 				logger.Info("Experimental search API enabled.")
@@ -495,6 +508,16 @@ func main() {
 
 	a.Flag("web.enable-otlp-receiver", "Enable API endpoint accepting OTLP write requests.").
 		Default("false").BoolVar(&cfg.web.EnableOTLPWriteReceiver)
+
+	serverOnlyFlag(a, "web.columnar-address", "Address on which the experimental columnar prototype serves its Arrow endpoint (--enable-feature=columnar-prototype).").
+		Default("localhost:9091").StringVar(&cfg.columnarAddress)
+	a.Flag("storage.columnar-flush-samples", "Samples buffered in memory before the columnar prototype seals a block. Zero uses the built-in default (--enable-feature=columnar-prototype). Larger values keep more data in the head buffer and seal fewer, bigger blocks.").
+		Hidden().Default("0").IntVar(&cfg.columnarFlushSamples)
+	a.Flag("storage.columnar-query-timings", "Attribute columnar query time to phases for the cost model (--enable-feature=columnar-prototype). Measurement switch: adds clock reads to the query path and does not change behaviour.").
+		Hidden().Default("false").BoolVar(&cfg.columnarQueryTimings)
+
+	a.Flag("web.enable-otap-receiver", fmt.Sprintf("Enable the experimental gRPC endpoint accepting OTAP write requests, listening on the address configured by otap.listen_address (default %q). OTAP support is experimental: the wire format is a draft, and the receiver accepts metrics only, without TLS or authentication.", config.DefaultOTAPConfig.ListenAddress)).
+		Default("false").BoolVar(&cfg.web.EnableOTAPReceiver)
 
 	a.Flag("web.console.templates", "Path to the console template directory, available at /consoles.").
 		Default("consoles").StringVar(&cfg.web.ConsoleTemplatesPath)
@@ -666,7 +689,7 @@ func main() {
 	a.Flag("scrape.discovery-reload-interval", "Interval used by scrape manager to throttle target groups updates.").
 		Hidden().Default("5s").SetValue(&cfg.scrape.DiscoveryReloadInterval)
 
-	a.Flag("enable-feature", "Comma separated feature names to enable. Valid options: concurrent-rule-eval, created-timestamp-zero-ingestion, delayed-compaction, exemplar-storage, extra-scrape-metrics, histograms-st-encoding, memory-snapshot-on-shutdown, metadata-wal-records, old-ui, openmetrics2, otlp-deltatocumulative, otlp-native-delta-ingestion, promql-binop-fill-modifiers, promql-delayed-name-removal, promql-experimental-functions, promql-native-histograms-as-classic, promql-per-step-stats, promql-unquoted-utf8-names, query-cost, search-api, st-storage, st-synthesis, type-and-unit-labels, use-start-timestamps, use-uncached-io, xor2-encoding, zstd-scrape. See https://prometheus.io/docs/prometheus/latest/feature_flags/ for more details.").
+	a.Flag("enable-feature", "Comma separated feature names to enable. Valid options: columnar-prototype, concurrent-rule-eval, created-timestamp-zero-ingestion, delayed-compaction, exemplar-storage, extra-scrape-metrics, histograms-st-encoding, memory-snapshot-on-shutdown, metadata-wal-records, old-ui, openmetrics2, otlp-deltatocumulative, otlp-native-delta-ingestion, promql-binop-fill-modifiers, promql-delayed-name-removal, promql-experimental-functions, promql-native-histograms-as-classic, promql-per-step-stats, promql-unquoted-utf8-names, query-cost, search-api, st-storage, st-synthesis, type-and-unit-labels, use-start-timestamps, use-uncached-io, xor2-encoding, zstd-scrape. See https://prometheus.io/docs/prometheus/latest/feature_flags/ for more details.").
 		StringsVar(&cfg.featureList)
 
 	a.Flag("agent", "Run Prometheus in 'Agent mode'.").BoolVar(&agentMode)
@@ -984,8 +1007,30 @@ func main() {
 			cfg.tsdb.EnableMetadataWALRecords || cfg.agent.EnableMetadataWALRecords,
 			cfg.tsdb.EnableSTStorage || cfg.agent.EnableSTStorage,
 		)
-		fanoutStorage = storage.NewFanout(logger, localStorage, remoteStorage)
+
+		fanoutStorage storage.Storage
 	)
+
+	var columnarStorage *columnar.Storage
+	if cfg.enableColumnarPrototype {
+		// Open the sole prototype backend before the scrape/rule appenders are constructed.
+		// Their fanout is intentionally fixed at construction; attaching late
+		// so late attachment would bypass real ingestion entirely.
+		columnarDir := filepath.Join(localStoragePath, "columnar")
+		columnarStorage, err = columnar.NewStorage(columnarDir, columnar.StorageOptions{EnableQueryTimings: cfg.columnarQueryTimings, FlushSamples: cfg.columnarFlushSamples})
+		if err != nil {
+			logger.Error("Unable to open the experimental columnar storage", "dir", columnarDir, "err", err)
+			os.Exit(1)
+		}
+	}
+	if columnarStorage != nil {
+		localStorage.Set(columnarStorage, 0)
+	}
+	fanoutStorage = storage.NewFanout(logger, localStorage, remoteStorage)
+	queryStorage := selectQueryStorage(fanoutStorage, columnarStorage)
+	if columnarStorage != nil {
+		logger.Warn("Experimental columnar-only ingestion, WAL and reads enabled; TSDB is not started")
+	}
 
 	var (
 		ctxWeb, cancelWeb = context.WithCancel(context.Background())
@@ -1073,7 +1118,12 @@ func main() {
 			EnableNativeHistogramsAsClassic: slices.Contains(cfg.convertClassicHistogramsFrom, "nhcb"),
 			EnableQueryCost:                 cfg.enableQueryCost,
 			FeatureRegistry:                 features.DefaultRegistry,
-			Parser:                          promqlParser,
+			LabelNamerConfig: &promql.LabelNamerConfig{
+				UTF8Allowed:                 !cfgFile.OTLPConfig.TranslationStrategy.ShouldEscape(),
+				UnderscoreLabelSanitization: cfgFile.OTLPConfig.LabelNameUnderscoreSanitization,
+				PreserveMultipleUnderscores: cfgFile.OTLPConfig.LabelNamePreserveMultipleUnderscores,
+			},
+			Parser: promqlParser,
 		}
 
 		queryEngine = promql.NewEngine(opts)
@@ -1081,8 +1131,8 @@ func main() {
 		ruleManager = rules.NewManager(&rules.ManagerOptions{
 			NameValidationScheme:   cfgFile.GlobalConfig.MetricNameValidationScheme,
 			AppendableV2:           fanoutStorage,
-			Queryable:              localStorage,
-			QueryFunc:              rules.EngineQueryFunc(queryEngine, fanoutStorage),
+			Queryable:              queryStorage,
+			QueryFunc:              rules.EngineQueryFunc(queryEngine, queryStorage),
 			NotifyFunc:             rules.SendAlerts(notifierManager, cfg.web.ExternalURL.String()),
 			Context:                ctxRule,
 			ExternalURL:            cfg.web.ExternalURL,
@@ -1110,8 +1160,9 @@ func main() {
 	cfg.web.TSDBMaxBytes = cfg.tsdb.MaxBytes
 	cfg.web.TSDBMaxPercentage = cfg.tsdb.MaxPercentage
 	cfg.web.TSDBDir = localStoragePath
-	cfg.web.LocalStorage = localStorage
+	cfg.web.LocalStorage = localStorage.localStorage()
 	cfg.web.Storage = fanoutStorage
+	cfg.web.QueryStorage = queryStorage
 	cfg.web.ExemplarStorage = localStorage
 	cfg.web.QueryEngine = queryEngine
 	cfg.web.ScrapeManager = scrapeManager
@@ -1316,6 +1367,86 @@ func main() {
 		os.Exit(1)
 	}
 
+	var (
+		columnarServer   *http.Server
+		columnarListener net.Listener
+	)
+	if cfg.enableColumnarPrototype {
+		mux := http.NewServeMux()
+		metadataHandler := columnar.NewMetadataHandler(columnarStorage, logger.With("component", "columnar-metadata"))
+		mux.Handle("/resources", metadataHandler)
+		mux.Handle("/resources/series", metadataHandler)
+		mux.Handle("/resources/diff", metadataHandler)
+		mux.Handle("/debug/readstats", columnar.NewReadStatsHandler(columnarStorage))
+		mux.Handle("/arrow", columnar.NewArrowHandler(columnarStorage, logger.With("component", "columnar"), columnar.ArrowOptions{}))
+		mux.Handle("/query_range", columnar.NewQueryHandler(queryEngine, columnarStorage, logger.With("component", "columnar")))
+
+		columnarListener, err = net.Listen("tcp", cfg.columnarAddress)
+		if err != nil {
+			logger.Error("Unable to start the experimental columnar listener", "address", cfg.columnarAddress, "err", err)
+			os.Exit(1)
+		}
+		columnarServer = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	}
+
+	var (
+		otapListener net.Listener
+		otapServer   *grpc.Server
+	)
+	if cfg.web.EnableOTAPReceiver {
+		otapListenAddress := cfgFile.OTAPConfig.ListenAddress
+		otapListener, err = net.Listen("tcp", otapListenAddress)
+		if err != nil {
+			logger.Error("Unable to start OTAP listener", "address", otapListenAddress, "err", err)
+			os.Exit(1)
+		}
+
+		// The OTLP translation settings are read per batch, so the OTAP receiver has
+		// to observe config reloads the same way the OTLP receiver does. Only the
+		// listen address is read once, at startup.
+		liveConfig := atomic.NewPointer[config.Config](cfgFile)
+		reloaders = append(reloaders, reloader{
+			name: "otap_receiver",
+			reloader: func(c *config.Config) error {
+				liveConfig.Store(c)
+				if addr := c.OTAPConfig.ListenAddress; addr != otapListenAddress {
+					logger.Warn("Ignoring otap.listen_address change, restart Prometheus to move the OTAP receiver",
+						"running", otapListenAddress, "configured", addr)
+				}
+				return nil
+			},
+		})
+
+		consumer, recordSink := otapIngestionRoutes(
+			columnarStorage, logger, liveConfig, time.Duration(cfg.lookbackDelta), cfg.scrape.EnableTypeAndUnitLabels,
+			func() consumer.Metrics {
+				return remote.NewMetricsConsumer(
+					logger.With("component", "otap_receiver"),
+					prometheus.DefaultRegisterer,
+					localStorage,
+					func() config.Config { return *liveConfig.Load() },
+					remote.OTLPOptions{
+						ConvertDelta:            cfg.web.ConvertOTLPDelta,
+						NativeDelta:             cfg.web.NativeOTLPDeltaIngestion,
+						LookbackDelta:           time.Duration(cfg.lookbackDelta),
+						EnableTypeAndUnitLabels: cfg.scrape.EnableTypeAndUnitLabels,
+					},
+				)
+			},
+		)
+		otapServer = otap.NewGRPCServer(
+			logger.With("component", "otap_receiver"),
+			prometheus.DefaultRegisterer,
+			consumer,
+			otap.ServerOptions{ReceiverOptions: otap.ReceiverOptions{RecordSink: recordSink}},
+		)
+	}
+
+	if cfg.enableColumnarPrototype {
+		// There is no TSDB open operation in prototype mode. Publish its equivalent
+		// backend-open/readiness signal instead of waiting forever.
+		close(dbOpen)
+	}
 	var g run.Group
 	{
 		// Termination handler.
@@ -1541,8 +1672,8 @@ func main() {
 			},
 		)
 	}
-	if !agentMode {
-		// TSDB.
+	if !agentMode && !cfg.enableColumnarPrototype {
+		// Ordinary Prometheus uses TSDB; columnar-only mode owns storage itself.
 		opts := cfg.tsdb.ToTSDBOptions()
 		cancel := make(chan struct{})
 		g.Add(
@@ -1680,6 +1811,58 @@ func main() {
 		)
 	}
 	{
+		// Experimental columnar prototype endpoint.
+		if columnarServer != nil {
+			g.Add(
+				func() error {
+					logger.Info("Starting experimental columnar Arrow endpoint", "address", columnarListener.Addr().String())
+					if err := columnarServer.Serve(columnarListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+						return fmt.Errorf("error serving the columnar endpoint: %w", err)
+					}
+					return nil
+				},
+				func(error) {
+					logger.Info("Stopping columnar endpoint...")
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = columnarServer.Shutdown(shutdownCtx)
+					if columnarStorage != nil {
+						_ = columnarStorage.Close()
+					}
+				},
+			)
+		}
+	}
+	{
+		// Experimental OTAP receiver.
+		if otapServer != nil {
+			g.Add(
+				func() error {
+					logger.Info("Starting experimental OTAP receiver", "address", otapListener.Addr().String())
+					if err := otapServer.Serve(otapListener); err != nil {
+						return fmt.Errorf("error serving OTAP receiver: %w", err)
+					}
+					return nil
+				},
+				func(error) {
+					logger.Info("Stopping OTAP receiver...")
+					// GracefulStop waits for all streams to finish, which a client can
+					// delay indefinitely, so bound the wait and drop the rest.
+					done := make(chan struct{})
+					go func() {
+						otapServer.GracefulStop()
+						close(done)
+					}()
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						otapServer.Stop()
+					}
+				},
+			)
+		}
+	}
+	{
 		// Notifier.
 
 		// Calling notifier.Stop() before ruleManager.Stop() will cause a panic if the ruleManager isn't running,
@@ -1709,6 +1892,71 @@ func main() {
 		}
 	}()
 	logger.Info("See you next time!")
+}
+
+// selectQueryStorage selects the direct prototype store unless explicitly
+// disabled or absent. It never changes the primary ingestion fanout.
+func selectQueryStorage(primary storage.Storage, candidate *columnar.Storage) storage.Storage {
+	if candidate != nil {
+		return candidate
+	}
+	return primary
+}
+
+// otapIngestionRoutes returns the OTAP receiver's single ingestion route: the native
+// record sink when the columnar prototype is on, otherwise the ordinary OTLP
+// consumer. Exactly one of the two results is non-nil.
+//
+// Two routes to the same store are not two independent appends: the native sink
+// carries the OTLP Resource identity label and the OTLP translator does not, so the
+// same logical sample becomes two different series and neither append is rejected.
+// Running both therefore doubles every batch silently, which makes any receiver
+// measurement a double-ingest and any query over the result ambiguous. The consumer
+// constructor is a function so the unused route registers no metrics and does no
+// other setup.
+//
+// The native route converts only the NumberDataPoints payloads it supports. A batch
+// that carries histograms, summaries, exponential histograms, data point exemplars or
+// a data point row it cannot attribute is rejected as a whole, and the client sees a
+// failed acknowledgement instead of a silent partial store. That limitation belongs
+// to the sink and is reported by it; it is not repaired by attaching a second route
+// that would duplicate every float sample in the batch.
+func otapIngestionRoutes(
+	columnarStorage *columnar.Storage,
+	logger *slog.Logger,
+	liveConfig *atomic.Pointer[config.Config],
+	lookbackDelta time.Duration,
+	enableTypeAndUnitLabels bool,
+	otlpConsumer func() consumer.Metrics,
+) (consumer.Metrics, otap.RecordSink) {
+	if sink := columnarRecordSink(columnarStorage, logger, liveConfig, lookbackDelta, enableTypeAndUnitLabels); sink != nil {
+		return nil, sink
+	}
+	return otlpConsumer(), nil
+}
+
+// columnarRecordSink returns the OTAP record sink for the columnar prototype, or
+// nil when the prototype is disabled.
+func columnarRecordSink(storage *columnar.Storage, logger *slog.Logger, liveConfig *atomic.Pointer[config.Config], lookbackDelta time.Duration, enableTypeAndUnitLabels bool) otap.RecordSink {
+	if storage == nil {
+		return nil
+	}
+	return columnar.NewOTAPSink(storage, logger.With("component", "columnar"), func() otlpprw.Settings {
+		otlpConfig := liveConfig.Load().OTLPConfig
+		return otlpprw.Settings{
+			AddMetricSuffixes:                    otlpConfig.TranslationStrategy.ShouldAddSuffixes(),
+			AllowUTF8:                            !otlpConfig.TranslationStrategy.ShouldEscape(),
+			PromoteResourceAttributes:            otlpprw.NewPromoteResourceAttributes(otlpConfig),
+			KeepIdentifyingResourceAttributes:    otlpConfig.KeepIdentifyingResourceAttributes,
+			ConvertHistogramsToNHCB:              otlpConfig.ConvertHistogramsToNHCB,
+			PromoteScopeMetadata:                 otlpConfig.PromoteScopeMetadata,
+			AllowDeltaTemporality:                true,
+			LookbackDelta:                        lookbackDelta,
+			EnableTypeAndUnitLabels:              enableTypeAndUnitLabels,
+			LabelNameUnderscoreSanitization:      otlpConfig.LabelNameUnderscoreSanitization,
+			LabelNamePreserveMultipleUnderscores: otlpConfig.LabelNamePreserveMultipleUnderscores,
+		}
+	})
 }
 
 func openDBWithMetrics(dir string, logger *slog.Logger, reg prometheus.Registerer, opts *tsdb.Options, stats *tsdb.DBStats) (*tsdb.DB, error) {
@@ -1963,6 +2211,15 @@ func (s *readyStorage) getStats() *tsdb.DBStats {
 	return x
 }
 
+// localStorage supplies a truthful admin adapter when the delegate is the
+// columnar prototype. Ordinary TSDB and agent modes retain readyStorage.
+func (s *readyStorage) localStorage() web.LocalStorage {
+	if delegate, ok := s.get().(*columnar.Storage); ok {
+		return &columnarLocalStorage{Storage: delegate}
+	}
+	return s
+}
+
 // StartTime implements the Storage interface.
 func (s *readyStorage) StartTime() (int64, error) {
 	if x := s.get(); x != nil {
@@ -1979,7 +2236,7 @@ func (s *readyStorage) StartTime() (int64, error) {
 		case *agent.DB:
 			return db.StartTime()
 		default:
-			panic(fmt.Sprintf("unknown storage type %T", db))
+			return x.StartTime()
 		}
 	}
 
@@ -2019,7 +2276,7 @@ func (s *readyStorage) ExemplarQuerier(ctx context.Context) (storage.ExemplarQue
 		case *agent.DB:
 			return nil, agent.ErrUnsupported
 		default:
-			panic(fmt.Sprintf("unknown storage type %T", db))
+			return nil, agent.ErrUnsupported
 		}
 	}
 	return nil, tsdb.ErrNotReady

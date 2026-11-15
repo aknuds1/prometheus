@@ -489,6 +489,8 @@ type chainSampleIterator struct {
 	// Whether the previous and the current sample are direct neighbors
 	// within the same base iterator.
 	consecutive bool
+
+	batch SampleBatch
 }
 
 // Return a chainSampleIterator initialized for length entries, re-using the memory from it if possible.
@@ -530,6 +532,7 @@ func ChainSampleIteratorFromIterators(it chunkenc.Iterator, iterators []chunkenc
 }
 
 func (c *chainSampleIterator) Seek(t int64) chunkenc.ValueType {
+	c.batch = SampleBatch{}
 	// No-op check.
 	if c.curr != nil && c.lastT >= t {
 		return c.curr.Seek(c.lastT)
@@ -690,6 +693,62 @@ func (c *chainSampleIterator) Next() chunkenc.ValueType {
 	c.lastT = currT
 	return currValueType
 }
+
+// NextBatch materializes merged samples through the authoritative scalar merge
+// state machine. It does not bypass duplicate removal or reset-hint adjustment.
+func (c *chainSampleIterator) NextBatch(maxSamples int) bool {
+	c.batch = SampleBatch{
+		Timestamps: c.batch.Timestamps[:0], StartTimestamps: c.batch.StartTimestamps[:0],
+		Values: c.batch.Values[:0], Histograms: c.batch.Histograms[:0], FloatHistograms: c.batch.FloatHistograms[:0],
+	}
+	for maxSamples <= 0 || c.batch.Len() < maxSamples {
+		switch c.Next() {
+		case chunkenc.ValFloat:
+			t, f := c.At()
+			c.batch.Timestamps = append(c.batch.Timestamps, t)
+			c.batch.Values = append(c.batch.Values, f)
+			c.batch.StartTimestamps = append(c.batch.StartTimestamps, c.AtST())
+			if c.batch.Histograms != nil {
+				c.batch.Histograms = append(c.batch.Histograms, nil)
+			}
+			if c.batch.FloatHistograms != nil {
+				c.batch.FloatHistograms = append(c.batch.FloatHistograms, nil)
+			}
+		case chunkenc.ValHistogram:
+			t, h := c.AtHistogram(nil)
+			c.batch.Timestamps = append(c.batch.Timestamps, t)
+			c.batch.Values = append(c.batch.Values, 0)
+			c.batch.StartTimestamps = append(c.batch.StartTimestamps, c.AtST())
+			if c.batch.Histograms == nil {
+				c.batch.Histograms = make([]*histogram.Histogram, c.batch.Len()-1)
+			}
+			c.batch.Histograms = append(c.batch.Histograms, h)
+			if c.batch.FloatHistograms != nil {
+				c.batch.FloatHistograms = append(c.batch.FloatHistograms, nil)
+			}
+		case chunkenc.ValFloatHistogram:
+			t, fh := c.AtFloatHistogram(nil)
+			c.batch.Timestamps = append(c.batch.Timestamps, t)
+			c.batch.Values = append(c.batch.Values, 0)
+			c.batch.StartTimestamps = append(c.batch.StartTimestamps, c.AtST())
+			if c.batch.FloatHistograms == nil {
+				c.batch.FloatHistograms = make([]*histogram.FloatHistogram, c.batch.Len()-1)
+			}
+			c.batch.FloatHistograms = append(c.batch.FloatHistograms, fh)
+			if c.batch.Histograms != nil {
+				c.batch.Histograms = append(c.batch.Histograms, nil)
+			}
+		case chunkenc.ValNone:
+			return c.batch.Len() > 0
+		default:
+			return false
+		}
+	}
+	return c.batch.Len() > 0
+}
+
+// Batch returns the currently materialized merged sample batch.
+func (c *chainSampleIterator) Batch() SampleBatch { return c.batch }
 
 func (c *chainSampleIterator) Err() error {
 	var errs []error
