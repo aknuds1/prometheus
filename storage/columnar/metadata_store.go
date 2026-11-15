@@ -159,11 +159,28 @@ func (s *metadataStore) copyOwnerForWrite(owner OwnerKey, history *metadataOwner
 		w.ownerCOPIndexEntries += len(history.index)
 	}
 	copied := *history
-	copied.versions = slices.Clone(history.versions)
+	copied.versions = cloneVersionsForOwnerWrite(history.versions)
 	copied.index = maps.Clone(history.index)
 	copied.copyTouched = true
 	s.byOwner[owner] = &copied
 	return &copied
+}
+
+// cloneVersionsForOwnerWrite copies an owner's version slice for a cloned
+// transaction and keeps exactly one spare slot for that transaction's first
+// insertion. A plain clone has capacity equal to its length, so the first
+// insert would allocate and copy the retained slice again. Only the first COW
+// copy of an owner in a transaction reaches this helper, and the spare slot is
+// consumed by at most one insertion; it is never shared with the published
+// slice. A nil slice stays nil, and the copied Version values share their
+// immutable content exactly as a plain slice clone does.
+func cloneVersionsForOwnerWrite(versions []Version) []Version {
+	if versions == nil {
+		return nil
+	}
+	cloned := make([]Version, len(versions), len(versions)+1)
+	copy(cloned, versions)
+	return cloned
 }
 
 func (s *metadataStore) copyMembershipForWrite(seriesHash uint64, kind MetadataKind, w *metadataWork) {
