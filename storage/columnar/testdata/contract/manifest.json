@@ -1,0 +1,947 @@
+{
+  "obligations": [
+    {
+      "id": "fixed-case-1",
+      "group": "fixed-case",
+      "title": "Otherwise identical streams differing in one Resource, Scope, metric property or point attribute remain distinct",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/otap_identity_semantics_test.go",
+          "test": "TestNativeMetadataIdentityReferenceDeltas"
+        },
+        {
+          "path": "storage/columnar/ordinary_metadata_test.go",
+          "test": "TestOrdinaryOTLPLogicalState"
+        },
+        {
+          "path": "storage/columnar/otap_native_test.go",
+          "test": "TestOTAPSinkResourceIdentityAndDescriptiveVersions"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "One-dimension-at-a-time distinctions are asserted through the native and ordinary receiver routes. A native non-label identity dimension and Entity-based identity remain decision 1."
+    },
+    {
+      "id": "fixed-case-2",
+      "group": "fixed-case",
+      "title": "Forced series/content candidate-hash collisions are rejected or disambiguated by complete labels/content and never merged",
+      "status": "unsupported",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Complete-label collision guards exist (sharedSeriesLabels and associateWithHistory return ErrSeriesHashCollision), but a 64-bit labels.StableHash collision cannot be constructed from a test without a production injection point. N0 records the guard as untestable rather than adding production code or claiming coverage from reading it."
+    },
+    {
+      "id": "fixed-case-3",
+      "group": "fixed-case",
+      "title": "One descriptive Resource change shared by 10,000 member series creates one owner version and no membership changes",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataSharingWithManySeries"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "The members_10000 subtest asserts one version for the change, an unchanged membership start for every member, and the pre/post content band."
+    },
+    {
+      "id": "fixed-case-4",
+      "group": "fixed-case",
+      "title": "A/B/A at successive effective times returns exactly those bands, and backfilled observations do not move validity successors",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataTemporalBoundaries"
+        },
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataBackfillCoalescesChangePoints"
+        }
+      ],
+      "fixtures": [
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [],
+      "note": "The fixture probes info() immediately before and at each boundary and asserts that a backfilled observation of the active content extends observation bounds without inserting a version or moving the successor."
+    },
+    {
+      "id": "fixed-case-5",
+      "group": "fixed-case",
+      "title": "A matching content version and membership overlapping disjoint parts of a query range return no series",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/contract_oracle_test.go",
+          "test": "TestContractFixtures"
+        }
+      ],
+      "fixtures": [
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [],
+      "note": "The scrape-owner case has a series whose job-a membership is [2500,2800) and whose matching 15s versions are [1000,2000) and [3000,inf). The query [1000,3000] overlaps each of them but not jointly, so the series is absent, while its sibling memberships are reported."
+    },
+    {
+      "id": "fixed-case-6",
+      "group": "fixed-case",
+      "title": "A valid metadata prefix followed by a conflict publishes no samples, metadata, index prefix, WAL prefix or committed counters",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_observation_test.go",
+          "test": "TestMetadataObservationConflictsLeaveNoState"
+        },
+        {
+          "path": "storage/columnar/metadata_observation_test.go",
+          "test": "TestNativeMetadataObservationRejectedBatchIngestsNothing"
+        }
+      ],
+      "fixtures": [
+        "rollback_conflict"
+      ],
+      "decisions": [],
+      "note": "The fixture batches a valid new association, a conflicting owner version and a sample, then asserts the error class, the unchanged complete state, unchanged committed-work counters and an unchanged WAL segment count."
+    },
+    {
+      "id": "fixed-case-7",
+      "group": "fixed-case",
+      "title": "Owner-only and observation-bound publication produces exact metadata, no fabricated samples and zero sample-payload reads",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/restart_test.go",
+          "test": "TestWALReplaysSamplesAndOwnerOnlyMetadata"
+        },
+        {
+          "path": "storage/columnar/metadata_observation_test.go",
+          "test": "TestNativeMetadataObservationBounds"
+        }
+      ],
+      "fixtures": [
+        "owner_only_publication"
+      ],
+      "decisions": [],
+      "note": "The fixture publishes an unchanged observation and a changed one against a block-backed store, asserts the exact owner history, committed-work counters, that no sample series or sample time coverage appears, and that the metadata-only read opens no sample payload."
+    },
+    {
+      "id": "fixed-case-8",
+      "group": "fixed-case",
+      "title": "WAL replay, flush/reopen, compaction/reopen, retention and metadata-only replay retain exactly the specified state or an explicit truncation state",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/restart_test.go",
+          "test": "TestRestartRestoresBlocksAndMetadata"
+        },
+        {
+          "path": "storage/columnar/restart_test.go",
+          "test": "TestWALReplaysSamplesAndOwnerOnlyMetadata"
+        },
+        {
+          "path": "storage/columnar/restart_test.go",
+          "test": "TestPublishedBlockSkipsStaleWALSegment"
+        },
+        {
+          "path": "storage/columnar/lifecycle_ops_test.go",
+          "test": "TestCompactPublishesAndPreservesMetadata"
+        },
+        {
+          "path": "storage/columnar/lifecycle_ops_test.go",
+          "test": "TestRetentionWholeBlocksOOOAndRestartSemantics"
+        },
+        {
+          "path": "storage/columnar/lifecycle_ops_test.go",
+          "test": "TestRetentionCollectsChurnOwnersWithinVersionCap"
+        }
+      ],
+      "fixtures": [
+        "float_bits_across_routes",
+        "start_timestamps_columnar"
+      ],
+      "decisions": [],
+      "note": "The float fixture compares the same query before flush, after flush and after reopen on the columnar route and on stock TSDB. Retention truncation is asserted as an explicit Truncated bit, not as expired validity."
+    },
+    {
+      "id": "fixed-case-9",
+      "group": "fixed-case",
+      "title": "Enrichment uses the applicable band, preserves unassociated series, honours explicit filters and never duplicates a series through ownership transitions",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_info_test.go",
+          "test": "TestInfoUsesTemporalResourceMetadata"
+        },
+        {
+          "path": "storage/columnar/metadata_info_test.go",
+          "test": "TestInfoFallsBackToTargetInfoWithoutResourceAssociation"
+        }
+      ],
+      "fixtures": [
+        "kubernetes_node_and_rollout_totals",
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [],
+      "note": "Both fixtures assert complete vector results at each boundary, that an unassociated series survives an unfiltered aggregation, and that a filtered aggregation selects only matching series without multiplying an input."
+    },
+    {
+      "id": "fixed-case-10",
+      "group": "fixed-case",
+      "title": "Filtered candidates, intermediate cursors, exact-full/final/empty pages, latest/projection views and sibling pagers produce complete expected sequences without repeats or omissions",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_owner_pagination_test.go",
+          "test": "TestQueryMetadataOwnerPagination"
+        },
+        {
+          "path": "storage/columnar/metadata_owner_pagination_test.go",
+          "test": "TestQueryMetadataOwnerPaginationIntermediateCursor"
+        },
+        {
+          "path": "storage/columnar/metadata_owner_pagination_test.go",
+          "test": "TestQueryMetadataOwnerPaginationLastRetainedOwner"
+        },
+        {
+          "path": "storage/columnar/metadata_owner_pagination_test.go",
+          "test": "TestQueryMetadataOwnerPaginationEmptyAndFinal"
+        },
+        {
+          "path": "storage/columnar/metadata_owner_pagination_test.go",
+          "test": "TestQueryMetadataOwnerPaginationLatestAndProjectionKeepSequencing"
+        }
+      ],
+      "fixtures": [
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [
+        "7"
+      ],
+      "note": "The selected isolation contract is the current positional owner/row cursor, and only that contract is asserted. Snapshot isolation across pages is decision 7 and is recorded as blocked rather than assumed."
+    },
+    {
+      "id": "fixed-case-11",
+      "group": "fixed-case",
+      "title": "Equivalent OTLP and OTAP inputs produce the same target-native state and a separately specified legacy view; resets, retries, unsupported input and negative acknowledgements create no phantom identity or exactly-once claim",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/remote/otap/equivalence_test.go",
+          "test": "TestIngestionEquivalence"
+        },
+        {
+          "path": "storage/columnar/otap_native_test.go",
+          "test": "TestOTAPSinkMatchesOTLPTranslation"
+        },
+        {
+          "path": "storage/columnar/otap_unsupported_test.go",
+          "test": "TestOTAPSinkRejectsUnsupportedPayloads"
+        },
+        {
+          "path": "storage/columnar/otap_unsupported_test.go",
+          "test": "TestOTAPSinkRollsBackWithinOneMixedBatch"
+        },
+        {
+          "path": "cmd/prometheus/otap_routing_test.go",
+          "test": "TestOTAPReceiverColumnarRouteExclusive"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Equivalence covers stored samples and metric metadata; the legacy target_info projection is asserted separately by the ordinary-route tests. A transport acknowledgement is explicitly not an exactly-once claim, and no retry-duplication test asserts otherwise."
+    },
+    {
+      "id": "fixed-case-12",
+      "group": "fixed-case",
+      "title": "Kubernetes node totals, rollout totals, unattributed series, same-name/different-UID objects and unresolved conflicts equal the hand-authored results",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/contract_oracle_test.go",
+          "test": "TestContractFixtures"
+        }
+      ],
+      "fixtures": [
+        "kubernetes_node_and_rollout_totals"
+      ],
+      "decisions": [
+        "4"
+      ],
+      "note": "Node A gives 100+200 MiB = 300 MiB under an explicit node filter and 350 MiB unfiltered with the unattributed 50 MiB series retained; old 0.2 + new 0.3 cores = 0.5 with each input counted once. How a plain scrape acquires the association (decision 4) and how same-name/different-UID objects are identified without an explicit distinguishing attribute (decision 1) are not asserted."
+    },
+    {
+      "id": "fixed-case-13",
+      "group": "fixed-case",
+      "title": "Floats including signed zero and NaN bit patterns, integer and float native histograms, start timestamps, staleness and exemplars survive each supported route and lifecycle operation",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/contract_oracle_test.go",
+          "test": "TestContractFixtures"
+        }
+      ],
+      "fixtures": [
+        "float_bits_across_routes",
+        "start_timestamps_columnar"
+      ],
+      "decisions": [],
+      "note": "Exact bits, histograms and staleness are compared on the columnar and stock TSDB routes and again after flush and reopen; per-sample start timestamps are asserted on the columnar route only because stock TSDB with default options does not retain them (route-difference-stock-start-timestamps). Exemplar persistence is a separate unsupported capability (gap-exemplars), so this obligation does not claim it."
+    },
+    {
+      "id": "invariant-1",
+      "group": "invariant",
+      "title": "Resource, Scope, metric properties and point attributes survive until authoritative stream resolution",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/otap_identity_semantics_test.go",
+          "test": "TestNativeMetadataIdentityReferenceDeltas"
+        },
+        {
+          "path": "storage/remote/otap/equivalence_test.go",
+          "test": "TestIngestionEquivalence"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": ""
+    },
+    {
+      "id": "invariant-2",
+      "group": "invariant",
+      "title": "Complete labels and complete typed content are authoritative after candidate lookup",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/native_association_parity_test.go",
+          "test": "TestNativeAssociationCompleteState"
+        },
+        {
+          "path": "storage/columnar/catalog_test.go",
+          "test": "TestStableSeriesHashSharesMetadataIdentity"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Typed content beyond strings is not represented at all: see gap-typed-content."
+    },
+    {
+      "id": "invariant-3",
+      "group": "invariant",
+      "title": "OTAP batch/table IDs, dictionaries, temporal batches and acknowledgements are not durable identities and provide no exactly-once delivery",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/otap_identity_semantics_test.go",
+          "test": "TestNativeMetadataIdentityReferenceDeltas"
+        },
+        {
+          "path": "storage/columnar/otap_identity_reference_test.go",
+          "test": "TestNativeMetadataIdentityReferenceDecodeOrder"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Dictionary and reference deltas are exercised; no test claims exactly-once delivery."
+    },
+    {
+      "id": "invariant-4",
+      "group": "invariant",
+      "title": "Metadata domains and per-series histories remain independent rather than one family-global history",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataKindsAreNotResourceLabels"
+        },
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetricKindUsesPerSeriesLifecycle"
+        },
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataResourceSchemaIsScoped"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": ""
+    },
+    {
+      "id": "invariant-5",
+      "group": "invariant",
+      "title": "EffectiveFrom is inclusive and actual successors end predecessor validity exclusively",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataTemporalBoundaries"
+        }
+      ],
+      "fixtures": [
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [],
+      "note": ""
+    },
+    {
+      "id": "invariant-6",
+      "group": "invariant",
+      "title": "Observation bounds do not imply expiry or prove exact history over discarded or ambiguous observations",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_observation_test.go",
+          "test": "TestNativeMetadataObservationBounds"
+        }
+      ],
+      "fixtures": [
+        "owner_only_publication"
+      ],
+      "decisions": [],
+      "note": "Truncation is reported as an explicit bit; observation bounds never become validity bounds."
+    },
+    {
+      "id": "invariant-7",
+      "group": "invariant",
+      "title": "Same-time content and membership conflicts have deterministic outcomes; map order or newest-arrival selection is forbidden",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataConflictingContentRejected"
+        },
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataMembershipChanges"
+        }
+      ],
+      "fixtures": [
+        "rollback_conflict"
+      ],
+      "decisions": [
+        "2"
+      ],
+      "note": "Deterministic rejection is asserted. Whether a conflict should instead retain samples with an unresolved association is decision 2 and is not answered."
+    },
+    {
+      "id": "invariant-8",
+      "group": "invariant",
+      "title": "Rejected transactions publish no samples, metadata, index prefix, WAL prefix or committed-work counters",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_observation_test.go",
+          "test": "TestMetadataObservationConflictsLeaveNoState"
+        }
+      ],
+      "fixtures": [
+        "rollback_conflict"
+      ],
+      "decisions": [],
+      "note": ""
+    },
+    {
+      "id": "invariant-9",
+      "group": "invariant",
+      "title": "Metadata-only publication creates no samples or sample time coverage",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/restart_test.go",
+          "test": "TestWALReplaysSamplesAndOwnerOnlyMetadata"
+        }
+      ],
+      "fixtures": [
+        "owner_only_publication"
+      ],
+      "decisions": [],
+      "note": ""
+    },
+    {
+      "id": "invariant-10",
+      "group": "invariant",
+      "title": "Existing queries and vector matching ignore metadata by default; deliberate promotion appears only in final label-visible output",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/native_association_parity_test.go",
+          "test": "TestNativeAssociationCompleteState"
+        },
+        {
+          "path": "storage/columnar/conformance_test.go",
+          "test": "TestBuiltinConformance"
+        },
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataKindsAreNotResourceLabels"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Plain selectors and the built-in PromQL suite run over a store that holds metadata without any metadata label appearing."
+    },
+    {
+      "id": "invariant-11",
+      "group": "invariant",
+      "title": "Unassociated series survive enrichment, enrichment contributes each input series at most once, and conflicting associations remain unresolved",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_info_test.go",
+          "test": "TestInfoFallsBackToTargetInfoWithoutResourceAssociation"
+        }
+      ],
+      "fixtures": [
+        "kubernetes_node_and_rollout_totals"
+      ],
+      "decisions": [
+        "2"
+      ],
+      "note": "Survival and single contribution are asserted exactly. The unresolved-conflict clause is decision 2: the store currently rejects a contradictory same-time association instead of retaining it unresolved."
+    },
+    {
+      "id": "invariant-12",
+      "group": "invariant",
+      "title": "Reverse queries validate a common overlap of content validity, association validity and query range before reading samples",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/contract_oracle_test.go",
+          "test": "TestContractFixtures"
+        }
+      ],
+      "fixtures": [
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [],
+      "note": "The disjoint-member series is absent while its neighbours are reported, and the reverse queries assert zero sample-payload opens."
+    },
+    {
+      "id": "invariant-13",
+      "group": "invariant",
+      "title": "Metadata-only and irrelevant-pruned paths open zero sample payloads",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/stage0_query_test.go",
+          "test": "TestStage0PhysicalWork"
+        }
+      ],
+      "fixtures": [
+        "owner_only_publication",
+        "kubernetes_node_and_rollout_totals"
+      ],
+      "decisions": [],
+      "note": "The fixtures assert SamplePayloadOpens and SegmentsRead are zero for metadata-only reads of a block-backed store."
+    },
+    {
+      "id": "invariant-14",
+      "group": "invariant",
+      "title": "Buffers, arrays, maps and content have documented owners, borrow/copy rules, release points and bounded cache/pool budgets at the interface definitions",
+      "status": "unsupported",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "9"
+      ],
+      "note": "Ownership is documented only in places (Content.Clone, BatchSeries comments); there is no bounded cache/pool budget and no lifetime test. Admission and truncation budgets are decision 9."
+    },
+    {
+      "id": "invariant-15",
+      "group": "invariant",
+      "title": "Local bounded mutable state feeds immutable parts through atomic visibility, with explicit replay and retention behaviour",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_query_entry_test.go",
+          "test": "TestMetadataQueryEntryConcurrentPublication"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Race-detector coverage is limited to the interleavings executed by the suite; no claim is made about untested schedules."
+    },
+    {
+      "id": "invariant-16",
+      "group": "invariant",
+      "title": "tmpfs/WAL-off measurements are not physical-disk durability or sustainable-throughput evidence",
+      "status": "recorded",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "10"
+      ],
+      "note": "This is a reporting rule for any future measurement, not an executable assertion. N0 runs no timing work."
+    },
+    {
+      "id": "invariant-17",
+      "group": "invariant",
+      "title": "Prometheus does not inherit distributed transactions, replication, tenant placement or a metadata RPC to satisfy external installations' scale",
+      "status": "recorded",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [],
+      "note": "An architecture-scope rule recorded for review; nothing in N0 adds distribution."
+    },
+    {
+      "id": "route-scrape",
+      "group": "route",
+      "title": "The scrape append route reaches the columnar store",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/scrape_concurrency_test.go",
+          "test": "TestConcurrentScalarAppendersShareCommittedTail"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Concurrent scalar appenders are the scrape-shaped path; N0 adds no scrape loop of its own."
+    },
+    {
+      "id": "route-ordinary-otlp",
+      "group": "route",
+      "title": "The ordinary OTLP receiver route reaches the columnar store with its legacy projection",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/ordinary_metadata_test.go",
+          "test": "TestOrdinaryOTLPLogicalState"
+        },
+        {
+          "path": "storage/columnar/ordinary_metadata_test.go",
+          "test": "TestOrdinaryOTLPMetadataQueries"
+        },
+        {
+          "path": "cmd/prometheus/otap_routing_test.go",
+          "test": "TestOTAPReceiverOrdinaryOTLPRouteStoresHistogram"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "The legacy target_info view is asserted separately from the native metadata state."
+    },
+    {
+      "id": "route-native-otap",
+      "group": "route",
+      "title": "The native OTAP receiver route reaches the columnar store",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/otap_native_test.go",
+          "test": "TestOTAPSinkCapturesNativeMetadata"
+        },
+        {
+          "path": "storage/columnar/otap_native_test.go",
+          "test": "TestOTAPSinkMatchesOTLPTranslation"
+        },
+        {
+          "path": "cmd/prometheus/otap_routing_test.go",
+          "test": "TestOTAPReceiverColumnarRouteExclusive"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Unsupported payloads are rejected before storage (gap-otap-native-samples)."
+    },
+    {
+      "id": "route-metadata-http",
+      "group": "route",
+      "title": "The experimental metadata HTTP surface reaches the store",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_handler_test.go",
+          "test": "TestMetadataOwnersHTTP"
+        },
+        {
+          "path": "storage/columnar/metadata_handler_test.go",
+          "test": "TestMetadataSeriesHTTP"
+        },
+        {
+          "path": "storage/columnar/metadata_handler_test.go",
+          "test": "TestMetadataDiffHTTP"
+        }
+      ],
+      "fixtures": [
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [
+        "7"
+      ],
+      "note": "The fixture drives /resources through httptest with the real handler. Which response fields are contractual is decision 7."
+    },
+    {
+      "id": "route-promql-info",
+      "group": "route",
+      "title": "PromQL info() enrichment reaches the store through the engine",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_info_test.go",
+          "test": "TestInfoUsesTemporalResourceMetadata"
+        }
+      ],
+      "fixtures": [
+        "kubernetes_node_and_rollout_totals",
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [
+        "6"
+      ],
+      "note": "Current info() semantics only. PR99 grammar and promotion syntax are decision 6."
+    },
+    {
+      "id": "route-remote-write",
+      "group": "route",
+      "title": "Remote-write requests are demonstrated against the columnar store",
+      "status": "unsupported",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [],
+      "note": "The columnar store is installed as the local Appendable in columnar-prototype mode, and the shared append path is the one exercised by the other routes, but N0 did not execute an RW1/RW2 request against it. Reachability is not inferred from wiring."
+    },
+    {
+      "id": "route-equivalence",
+      "group": "route",
+      "title": "Identical logical samples produce identical stored state and query results on the columnar route and on stock TSDB",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/contract_oracle_test.go",
+          "test": "TestContractFixtures"
+        }
+      ],
+      "fixtures": [
+        "float_bits_across_routes"
+      ],
+      "decisions": [],
+      "note": "Bit-exact differential sample rendering across both routes, including float edge cases and native histograms. Route representation differences are recorded separately (route-difference-stock-start-timestamps)."
+    },
+    {
+      "id": "route-difference-stock-start-timestamps",
+      "group": "route-difference",
+      "title": "Stock TSDB with default options does not retain a per-sample start timestamp",
+      "status": "recorded",
+      "evidence": [],
+      "fixtures": [
+        "start_timestamps_columnar"
+      ],
+      "decisions": [],
+      "note": "tsdb.Options does not expose EnableSTStorage, so the stock route stores ST=0. The columnar route preserves it; the fixture asserts the columnar side alone instead of weakening the obligation to the legacy view."
+    },
+    {
+      "id": "gap-typed-content",
+      "group": "capability-gap",
+      "title": "Typed metadata content (booleans, integers, doubles, arrays, maps, null, unknown)",
+      "status": "unsupported",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Content.Attributes and every HTTP value are string-only. Boolean true versus the string \"true\", integer 1 versus double 1, array order, map equality and null versus absent are not representable, so no fixture may assert them."
+    },
+    {
+      "id": "gap-entity-identity",
+      "group": "capability-gap",
+      "title": "Entity-aware Resource identity and EntityRefs",
+      "status": "blocked",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "1"
+      ],
+      "note": "Resource identity is the fixed service.name/service.namespace/service.instance.id triple and EntityRefs are ignored. The target identity representation is decision 1."
+    },
+    {
+      "id": "gap-source-provenance",
+      "group": "capability-gap",
+      "title": "Source provenance chain and conflicting source claims",
+      "status": "blocked",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "5"
+      ],
+      "note": "A Source owner kind exists, but which transport/sender/producer a source names is decision 5."
+    },
+    {
+      "id": "gap-clearing-expiry",
+      "group": "capability-gap",
+      "title": "Explicit unknown, clearing and expiry semantics",
+      "status": "blocked",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "3"
+      ],
+      "note": "No producer/API operation clears content or ends membership beyond a successor version, and absent versus cleared is not distinguishable. Decision 3 owns the answer."
+    },
+    {
+      "id": "gap-conflict-resolution",
+      "group": "capability-gap",
+      "title": "Retaining a conflicting association as explicitly unresolved",
+      "status": "blocked",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "2"
+      ],
+      "note": "The store rejects contradictory same-time claims. Whether that is the target policy, and what replay must then do, is decision 2."
+    },
+    {
+      "id": "gap-k8s-acquisition",
+      "group": "capability-gap",
+      "title": "Collection-time Kubernetes association acquisition and partial-description reconciliation",
+      "status": "blocked",
+      "evidence": [],
+      "fixtures": [
+        "kubernetes_node_and_rollout_totals"
+      ],
+      "decisions": [
+        "4"
+      ],
+      "note": "The arithmetic is settled and asserted with explicit associations; how a plain scrape or a collector supplies them, and whether partial descriptions merge, is decision 4."
+    },
+    {
+      "id": "gap-otap-native-samples",
+      "group": "capability-gap",
+      "title": "Native OTAP histograms, summaries and exemplars",
+      "status": "unsupported",
+      "evidence": [
+        {
+          "path": "storage/columnar/otap_unsupported_test.go",
+          "test": "TestOTAPSinkRejectsUnsupportedPayloads"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "The native sink converts number data points only and rejects the rest before storage rather than dropping them silently. Widening it is production work outside N0."
+    },
+    {
+      "id": "gap-exemplars",
+      "group": "capability-gap",
+      "title": "Exemplar persistence",
+      "status": "unsupported",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [],
+      "note": "appender.AppendExemplar accepts and discards exemplars, and the native OTAP route rejects them. No fixture asserts exemplar storage."
+    },
+    {
+      "id": "gap-info-band-execution",
+      "group": "capability-gap",
+      "title": "Validity-band info() execution",
+      "status": "unsupported",
+      "evidence": [],
+      "fixtures": [
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [],
+      "note": "info() resolves metadata per evaluation instant rather than once per stable band. The observable results at each boundary are correct and asserted; this entry records the mechanism gap without claiming a performance result."
+    },
+    {
+      "id": "gap-snapshot-cursor",
+      "group": "capability-gap",
+      "title": "Snapshot-isolated metadata pagination",
+      "status": "blocked",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_owner_pagination_test.go",
+          "test": "TestQueryMetadataOwnerPagination"
+        }
+      ],
+      "fixtures": [
+        "temporal_bands_and_disjoint_overlap"
+      ],
+      "decisions": [
+        "7"
+      ],
+      "note": "The current cursor is a positional owner/row key, not a snapshot or retained iterator. Decision 7 owns the snapshot contract."
+    },
+    {
+      "id": "gap-typed-http-values",
+      "group": "capability-gap",
+      "title": "Contractual typed JSON values in metadata HTTP responses",
+      "status": "blocked",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "7"
+      ],
+      "note": "Every value is a JSON string and the experimental envelope is not contractual. Decision 7 owns it."
+    },
+    {
+      "id": "gap-target-info-coexistence",
+      "group": "capability-gap",
+      "title": "target_info, promoted-label and reserved-identity-label coexistence and migration",
+      "status": "blocked",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "8"
+      ],
+      "note": "The ordinary route still emits target_info and the native route uses a reserved identity label; the coexistence period and legacy API obligations are decision 8."
+    },
+    {
+      "id": "gap-entity-budgets",
+      "group": "capability-gap",
+      "title": "Admission, coalescing and truncation budgets under identity/content/version/membership churn",
+      "status": "blocked",
+      "evidence": [
+        {
+          "path": "storage/columnar/lifecycle_ops_test.go",
+          "test": "TestRetentionCollectsChurnOwnersWithinVersionCap"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [
+        "9"
+      ],
+      "note": "A per-owner version cap exists and truncation is reported, but it is not a memory bound and no admission policy is decided."
+    },
+    {
+      "id": "gap-pr99-grammar",
+      "group": "capability-gap",
+      "title": "PR99 metadata filter/grouping/alias grammar",
+      "status": "blocked",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "6"
+      ],
+      "note": "Current info() is the only implemented enrichment form. The proposal was last checked open and non-draft with 'Implementation Status: Not implemented'."
+    },
+    {
+      "id": "gap-workload-targets",
+      "group": "capability-gap",
+      "title": "Representative local scales, churn, durability settings and absolute gates",
+      "status": "blocked",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "10"
+      ],
+      "note": "N0 contains no corpus capture, benchmark or adoption claim; synthetic fixtures are mechanism controls only."
+    },
+    {
+      "id": "gap-histogram-validation",
+      "group": "capability-gap",
+      "title": "The columnar appender accepts histograms stock TSDB rejects",
+      "status": "defect",
+      "evidence": [
+        {
+          "path": "storage/columnar/contract_oracle_test.go",
+          "test": "TestHistogramValidationDivergenceIsRecorded"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "Recorded, not repaired: the routes disagree on input validation for a histogram whose buckets state more observations than Count. Whether validation belongs in the contract, and with which error class, is not settled; the test fails if either route changes so the entry must be revisited."
+    }
+  ]
+}

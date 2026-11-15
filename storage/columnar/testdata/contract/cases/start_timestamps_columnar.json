@@ -1,0 +1,116 @@
+{
+  "id": "start_timestamps_columnar",
+  "title": "Per-sample start timestamps survive append, flush and reopen on the columnar route for float and histogram samples",
+  "obligations": [
+    "fixed-case-13",
+    "fixed-case-8",
+    "route-difference-stock-start-timestamps"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [],
+  "scope": "The columnar route preserves a per-sample start timestamp. Stock TSDB with default options does not retain one (EnableSTStorage is not reachable through tsdb.Options), so this fixture declares the columnar route alone and the manifest records that legacy-view difference explicitly rather than asserting equality.",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "contract_st",
+          "kind": "float"
+        },
+        "samples": [
+          {
+            "t": 2000,
+            "start": 1500,
+            "value": "1"
+          },
+          {
+            "t": 3000,
+            "start": 1500,
+            "value": "2"
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "contract_st",
+          "kind": "histogram"
+        },
+        "samples": [
+          {
+            "t": 2000,
+            "start": 1500,
+            "histogram": {
+              "type": "integer",
+              "count": "1",
+              "sum_bits": "0x3ff0000000000000",
+              "schema": 0,
+              "zero_threshold_bits": "0x0000000000000000",
+              "zero_count": "0",
+              "positive_spans": [
+                {
+                  "offset": 0,
+                  "length": 1
+                }
+              ],
+              "positive_buckets": [
+                "1"
+              ],
+              "counter_reset_hint": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "flush"
+    },
+    {
+      "op": "reopen"
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "contract_st",
+        "at": 3000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"contract_st\", kind=\"float\"}",
+            "samples": [
+              "0x4000000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"contract_st\", kind=\"histogram\"}",
+            "samples": [
+              "fh:count=0x3ff0000000000000;sum=0x3ff0000000000000;schema=0;zero_threshold=0x0000000000000000;zero_count=0x0000000000000000;pos=[0/1]0x3ff0000000000000;neg=[];hint=0"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"contract_st\", kind=\"float\"}",
+        "samples": [
+          "2000|0x3ff0000000000000|float|1500",
+          "3000|0x4000000000000000|float|1500"
+        ]
+      },
+      {
+        "labels": "{__name__=\"contract_st\", kind=\"histogram\"}",
+        "samples": [
+          "2000|h:count=1;sum=0x3ff0000000000000;schema=0;zero_threshold=0x0000000000000000;zero_count=0;pos=[0/1]1;neg=[];hint=0|histogram|1500"
+        ]
+      }
+    ]
+  }
+}

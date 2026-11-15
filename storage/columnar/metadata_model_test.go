@@ -26,46 +26,76 @@ import (
 	"github.com/prometheus/prometheus/storage/columnar"
 )
 
+// TestMetadataSharingWithManySeries proves that one descriptive Resource change
+// shared by many member series creates exactly one owner version and does not
+// change memberships. The contract states 10,000 members; 100 is kept as the
+// historical, cheaper control.
 func TestMetadataSharingWithManySeries(t *testing.T) {
-	s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{})
-	require.NoError(t, err)
-	defer s.Close()
-
 	owner := columnar.ResourceOwner(map[string]string{"service.name": "payments", "service.instance.id": "pay01"})
-	content := columnar.Content{Attributes: map[string]string{"host.name": "h1", "version": "1"}}
-
-	for i := range 100 {
-		ls := resourceLabels(i)
-		_, err := s.MetadataAssociate(ls, columnar.Update{
-			Owner: owner, Content: content, EffectiveFrom: 100,
+	updates := func(members int, host string, effectiveFrom int64) []columnar.AssociationUpdate {
+		batch := make([]columnar.AssociationUpdate, 0, members)
+		for i := range members {
+			batch = append(batch, columnar.AssociationUpdate{
+				Labels: resourceLabels(i),
+				Update: columnar.Update{
+					Owner: owner, EffectiveFrom: effectiveFrom,
+					Content: columnar.Content{Attributes: map[string]string{"host.name": host, "version": "1"}},
+				},
+			})
+		}
+		return batch
+	}
+	memberships := func(t *testing.T, s *columnar.Storage) []columnar.MetadataSeriesResult {
+		t.Helper()
+		page, err := s.QueryMetadataSeries(t.Context(), columnar.MetadataSeriesQuery{
+			Kind: columnar.MetadataResource, Start: 0, End: 200,
 		})
 		require.NoError(t, err)
+		require.Empty(t, page.NextToken)
+		return page.Series
 	}
 
-	history, ok := s.MetadataHistory(owner)
-	require.True(t, ok)
-	require.False(t, history.Truncated)
-	require.Len(t, history.Versions, 1, "100 member series must not produce 100 versions")
+	for _, members := range []int{100, 10_000} {
+		t.Run(fmt.Sprintf("members_%d", members), func(t *testing.T) {
+			s, err := columnar.NewStorage(t.TempDir(), columnar.StorageOptions{})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, s.Close()) })
 
-	// Sharing remains intentional: one actual Resource change makes one new version
-	// shared by all of them, not 100 metadata rows on sample/data-point identity.
-	_, err = s.MetadataAssociate(resourceLabels(0), columnar.Update{
-		Owner:         owner,
-		Content:       columnar.Content{Attributes: map[string]string{"host.name": "h2", "version": "1"}},
-		EffectiveFrom: 120,
-	})
-	require.NoError(t, err)
+			require.NoError(t, s.AppendBatch(t.Context(), columnar.Batch{Updates: updates(members, "h1", 100)}))
+			history, ok := s.MetadataHistory(owner)
+			require.True(t, ok)
+			require.False(t, history.Truncated)
+			require.Len(t, history.Versions, 1, "%d member series must not produce %d versions", members, members)
 
-	history, ok = s.MetadataHistory(owner)
-	require.True(t, ok)
-	require.Len(t, history.Versions, 2)
+			shared := memberships(t, s)
+			require.Len(t, shared, members, "every member is associated exactly once")
+			for _, row := range shared {
+				require.Equal(t, int64(100), row.MembershipStart, "membership start of %s", row.Labels)
+			}
 
-	for _, member := range []int{0, 50, 99} {
-		ls := resourceLabels(member)
-		content, ok, truncated := s.MetadataAtLabels(ls, columnar.MetadataResource, 119)
-		require.True(t, ok)
-		require.False(t, truncated)
-		require.Equal(t, "h1", content.Attributes["host.name"])
+			// One actual Resource change, observed through every member in one
+			// transaction, is still one version and no new membership.
+			require.NoError(t, s.AppendBatch(t.Context(), columnar.Batch{Updates: updates(members, "h2", 120)}))
+			history, ok = s.MetadataHistory(owner)
+			require.True(t, ok)
+			require.Len(t, history.Versions, 2, "one shared change is one version, not one per member")
+
+			after := memberships(t, s)
+			require.Len(t, after, members, "a content change must not add or remove memberships")
+			for _, row := range after {
+				require.Equal(t, int64(100), row.MembershipStart, "membership start of %s", row.Labels)
+			}
+
+			for _, member := range []int{0, members / 2, members - 1} {
+				content, ok, truncated := s.MetadataAtLabels(resourceLabels(member), columnar.MetadataResource, 119)
+				require.True(t, ok)
+				require.False(t, truncated)
+				require.Equal(t, "h1", content.Attributes["host.name"])
+				content, ok, _ = s.MetadataAtLabels(resourceLabels(member), columnar.MetadataResource, 120)
+				require.True(t, ok)
+				require.Equal(t, "h2", content.Attributes["host.name"])
+			}
+		})
 	}
 }
 

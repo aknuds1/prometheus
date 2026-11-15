@@ -1,0 +1,276 @@
+{
+  "id": "float_bits_across_routes",
+  "title": "Exact float bits, native histograms and staleness survive append, query, flush and reopen identically on the columnar and stock TSDB routes",
+  "obligations": [
+    "fixed-case-13",
+    "fixed-case-8",
+    "invariant-2",
+    "route-equivalence"
+  ],
+  "routes": [
+    "columnar",
+    "tsdb"
+  ],
+  "scope": "Settled sample semantics only. The fixture states no metadata, so it does not touch any open identity, association or provenance decision. Start timestamps are asserted on the columnar route alone by start_timestamps_columnar.json, because stock TSDB with default options does not retain a per-sample start timestamp.",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "contract_bits",
+          "kind": "special"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "1.5"
+          },
+          {
+            "t": 2000,
+            "bits": "0x8000000000000000"
+          },
+          {
+            "t": 3000,
+            "bits": "0x7ff8000000000001"
+          },
+          {
+            "t": 4000,
+            "bits": "0x7ff0000000000000"
+          },
+          {
+            "t": 5000,
+            "bits": "0x0000000000000001"
+          },
+          {
+            "t": 6000,
+            "stale": true
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "contract_bits",
+          "kind": "plain"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "2.25"
+          },
+          {
+            "t": 2000,
+            "value": "3.5"
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "contract_bits",
+          "kind": "histogram"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "histogram": {
+              "type": "integer",
+              "count": "4",
+              "sum_bits": "0x4025000000000000",
+              "schema": 0,
+              "zero_threshold_bits": "0x0000000000000000",
+              "zero_count": "0",
+              "positive_spans": [
+                {
+                  "offset": 1,
+                  "length": 2
+                }
+              ],
+              "positive_buckets": [
+                "1",
+                "2"
+              ],
+              "counter_reset_hint": 0
+            }
+          },
+          {
+            "t": 2000,
+            "histogram": {
+              "type": "float",
+              "count": "2.5",
+              "sum_bits": "0x401d000000000000",
+              "schema": 1,
+              "zero_threshold_bits": "0x3f50624dd2f1a9fc",
+              "zero_count_bits": "0x3fe0000000000000",
+              "positive_spans": [
+                {
+                  "offset": 0,
+                  "length": 1
+                }
+              ],
+              "positive_buckets": [
+                "0x4000000000000000"
+              ],
+              "counter_reset_hint": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "contract_bits",
+        "at": 5500
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"histogram\"}",
+            "samples": [
+              "fh:count=0x4004000000000000;sum=0x401d000000000000;schema=1;zero_threshold=0x3f50624dd2f1a9fc;zero_count=0x3fe0000000000000;pos=[0/1]0x4000000000000000;neg=[];hint=0"
+            ]
+          },
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"plain\"}",
+            "samples": [
+              "0x400c000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"special\"}",
+            "samples": [
+              "0x0000000000000001"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "contract_bits",
+        "at": 6500
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"histogram\"}",
+            "samples": [
+              "fh:count=0x4004000000000000;sum=0x401d000000000000;schema=1;zero_threshold=0x3f50624dd2f1a9fc;zero_count=0x3fe0000000000000;pos=[0/1]0x4000000000000000;neg=[];hint=0"
+            ]
+          },
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"plain\"}",
+            "samples": [
+              "0x400c000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "flush",
+      "routes": [
+        "columnar"
+      ]
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "contract_bits",
+        "at": 5500
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"histogram\"}",
+            "samples": [
+              "fh:count=0x4004000000000000;sum=0x401d000000000000;schema=1;zero_threshold=0x3f50624dd2f1a9fc;zero_count=0x3fe0000000000000;pos=[0/1]0x4000000000000000;neg=[];hint=0"
+            ]
+          },
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"plain\"}",
+            "samples": [
+              "0x400c000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"special\"}",
+            "samples": [
+              "0x0000000000000001"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "reopen",
+      "routes": [
+        "columnar"
+      ]
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "contract_bits",
+        "at": 5500
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"histogram\"}",
+            "samples": [
+              "fh:count=0x4004000000000000;sum=0x401d000000000000;schema=1;zero_threshold=0x3f50624dd2f1a9fc;zero_count=0x3fe0000000000000;pos=[0/1]0x4000000000000000;neg=[];hint=0"
+            ]
+          },
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"plain\"}",
+            "samples": [
+              "0x400c000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"contract_bits\", kind=\"special\"}",
+            "samples": [
+              "0x0000000000000001"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"contract_bits\", kind=\"histogram\"}",
+        "samples": [
+          "1000|h:count=4;sum=0x4025000000000000;schema=0;zero_threshold=0x0000000000000000;zero_count=0;pos=[1/2]1,2;neg=[];hint=0|histogram|0",
+          "2000|fh:count=0x4004000000000000;sum=0x401d000000000000;schema=1;zero_threshold=0x3f50624dd2f1a9fc;zero_count=0x3fe0000000000000;pos=[0/1]0x4000000000000000;neg=[];hint=0|float_histogram|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"contract_bits\", kind=\"plain\"}",
+        "samples": [
+          "1000|0x4002000000000000|float|0",
+          "2000|0x400c000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"contract_bits\", kind=\"special\"}",
+        "samples": [
+          "1000|0x3ff8000000000000|float|0",
+          "2000|0x8000000000000000|float|0",
+          "3000|0x7ff8000000000001|float|0",
+          "4000|0x7ff0000000000000|float|0",
+          "5000|0x0000000000000001|float|0",
+          "6000|0x7ff0000000000002|stale|0"
+        ]
+      }
+    ]
+  }
+}

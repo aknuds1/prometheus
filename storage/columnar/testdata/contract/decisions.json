@@ -1,0 +1,84 @@
+{
+  "decisions": [
+    {
+      "id": "1",
+      "question": "Stream identity representation: collision-safe reserved label, native non-label dimension, or staged combination? If native, define storage, query/aggregation, vector matching, duplicate-series, remote-read, /series, label APIs and legacy clients, plus missing/invalid Entity fallback.",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied by the 2026-11-15 assignment; the corresponding fixtures are blocked rather than answered from current behaviour"
+    },
+    {
+      "id": "2",
+      "question": "Association cardinality and conflicts: one owner per series/kind/time or several legitimate owners? For contradictory same-time and late/multi-writer claims, reject the transaction or retain samples with an explicitly unresolved association, and what is the replay result?",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied; N0 asserts only deterministic rejection of a same-time conflict"
+    },
+    {
+      "id": "3",
+      "question": "Unknown, clearing and expiry: which producer/API operation clears content or ends membership, is there an explicit lease or expiry separate from observation, and what does each query return for absent, unknown, cleared, truncated and coalesced states?",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied; N0 asserts citation of absent and truncated only where the incumbent already implements it"
+    },
+    {
+      "id": "4",
+      "question": "Kubernetes acquisition and reconciliation: is collector-supplied per-series association sufficient or must plain scrape provide it? For partial container descriptions, is the target a combined view or a merged logical Resource, and which identifiers authorise it?",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied; the Kubernetes fixture asserts only enrichment arithmetic with explicit associations"
+    },
+    {
+      "id": "5",
+      "question": "Source: final receiving transport, immediate sender, original producer, or complete observed provenance, and how are conflicting source claims represented?",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied; the store has a Source owner kind but no provenance chain policy"
+    },
+    {
+      "id": "6",
+      "question": "PromQL: which exact PR99 revision and grammar is targeted, including grouping, on/without, alias side and scope, typed matcher behaviour, negative and regex matching, and collisions with existing labels? How is current info() compatibility mapped separately?",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied; the proposal PR was last checked open and non-draft with 'Implementation Status: Not implemented'"
+    },
+    {
+      "id": "7",
+      "question": "Metadata HTTP and cursors: which experimental response fields become contractual, how are typed values represented in JSON, and are positional pages sufficient under mutation? If a cursor pins a snapshot, define scope, retention, cancellation and errors.",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied; N0 asserts the current positional owner/row cursor sequence only"
+    },
+    {
+      "id": "8",
+      "question": "Compatibility and migration: required coexistence period for target_info, promoted Resource labels and any reserved identity label; whether direct target_info selectors and label/series APIs must remain indefinitely.",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied"
+    },
+    {
+      "id": "9",
+      "question": "Budgets and retention: admission, coalescing and truncation under excessive identity/content/version/membership churn, and when metadata may be rejected or coalesced without rejecting samples.",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied; a version-count cap is not a memory bound"
+    },
+    {
+      "id": "10",
+      "question": "Representative performance targets: local scales, Resource sharing and churn, Entity presence, indexed attributes, input density, query shapes, durability settings, priorities, absolute gates and allowed regressions.",
+      "status": "open",
+      "authority": "",
+      "date": "",
+      "held_by": "not supplied; no corpus capture or timing work is part of N0"
+    }
+  ]
+}

@@ -1,0 +1,285 @@
+{
+  "id": "owner_only_publication",
+  "title": "Metadata-only publication produces exact owner versions and observation bounds, fabricates no samples, and reads no sample payloads",
+  "obligations": [
+    "fixed-case-7",
+    "invariant-13",
+    "invariant-6",
+    "invariant-9"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [
+    "3",
+    "9"
+  ],
+  "scope": "Settled metadata-only publication semantics only. An unchanged observation extends observation bounds without manufacturing a version, a changed observation creates one version, neither invents samples or sample time coverage, and a metadata-only read of a block-backed store opens no sample payload. What an explicit clearing or expiry operation means, and how admission/coalescing budgets work under churn, remain decisions 3 and 9 and are not assumed here.",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "jobs_metric",
+          "job": "job-a"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "1"
+          }
+        ]
+      }
+    },
+    {
+      "op": "flush"
+    },
+    {
+      "op": "stats_reset"
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "jobs_metric",
+          "job": "job-a"
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "job-a"
+          }
+        },
+        "content": {
+          "interval": "15s"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0,
+        "blocks": 1,
+        "committed_metadata_transactions": 1,
+        "committed_versions": 1,
+        "committed_memberships": 1
+      }
+    },
+    {
+      "op": "commit",
+      "args": {
+        "parts": [],
+        "owner_updates": [
+          {
+            "series": {},
+            "owner": {
+              "kind": "scrape",
+              "identifying": {
+                "scrape": "job-a"
+              }
+            },
+            "content": {
+              "interval": "15s"
+            },
+            "effective_from": 1200
+          }
+        ]
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0,
+        "committed_metadata_transactions": 2,
+        "committed_versions": 1,
+        "committed_memberships": 1
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 1000,
+        "end": 1300
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"jobs_metric\", job=\"job-a\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1200
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0
+      }
+    },
+    {
+      "op": "commit",
+      "args": {
+        "parts": [],
+        "owner_updates": [
+          {
+            "series": {},
+            "owner": {
+              "kind": "scrape",
+              "identifying": {
+                "scrape": "job-a"
+              }
+            },
+            "content": {
+              "interval": "30s"
+            },
+            "effective_from": 1300
+          }
+        ]
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0,
+        "committed_metadata_transactions": 3,
+        "committed_versions": 2,
+        "committed_memberships": 1
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 1000,
+        "end": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"jobs_metric\", job=\"job-a\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 1000,
+                "valid_until": 1300,
+                "observed_from": 1000,
+                "observed_until": 1200
+              },
+              {
+                "content": {
+                  "interval": "30s"
+                },
+                "effective_from": 1300,
+                "observed_from": 1300,
+                "observed_until": 1300
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum(jobs_metric)",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{}",
+            "samples": [
+              "0x3ff0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "count({__name__=~\".+\"})",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{}",
+            "samples": [
+              "0x3ff0000000000000"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"jobs_metric\", job=\"job-a\"}",
+        "samples": [
+          "1000|0x3ff0000000000000|float|0"
+        ]
+      }
+    ],
+    "owners": [
+      {
+        "kind": "scrape",
+        "identifying": {
+          "scrape": "job-a"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "interval": "15s"
+            },
+            "effective_from": 1000,
+            "valid_until": 1300,
+            "observed_from": 1000,
+            "observed_until": 1200
+          },
+          {
+            "content": {
+              "interval": "30s"
+            },
+            "effective_from": 1300,
+            "observed_from": 1300,
+            "observed_until": 1300
+          }
+        ]
+      }
+    ]
+  }
+}

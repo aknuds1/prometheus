@@ -1,0 +1,312 @@
+{
+  "id": "rollback_conflict",
+  "title": "A transaction whose valid metadata prefix is followed by a same-time conflict publishes no sample, metadata, membership, WAL segment or committed-work counter",
+  "obligations": [
+    "fixed-case-6",
+    "invariant-7",
+    "invariant-8"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [
+    "2"
+  ],
+  "scope": "Settled rejected-transaction atomicity only. The fixture states a conflict that is already rejected at the same owner and effective time, so it does not decide association cardinality, late/multi-writer policy or replay of unresolved associations (decision 2). The WAL assertion compares the segment count before and after the rejected transaction; the absolute count is a property of this fixture's incumbent layout, not a semantic value.",
+  "events": [
+    {
+      "op": "commit",
+      "args": {
+        "parts": [
+          {
+            "series": {
+              "__name__": "conflict_metric"
+            },
+            "resource_owner": {
+              "kind": "resource",
+              "identifying": {
+                "service.name": "checkout",
+                "service.namespace": "shop",
+                "service.instance.id": "pod-9"
+              }
+            },
+            "samples": [
+              {
+                "t": 1000,
+                "value": "1"
+              }
+            ],
+            "observes": [
+              {
+                "series": {
+                  "__name__": "conflict_metric"
+                },
+                "resource_owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "checkout",
+                    "service.namespace": "shop",
+                    "service.instance.id": "pod-9"
+                  }
+                },
+                "owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "checkout",
+                    "service.namespace": "shop",
+                    "service.instance.id": "pod-9"
+                  }
+                },
+                "content": {
+                  "host": "a"
+                },
+                "effective_from": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "conflict_metric"
+        },
+        "samples": [
+          {
+            "t": 2000,
+            "value": "2"
+          }
+        ],
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-9"
+          }
+        }
+      }
+    },
+    {
+      "op": "flush"
+    },
+    {
+      "op": "stats_reset"
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "blocks": 1
+      }
+    },
+    {
+      "op": "commit",
+      "args": {
+        "parts": [
+          {
+            "series": {
+              "__name__": "conflict_metric"
+            },
+            "resource_owner": {
+              "kind": "resource",
+              "identifying": {
+                "service.name": "checkout",
+                "service.namespace": "shop",
+                "service.instance.id": "pod-9"
+              }
+            },
+            "samples": [
+              {
+                "t": 3000,
+                "value": "3"
+              }
+            ],
+            "observes": [
+              {
+                "series": {
+                  "__name__": "conflict_metric"
+                },
+                "owner": {
+                  "kind": "scrape",
+                  "identifying": {
+                    "scrape": "job-b"
+                  }
+                },
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 2000,
+                "resource_owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "checkout",
+                    "service.namespace": "shop",
+                    "service.instance.id": "pod-9"
+                  }
+                }
+              },
+              {
+                "series": {
+                  "__name__": "conflict_metric"
+                },
+                "resource_owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "checkout",
+                    "service.namespace": "shop",
+                    "service.instance.id": "pod-9"
+                  }
+                },
+                "owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "checkout",
+                    "service.namespace": "shop",
+                    "service.instance.id": "pod-9"
+                  }
+                },
+                "content": {
+                  "host": "b"
+                },
+                "effective_from": 1000
+              }
+            ]
+          }
+        ]
+      },
+      "expect_error": "conflicting_metadata"
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0,
+        "blocks": 1,
+        "committed_metadata_transactions": 1,
+        "committed_versions": 1,
+        "committed_memberships": 1,
+        "wal_segments": "$previous"
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "conflict_metric",
+        "at": 3000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"conflict_metric\", __otel_resource__=\"<resource>\"}",
+            "samples": [
+              "0x4000000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "host",
+            "value": "b"
+          }
+        ]
+      },
+      "expect": {
+        "series": []
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "host",
+            "value": "a"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"conflict_metric\", __otel_resource__=\"<resource>\"}",
+            "owner": "{\"service.instance.id\":\"pod-9\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-9",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "host": "a"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 0,
+        "end": 3000
+      },
+      "expect": {
+        "series": []
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"conflict_metric\", __otel_resource__=\"<resource>\"}",
+        "samples": [
+          "1000|0x3ff0000000000000|float|0",
+          "2000|0x4000000000000000|float|0"
+        ]
+      }
+    ],
+    "owners": [
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "pod-9",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "host": "a"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      }
+    ]
+  }
+}

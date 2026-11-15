@@ -1,0 +1,599 @@
+{
+  "id": "kubernetes_node_and_rollout_totals",
+  "title": "Node association totals, unattributed series survival, and old/new rollout attribution equal the hand-authored Kubernetes results",
+  "obligations": [
+    "fixed-case-12",
+    "fixed-case-9",
+    "gap-k8s-acquisition",
+    "invariant-10",
+    "invariant-11",
+    "invariant-13",
+    "route-promql-info"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [
+    "4",
+    "1"
+  ],
+  "scope": "Settled enrichment arithmetic only: node A carries 100 + 200 MiB = 300 MiB, an unassociated 50 MiB series survives an unfiltered aggregation (100 + 200 + 50 = 350 MiB), an explicit node filter selects only matching series, and a rollout with two distinct owners counts old 0.2 + new 0.3 = 0.5 exactly once each. It does not decide how a plain scrape acquires a collection-time association (decision 4) or how same-name/different-UID objects are identified without an explicit distinguishing identifying attribute (decision 1): the two rollout Resources state distinct service.instance.id values, which is a compatibility stand-in, not an Entity-aware identity rule. 100, 200 and 50 MiB are exact binary multiples; 0.2 + 0.3 is exactly 0.5 in IEEE-754, and a candidate that returns 0.5000000000000001 fails.",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "container_memory_working_set_bytes",
+          "pod": "container-a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "cadvisor",
+            "service.namespace": "kube-system",
+            "service.instance.id": "node-a"
+          }
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "104857600"
+          }
+        ]
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "container_memory_working_set_bytes",
+          "pod": "container-a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "cadvisor",
+            "service.namespace": "kube-system",
+            "service.instance.id": "node-a"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "cadvisor",
+            "service.namespace": "kube-system",
+            "service.instance.id": "node-a"
+          }
+        },
+        "content": {
+          "node.name": "node-a",
+          "k8s.cluster.name": "prod"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "commit",
+      "args": {
+        "parts": [
+          {
+            "series": {
+              "__name__": "container_memory_working_set_bytes",
+              "pod": "container-b"
+            },
+            "resource_owner": {
+              "kind": "resource",
+              "identifying": {
+                "service.name": "cadvisor",
+                "service.namespace": "kube-system",
+                "service.instance.id": "node-a"
+              }
+            },
+            "samples": [
+              {
+                "t": 1000,
+                "value": "209715200"
+              }
+            ],
+            "observes": [
+              {
+                "series": {
+                  "__name__": "container_memory_working_set_bytes",
+                  "pod": "container-b"
+                },
+                "resource_owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "cadvisor",
+                    "service.namespace": "kube-system",
+                    "service.instance.id": "node-a"
+                  }
+                },
+                "owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "cadvisor",
+                    "service.namespace": "kube-system",
+                    "service.instance.id": "node-a"
+                  }
+                },
+                "content": {
+                  "node.name": "node-a",
+                  "k8s.cluster.name": "prod"
+                },
+                "effective_from": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "container_memory_working_set_bytes",
+          "pod": "container-c"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "52428800"
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "workload_cpu_cores",
+          "pod": "app-0",
+          "revision": "old"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "app",
+            "service.namespace": "shop",
+            "service.instance.id": "uid-old"
+          }
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "0.2"
+          }
+        ]
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "workload_cpu_cores",
+          "pod": "app-0",
+          "revision": "old"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "app",
+            "service.namespace": "shop",
+            "service.instance.id": "uid-old"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "app",
+            "service.namespace": "shop",
+            "service.instance.id": "uid-old"
+          }
+        },
+        "content": {
+          "k8s.pod.uid": "uid-old"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "commit",
+      "args": {
+        "parts": [
+          {
+            "series": {
+              "__name__": "workload_cpu_cores",
+              "pod": "app-0",
+              "revision": "new"
+            },
+            "resource_owner": {
+              "kind": "resource",
+              "identifying": {
+                "service.name": "app",
+                "service.namespace": "shop",
+                "service.instance.id": "uid-new"
+              }
+            },
+            "samples": [
+              {
+                "t": 1000,
+                "value": "0.3"
+              }
+            ],
+            "observes": [
+              {
+                "series": {
+                  "__name__": "workload_cpu_cores",
+                  "pod": "app-0",
+                  "revision": "new"
+                },
+                "resource_owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "app",
+                    "service.namespace": "shop",
+                    "service.instance.id": "uid-new"
+                  }
+                },
+                "owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "app",
+                    "service.namespace": "shop",
+                    "service.instance.id": "uid-new"
+                  }
+                },
+                "content": {
+                  "k8s.pod.uid": "uid-new"
+                },
+                "effective_from": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum(container_memory_working_set_bytes)",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{}",
+            "samples": [
+              "0x41b5e00000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum(info(container_memory_working_set_bytes))",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{}",
+            "samples": [
+              "0x41b5e00000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum(info(container_memory_working_set_bytes, {node_name=\"node-a\"}))",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{}",
+            "samples": [
+              "0x41b2c00000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum(info(container_memory_working_set_bytes, {node_name=\"node-b\"}))",
+        "at": 1000
+      },
+      "expect": {
+        "series": []
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum(workload_cpu_cores)",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{}",
+            "samples": [
+              "0x3fe0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum(info(workload_cpu_cores, {k8s_pod_uid=\"uid-new\"}))",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{}",
+            "samples": [
+              "0x3fd3333333333333"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum(info(workload_cpu_cores, {k8s_pod_uid=\"uid-unknown\"}))",
+        "at": 1000
+      },
+      "expect": {
+        "series": []
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 1000,
+        "end": 1000,
+        "attributes": [
+          {
+            "name": "node.name",
+            "value": "node-a"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", pod=\"container-a\"}",
+            "owner": "{\"service.instance.id\":\"node-a\",\"service.name\":\"cadvisor\",\"service.namespace\":\"kube-system\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "node-a",
+              "service.name": "cadvisor",
+              "service.namespace": "kube-system"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000,
+                "content": {
+                  "node.name": "node-a",
+                  "k8s.cluster.name": "prod"
+                }
+              }
+            ]
+          },
+          {
+            "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", pod=\"container-b\"}",
+            "owner": "{\"service.instance.id\":\"node-a\",\"service.name\":\"cadvisor\",\"service.namespace\":\"kube-system\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "node-a",
+              "service.name": "cadvisor",
+              "service.namespace": "kube-system"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000,
+                "content": {
+                  "node.name": "node-a",
+                  "k8s.cluster.name": "prod"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "flush"
+    },
+    {
+      "op": "stats_reset"
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 1000,
+        "end": 1000,
+        "attributes": [
+          {
+            "name": "node.name",
+            "value": "node-a"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", pod=\"container-a\"}",
+            "owner": "{\"service.instance.id\":\"node-a\",\"service.name\":\"cadvisor\",\"service.namespace\":\"kube-system\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "node-a",
+              "service.name": "cadvisor",
+              "service.namespace": "kube-system"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000,
+                "content": {
+                  "node.name": "node-a",
+                  "k8s.cluster.name": "prod"
+                }
+              }
+            ]
+          },
+          {
+            "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", pod=\"container-b\"}",
+            "owner": "{\"service.instance.id\":\"node-a\",\"service.name\":\"cadvisor\",\"service.namespace\":\"kube-system\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "node-a",
+              "service.name": "cadvisor",
+              "service.namespace": "kube-system"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000,
+                "content": {
+                  "node.name": "node-a",
+                  "k8s.cluster.name": "prod"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0,
+        "blocks": 1
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", pod=\"container-a\"}",
+        "samples": [
+          "1000|0x4199000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", pod=\"container-b\"}",
+        "samples": [
+          "1000|0x41a9000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"container_memory_working_set_bytes\", pod=\"container-c\"}",
+        "samples": [
+          "1000|0x4189000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"workload_cpu_cores\", __otel_resource__=\"<resource>\", pod=\"app-0\", revision=\"new\"}",
+        "samples": [
+          "1000|0x3fd3333333333333|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"workload_cpu_cores\", __otel_resource__=\"<resource>\", pod=\"app-0\", revision=\"old\"}",
+        "samples": [
+          "1000|0x3fc999999999999a|float|0"
+        ]
+      }
+    ],
+    "owners": [
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "node-a",
+          "service.name": "cadvisor",
+          "service.namespace": "kube-system"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "node.name": "node-a",
+              "k8s.cluster.name": "prod"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      },
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "uid-new",
+          "service.name": "app",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "k8s.pod.uid": "uid-new"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      },
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "uid-old",
+          "service.name": "app",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "k8s.pod.uid": "uid-old"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      }
+    ]
+  }
+}

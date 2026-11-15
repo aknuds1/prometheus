@@ -1,0 +1,968 @@
+{
+  "id": "temporal_bands_and_disjoint_overlap",
+  "title": "A/B/A validity bands, unchanged observations that only extend bounds, unassociated series survival, and the joint version/membership/range overlap requirement",
+  "obligations": [
+    "fixed-case-10",
+    "fixed-case-4",
+    "fixed-case-5",
+    "fixed-case-9",
+    "gap-info-band-execution",
+    "gap-snapshot-cursor",
+    "invariant-12",
+    "invariant-5",
+    "invariant-6",
+    "route-metadata-http",
+    "route-promql-info"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [
+    "7"
+  ],
+  "scope": "Settled temporal and overlap semantics only. EffectiveFrom is inclusive, the actual successor ends validity exclusively, observation bounds are not validity, and a reverse query requires one common intersection of content validity, membership validity and the query range. The pagination assertions use the current positional owner/row cursor and state no snapshot-isolation claim, which decision 7 still owns. The HTTP form states times in seconds and multiplies by 1000, while the Go query API takes milliseconds; the fixture states each route's own representation instead of assuming they are interchangeable.",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests_total",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "samples": [
+          {
+            "t": 500,
+            "value": "1"
+          },
+          {
+            "t": 1000,
+            "value": "2"
+          },
+          {
+            "t": 2000,
+            "value": "3"
+          },
+          {
+            "t": 3000,
+            "value": "4"
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests_total",
+          "route": "/b"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "samples": [
+          {
+            "t": 500,
+            "value": "5"
+          },
+          {
+            "t": 2000,
+            "value": "6"
+          },
+          {
+            "t": 3000,
+            "value": "7"
+          }
+        ]
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests_total",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "content": {
+          "zone": "east"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests_total",
+          "route": "/b"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "content": {
+          "zone": "west"
+        },
+        "effective_from": 2000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests_total",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "content": {
+          "zone": "east"
+        },
+        "effective_from": 3000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests_total",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "content": {
+          "zone": "east"
+        },
+        "effective_from": 1400
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests_total",
+          "route": "/b"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "content": {
+          "zone": "west"
+        },
+        "effective_from": 2500
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(checkout_requests_total)",
+        "at": 999
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+            "samples": [
+              "0x3ff0000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/b\"}",
+            "samples": [
+              "0x4014000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(checkout_requests_total)",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/a\", zone=\"east\"}",
+            "samples": [
+              "0x4000000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/b\"}",
+            "samples": [
+              "0x4014000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(checkout_requests_total)",
+        "at": 1999
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/a\", zone=\"east\"}",
+            "samples": [
+              "0x4000000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/b\"}",
+            "samples": [
+              "0x4014000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(checkout_requests_total)",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/a\", zone=\"west\"}",
+            "samples": [
+              "0x4008000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/b\", zone=\"west\"}",
+            "samples": [
+              "0x4018000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(checkout_requests_total)",
+        "at": 2999
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/a\", zone=\"west\"}",
+            "samples": [
+              "0x4008000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/b\", zone=\"west\"}",
+            "samples": [
+              "0x4018000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(checkout_requests_total)",
+        "at": 3000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/a\", zone=\"east\"}",
+            "samples": [
+              "0x4010000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/b\", zone=\"east\"}",
+            "samples": [
+              "0x401c000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "http",
+      "args": {
+        "path": "/resources?kind=resource&start=0.999&end=3"
+      },
+      "expect": {
+        "status": 200,
+        "data": {
+          "status": "success",
+          "data": {
+            "owners": [
+              {
+                "id": "{\"service.instance.id\":\"pod-1\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+                "kind": "resource",
+                "identifying": {
+                  "service.instance.id": "pod-1",
+                  "service.name": "checkout",
+                  "service.namespace": "shop"
+                },
+                "history_truncated": false,
+                "versions": [
+                  {
+                    "descriptive": {
+                      "zone": "east"
+                    },
+                    "effective_from": 1000,
+                    "valid_until": 2000,
+                    "observed_from": 1000,
+                    "observed_until": 1400
+                  },
+                  {
+                    "descriptive": {
+                      "zone": "west"
+                    },
+                    "effective_from": 2000,
+                    "valid_until": 3000,
+                    "observed_from": 2000,
+                    "observed_until": 2500
+                  },
+                  {
+                    "descriptive": {
+                      "zone": "east"
+                    },
+                    "effective_from": 3000,
+                    "observed_from": 3000,
+                    "observed_until": 3000
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "op": "http",
+      "args": {
+        "path": "/resources?kind=resource&start=0.999&end=3&latest=true"
+      },
+      "expect": {
+        "status": 200,
+        "data": {
+          "status": "success",
+          "data": {
+            "owners": [
+              {
+                "id": "{\"service.instance.id\":\"pod-1\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+                "kind": "resource",
+                "identifying": {
+                  "service.instance.id": "pod-1",
+                  "service.name": "checkout",
+                  "service.namespace": "shop"
+                },
+                "history_truncated": false,
+                "versions": [
+                  {
+                    "descriptive": {
+                      "zone": "east"
+                    },
+                    "effective_from": 3000,
+                    "observed_from": 3000,
+                    "observed_until": 3000
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "scrape_series",
+          "job": "a-1"
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "job-a"
+          }
+        },
+        "content": {
+          "interval": "15s"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "scrape_series",
+          "job": "a-2"
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "job-a"
+          }
+        },
+        "content": {
+          "interval": "30s"
+        },
+        "effective_from": 2000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "scrape_series",
+          "job": "a-3"
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "job-a"
+          }
+        },
+        "content": {
+          "interval": "30s"
+        },
+        "effective_from": 2500
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "scrape_series",
+          "job": "b-1"
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "job-b"
+          }
+        },
+        "content": {
+          "interval": "60s"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "scrape_series",
+          "job": "a-3"
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "job-b"
+          }
+        },
+        "content": {
+          "interval": "60s"
+        },
+        "effective_from": 2800
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "scrape_series",
+          "job": "a-1"
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "job-a"
+          }
+        },
+        "content": {
+          "interval": "15s"
+        },
+        "effective_from": 3000
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "interval",
+            "value": "15s"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"scrape_series\", job=\"a-1\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 3000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 1000,
+                "valid_until": 2000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              },
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 3000,
+                "observed_from": 3000,
+                "observed_until": 3000
+              }
+            ]
+          },
+          {
+            "labels": "{__name__=\"scrape_series\", job=\"a-2\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 2000,
+            "membership_observed_until": 2000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 3000,
+                "observed_from": 3000,
+                "observed_until": 3000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 1000,
+        "end": 1999,
+        "attributes": [
+          {
+            "name": "interval",
+            "value": "15s"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"scrape_series\", job=\"a-1\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 3000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 1000,
+                "valid_until": 2000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 2000,
+        "end": 2999,
+        "attributes": [
+          {
+            "name": "interval",
+            "value": "30s"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"scrape_series\", job=\"a-1\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 3000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "30s"
+                },
+                "effective_from": 2000,
+                "valid_until": 3000,
+                "observed_from": 2000,
+                "observed_until": 2500
+              }
+            ]
+          },
+          {
+            "labels": "{__name__=\"scrape_series\", job=\"a-2\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 2000,
+            "membership_observed_until": 2000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "30s"
+                },
+                "effective_from": 2000,
+                "valid_until": 3000,
+                "observed_from": 2000,
+                "observed_until": 2500
+              }
+            ]
+          },
+          {
+            "labels": "{__name__=\"scrape_series\", job=\"a-3\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 2500,
+            "membership_until": 2800,
+            "membership_observed_until": 2500,
+            "versions": [
+              {
+                "content": {
+                  "interval": "30s"
+                },
+                "effective_from": 2000,
+                "valid_until": 3000,
+                "observed_from": 2000,
+                "observed_until": 2500
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "interval",
+            "value": "15s"
+          }
+        ],
+        "limit": 1
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"scrape_series\", job=\"a-1\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 3000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 1000,
+                "valid_until": 2000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              },
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 3000,
+                "observed_from": 3000,
+                "observed_until": 3000
+              }
+            ]
+          }
+        ],
+        "next_token": "<token>"
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "interval",
+            "value": "15s"
+          }
+        ],
+        "limit": 1,
+        "after": "$next"
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"scrape_series\", job=\"a-2\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 2000,
+            "membership_observed_until": 2000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 3000,
+                "observed_from": 3000,
+                "observed_until": 3000
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+        "samples": [
+          "500|0x3ff0000000000000|float|0",
+          "1000|0x4000000000000000|float|0",
+          "2000|0x4008000000000000|float|0",
+          "3000|0x4010000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"checkout_requests_total\", __otel_resource__=\"<resource>\", route=\"/b\"}",
+        "samples": [
+          "500|0x4014000000000000|float|0",
+          "2000|0x4018000000000000|float|0",
+          "3000|0x401c000000000000|float|0"
+        ]
+      }
+    ],
+    "owners": [
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "pod-1",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "zone": "east"
+            },
+            "effective_from": 1000,
+            "valid_until": 2000,
+            "observed_from": 1000,
+            "observed_until": 1400
+          },
+          {
+            "content": {
+              "zone": "west"
+            },
+            "effective_from": 2000,
+            "valid_until": 3000,
+            "observed_from": 2000,
+            "observed_until": 2500
+          },
+          {
+            "content": {
+              "zone": "east"
+            },
+            "effective_from": 3000,
+            "observed_from": 3000,
+            "observed_until": 3000
+          }
+        ]
+      },
+      {
+        "kind": "scrape",
+        "identifying": {
+          "scrape": "job-a"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "interval": "15s"
+            },
+            "effective_from": 1000,
+            "valid_until": 2000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          },
+          {
+            "content": {
+              "interval": "30s"
+            },
+            "effective_from": 2000,
+            "valid_until": 3000,
+            "observed_from": 2000,
+            "observed_until": 2500
+          },
+          {
+            "content": {
+              "interval": "15s"
+            },
+            "effective_from": 3000,
+            "observed_from": 3000,
+            "observed_until": 3000
+          }
+        ]
+      },
+      {
+        "kind": "scrape",
+        "identifying": {
+          "scrape": "job-b"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "interval": "60s"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 2800
+          }
+        ]
+      }
+    ]
+  }
+}
