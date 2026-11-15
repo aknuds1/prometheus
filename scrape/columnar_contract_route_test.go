@@ -20,6 +20,7 @@ package scrape
 // path.
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
@@ -135,6 +136,33 @@ contract_signed_zero{gauge="bits"} -0 %d
 	}})
 	require.Len(t, sp.ActiveTargets(), 1)
 
+	nodeA := labels.FromStrings("__name__", "contract_node_memory_bytes",
+		"env", "test", "instance", "contract-target", "job", "contract", "node", "a")
+	nodeB := labels.FromStrings("__name__", "contract_node_memory_bytes",
+		"env", "test", "instance", "contract-target", "job", "contract", "node", "b")
+	signedZero := labels.FromStrings("__name__", "contract_signed_zero",
+		"env", "test", "gauge", "bits", "instance", "contract-target", "job", "contract")
+
+	// Query the store while the scrape loop commits. Every snapshot must be a
+	// coherent prefix of the two scrapes, so the head read/commit path is
+	// exercised by the real scrape route and not only by the direct appender.
+	liveErr := make(chan error, 1)
+	liveStop := make(chan struct{})
+	var liveWG sync.WaitGroup
+	liveWG.Go(func() {
+		for {
+			select {
+			case <-liveStop:
+				return
+			default:
+			}
+			if err := verifyLiveScrapeSnapshot(store, nodeA, nodeB, signedZero, firstTime, secondTime); err != nil {
+				liveErr <- err
+				return
+			}
+		}
+	})
+
 	waitForScrape := func(want int) {
 		t.Helper()
 		deadline := time.After(10 * time.Second)
@@ -149,20 +177,20 @@ contract_signed_zero{gauge="bits"} -0 %d
 			}
 		}
 	}
-	nodeA := labels.FromStrings("__name__", "contract_node_memory_bytes",
-		"env", "test", "instance", "contract-target", "job", "contract", "node", "a")
-	nodeB := labels.FromStrings("__name__", "contract_node_memory_bytes",
-		"env", "test", "instance", "contract-target", "job", "contract", "node", "b")
-	signedZero := labels.FromStrings("__name__", "contract_signed_zero",
-		"env", "test", "gauge", "bits", "instance", "contract-target", "job", "contract")
 	waitForScrape(1)
 	waitForScrape(2)
-	// Stop after the second scrape, before reading the store. Stopping waits for
-	// the in-flight scrape to finish and commit, and it guarantees that exactly
-	// two scrapes are in the exact expectations below. It also avoids reading the
-	// columnar head while a scrape commit appends to it: that head read/commit
-	// pair is a recorded, unrepaired data race (see the N0-R result note).
+	// Stop after the second scrape so the final expectations below contain
+	// exactly two scrapes. The live reader above has already read the store
+	// during the scrape commits; stopping is for determinism, not to avoid a
+	// concurrent read.
 	sp.stop()
+	close(liveStop)
+	liveWG.Wait()
+	select {
+	case err := <-liveErr:
+		require.NoError(t, err, "a query during active scraping saw an incoherent head")
+	default:
+	}
 
 	// Exact samples: labels (including the target's "env" label, the dropped
 	// "dropme" label and the passed-through "node" label), timestamps, float bits
@@ -319,6 +347,94 @@ contract_om_counter_total 5.5 %d.000 # {trace_id="abc"} 1.25 %d.000
 	require.NoError(t, err, "the appender accepts the exemplar instead of reporting an unsupported operation")
 	require.NotZero(t, ref)
 	require.NoError(t, app.Commit())
+}
+
+// liveScrapeSample is one sample read while scrapes are in flight.
+type liveScrapeSample struct {
+	t     int64
+	bits  string
+	stale bool
+}
+
+// verifyLiveScrapeSnapshot checks that one querier snapshot is a coherent
+// prefix of what the scrape loop has committed so far. It avoids testing
+// helpers that call t.FailNow so it is safe from a worker goroutine.
+func verifyLiveScrapeSnapshot(store *columnar.Storage, nodeA, nodeB, signedZero labels.Labels, firstTime, secondTime int64) error {
+	querier, err := store.Querier(math.MinInt64, math.MaxInt64)
+	if err != nil {
+		return fmt.Errorf("creating live querier: %w", err)
+	}
+	defer querier.Close()
+	set := querier.Select(context.Background(), true, nil,
+		labels.MustNewMatcher(labels.MatchRegexp, labels.MetricName, "contract_.*"))
+	seen := 0
+	for set.Next() {
+		seen++
+		ls := set.At().Labels()
+		samples := []liveScrapeSample{}
+		iterator := set.At().Iterator(nil)
+		for iterator.Next() != chunkenc.ValNone {
+			_, v := iterator.At()
+			samples = append(samples, liveScrapeSample{
+				t: iterator.AtT(), bits: columnarBits(v), stale: value.IsStaleNaN(v),
+			})
+		}
+		if err := iterator.Err(); err != nil {
+			return fmt.Errorf("iterating %s: %w", ls, err)
+		}
+		switch {
+		case labels.Equal(ls, nodeA):
+			want := []liveScrapeSample{
+				{t: firstTime, bits: columnarBits(104857600)},
+				{t: secondTime, bits: columnarBits(314572800)},
+			}
+			if err := requireLivePrefix(ls, samples, want); err != nil {
+				return err
+			}
+		case labels.Equal(ls, nodeB):
+			first := liveScrapeSample{t: firstTime, bits: columnarBits(209715200)}
+			if len(samples) > 0 && samples[0] != first {
+				return fmt.Errorf("series %s first sample is %+v, want %+v", ls, samples[0], first)
+			}
+			if len(samples) == 2 {
+				if !samples[1].stale || samples[1].t <= firstTime {
+					return fmt.Errorf("series %s has an unexpected second sample %+v", ls, samples[1])
+				}
+			} else if len(samples) > 2 {
+				return fmt.Errorf("series %s has %d samples, want at most 2", ls, len(samples))
+			}
+		case labels.Equal(ls, signedZero):
+			want := []liveScrapeSample{
+				{t: firstTime, bits: "0x8000000000000000"},
+				{t: secondTime, bits: "0x8000000000000000"},
+			}
+			if err := requireLivePrefix(ls, samples, want); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unexpected live contract series %s", ls)
+		}
+	}
+	if err := set.Err(); err != nil {
+		return fmt.Errorf("selecting live contract series: %w", err)
+	}
+	if seen > 3 {
+		return fmt.Errorf("live selection returned %d contract series, want at most 3", seen)
+	}
+	return nil
+}
+
+// requireLivePrefix requires samples to be a prefix of want.
+func requireLivePrefix(ls labels.Labels, samples, want []liveScrapeSample) error {
+	if len(samples) > len(want) {
+		return fmt.Errorf("series %s has %d samples, want at most %d", ls, len(samples), len(want))
+	}
+	for i, sample := range samples {
+		if sample != want[i] {
+			return fmt.Errorf("series %s sample %d is %+v, want %+v", ls, i, sample, want[i])
+		}
+	}
+	return nil
 }
 
 // columnarSeriesSamples counts retained samples for one exact label set.
