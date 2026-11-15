@@ -460,6 +460,11 @@ func (t *batchMetadataTransaction) associate(update AssociationUpdate, identity 
 		if t.counts != nil {
 			t.counts.ApplySeriesHashes++
 		}
+		if t.work != nil {
+			// The store derives the series hash here when the caller stated no
+			// identity, which the seriesHashes aggregate does not cover.
+			t.work.applyAssociationHashes++
+		}
 		seriesHash = metadataSeriesKey(update.Labels)
 	}
 	derived := associationDerivation{canonical: identity.canonical, versions: t.versionCanonicals}

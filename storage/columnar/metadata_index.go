@@ -104,15 +104,29 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 		w.indexHistoryClears++
 	}
 	newConditions := map[string]metadataIndexedRange{}
+	if w != nil {
+		w.newConditionMaps++
+	}
 	identity := metadataOwnerIdentity(owner)
 	if w != nil {
 		w.indexIdentifyingVisits += len(identity)
+		// The owner identity is recovered by decoding the owner's ID here, for every
+		// rebuild, so its call count and byte volume are counted rather than assumed.
+		w.ownerIdentityDecodes++
+		w.ownerIdentityBytes += len(owner.ID)
 	}
 	for name, value := range identity {
 		condition := attributeCondition(name, value)
 		newConditions[condition] = metadataIndexedRange{}
+		if w != nil {
+			w.conditionAssignments++
+			w.conditionBytesConstructed += len(condition)
+		}
 		if len(history.versions) > 0 {
 			newConditions[condition] = metadataIndexedRange{from: history.versions[0].EffectiveFrom}
+			if w != nil {
+				w.conditionAssignments++
+			}
 		}
 	}
 	for i, version := range history.versions {
@@ -127,6 +141,9 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 				w.indexDescriptiveAttributeVisits++
 			}
 			condition := attributeCondition(name, value)
+			if w != nil {
+				w.conditionBytesConstructed += len(condition)
+			}
 			history.index[condition] = struct{}{}
 			if w != nil {
 				w.indexHistoryEntriesWritten++
@@ -140,6 +157,9 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 			// occurrences may over-approximate a range and are revalidated below.
 			candidate.until = nextEffectiveFrom(history.versions, i)
 			newConditions[condition] = candidate
+			if w != nil {
+				w.conditionAssignments++
+			}
 		}
 	}
 
@@ -154,11 +174,20 @@ func (s *metadataStore) indexResourceOwner(owner OwnerKey, history *metadataOwne
 		// happens before old conditions are deleted from the shared maps, and each
 		// condition is copied at most once per transaction.
 		toCopy := map[string]struct{}{}
+		if w != nil {
+			w.toCopySets++
+		}
 		for condition := range previous {
 			toCopy[condition] = struct{}{}
+			if w != nil {
+				w.toCopyInsertions++
+			}
 		}
 		for condition := range newConditions {
 			toCopy[condition] = struct{}{}
+			if w != nil {
+				w.toCopyInsertions++
+			}
 		}
 		for condition := range toCopy {
 			s.ownAttributeBucket(condition, w)
@@ -209,7 +238,13 @@ func (s *metadataStore) ownAttributeBucket(condition string, w *metadataWork) {
 	if !s.copyOnWrite {
 		return
 	}
+	if w != nil {
+		w.ownAttributeBucketCalls++
+	}
 	if _, owned := s.ownedAttributeBuckets[condition]; owned {
+		if w != nil {
+			w.ownAttributeBucketOwned++
+		}
 		return
 	}
 	// The first touch records the same clone the published-bucket copy performs, so

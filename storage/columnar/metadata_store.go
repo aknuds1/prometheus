@@ -205,7 +205,7 @@ func (s *metadataStore) ownerHistory(owner OwnerKey, w *metadataWork) *metadataO
 func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Update, derived associationDerivation, m *ordinaryDerivationStats, w *metadataWork) error {
 	// An equal-time assertion must agree exactly. Do this before changing any
 	// observation bounds so a rejected update leaves the owner untouched.
-	i := searchVersionsFrom(history.versions, update.EffectiveFrom, w)
+	i := searchVersionsFrom(history.versions, update.EffectiveFrom, applyPhase, w)
 	countMembershipSearch(m, w)
 	if i < len(history.versions) && history.versions[i].EffectiveFrom == update.EffectiveFrom {
 		existing := &history.versions[i]
@@ -233,12 +233,23 @@ func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Upda
 	if w != nil {
 		w.contentClones++
 		w.clonedContentAttributes += len(update.Content.Attributes)
+		w.clonedContentBytes += contentAttributeBytes(update.Content.Attributes)
 	}
 	version := Version{
 		Content:       update.Content.Clone(),
 		EffectiveFrom: update.EffectiveFrom,
 		ObservedFrom:  update.EffectiveFrom,
 		ObservedUntil: update.EffectiveFrom,
+	}
+	if w != nil {
+		w.versionInsertPreRows += len(history.versions)
+		w.versionInsertShiftedRows += len(history.versions) - i
+		if i == len(history.versions) {
+			w.versionInsertTailPositions++
+		}
+		if cap(history.versions) < len(history.versions)+1 {
+			w.versionInsertGrowths++
+		}
 	}
 	history.versions = slices.Insert(history.versions, i, version)
 	if w != nil {
@@ -265,6 +276,11 @@ func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Upda
 		drop := len(history.versions) - s.versionCap
 		if w != nil {
 			w.versionsEvicted += drop
+			w.evictionRetainedRowsCopied += len(history.versions) - drop
+			w.evictionVersionsScanned += len(history.versions) - drop
+			for _, retained := range history.versions[drop:] {
+				w.evictionAttributesScanned += len(retained.Content.Attributes)
+			}
 		}
 		for _, evicted := range history.versions[:drop] {
 			s.deleteCanonicalVersion(update.Owner, evicted.EffectiveFrom)
@@ -278,7 +294,12 @@ func (s *metadataStore) updateHistory(history *metadataOwnerHistory, update Upda
 		clear(history.index)
 		for _, version := range history.versions {
 			for key, value := range version.Content.Attributes {
-				history.index[attributeCondition(key, value)] = struct{}{}
+				condition := attributeCondition(key, value)
+				history.index[condition] = struct{}{}
+				if w != nil {
+					w.evictionConditionWrites++
+					w.conditionBytesConstructed += len(condition)
+				}
 			}
 		}
 	}
@@ -302,14 +323,14 @@ func noteVersionBoundUpdate(w *metadataWork, unchanged bool) {
 }
 
 // searchVersionsFrom returns the first index whose effective time is at or after t,
-// which is the owner-version ordered search, and counts its comparisons.
-func searchVersionsFrom(versions []Version, t int64, w *metadataWork) int {
+// which is the owner-version ordered search, and counts its comparisons in total and
+// for the phase that ran it.
+func searchVersionsFrom(versions []Version, t int64, phase metadataPhase, w *metadataWork) int {
 	lo, hi := 0, len(versions)
+	comparisons := 0
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		if w != nil {
-			w.versionSearchComparisons++
-		}
+		comparisons++
 		if versions[mid].EffectiveFrom < t {
 			lo = mid + 1
 		} else {
@@ -318,19 +339,29 @@ func searchVersionsFrom(versions []Version, t int64, w *metadataWork) int {
 	}
 	if w != nil {
 		w.versionSearches++
+		w.versionSearchComparisons += comparisons
+		if phase == changeDetectionPhase {
+			w.detectVersionSearches++
+			w.detectVersionSearchComparisons += comparisons
+		} else {
+			w.applyVersionSearches++
+			w.applyVersionSearchComparisons += comparisons
+		}
 	}
 	return lo
 }
 
 // searchMembershipsFrom returns the first index whose effective time is at or after t,
-// which is the membership ordered search, and counts its comparisons.
-func searchMembershipsFrom(rows []seriesMembershipRow, t int64, w *metadataWork) int {
+// which is the membership ordered search, and counts its comparisons in total and for
+// the phase that ran it. The phase counts are membership-search executions; the
+// membershipSearches aggregate above also counts the owner-version searches that share
+// its attribution helper, so it is not the same number.
+func searchMembershipsFrom(rows []seriesMembershipRow, t int64, phase metadataPhase, w *metadataWork) int {
 	lo, hi := 0, len(rows)
+	comparisons := 0
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		if w != nil {
-			w.membershipSearchCompares++
-		}
+		comparisons++
 		if rows[mid].effectiveFrom < t {
 			lo = mid + 1
 		} else {
@@ -339,6 +370,14 @@ func searchMembershipsFrom(rows []seriesMembershipRow, t int64, w *metadataWork)
 	}
 	if w != nil {
 		w.membershipSearches++
+		w.membershipSearchCompares += comparisons
+		if phase == changeDetectionPhase {
+			w.detectMembershipSearches++
+			w.detectMembershipSearchComparisons += comparisons
+		} else {
+			w.applyMembershipSearches++
+			w.applyMembershipSearchComparisons += comparisons
+		}
 	}
 	return lo
 }
@@ -372,6 +411,15 @@ const (
 	applyCanonicalizations
 )
 
+// canonicalizationPhaseToPhase maps the canonicalization phase onto the phase a
+// counted operation belongs to.
+func canonicalizationPhaseToPhase(phase canonicalizationPhase) metadataPhase {
+	if phase == changeDetectionCanonicalizations {
+		return changeDetectionPhase
+	}
+	return applyPhase
+}
+
 // countCanonicalization attributes one Content.Canonical call to each path that
 // counts it, split by the phase that needed the identity.
 func countCanonicalization(m *ordinaryDerivationStats, w *metadataWork, phase canonicalizationPhase) {
@@ -403,6 +451,7 @@ func storedVersionCanonical(history *metadataOwnerHistory, i int, update Update,
 	}
 	countCanonicalization(m, w, phase)
 	canonical := history.versions[i].Content.Canonical()
+	noteCanonicalVolume(w, canonicalizationPhaseToPhase(phase), len(history.versions[i].Content.Attributes), len(canonical))
 	if derived.versions != nil {
 		derived.versions[key] = canonical
 	}
@@ -416,7 +465,9 @@ func observedCanonical(update Update, derived associationDerivation, m *ordinary
 		return derived.canonical
 	}
 	countCanonicalization(m, w, phase)
-	return update.Content.Canonical()
+	canonical := update.Content.Canonical()
+	noteCanonicalVolume(w, canonicalizationPhaseToPhase(phase), len(update.Content.Attributes), len(canonical))
+	return canonical
 }
 
 // contentsEqual reports whether stored version i and the observation state equal
@@ -477,7 +528,7 @@ func (s *metadataStore) attachMembership(seriesHash uint64, ls labels.Labels, ow
 	}
 	rows := kinds[owner.Kind]
 
-	i := searchMembershipsFrom(rows, effectiveFrom, w)
+	i := searchMembershipsFrom(rows, effectiveFrom, applyPhase, w)
 	countMembershipSearch(m, w)
 	if i < len(rows) && rows[i].effectiveFrom == effectiveFrom {
 		if rows[i].owner != owner {
@@ -629,6 +680,7 @@ func (s *metadataStore) validateLabels(owner OwnerKey, ls labels.Labels, seriesH
 		}
 		if w != nil {
 			w.seriesHashes++
+			w.validateSeriesHashes++
 		}
 		seriesHash = metadataSeriesKey(ls)
 	}
@@ -656,7 +708,7 @@ func (s *metadataStore) ownerUpdateChanges(update Update, derived associationDer
 	if !ok {
 		return true
 	}
-	i := searchVersionsFrom(history.versions, update.EffectiveFrom, w)
+	i := searchVersionsFrom(history.versions, update.EffectiveFrom, changeDetectionPhase, w)
 	if i < len(history.versions) && history.versions[i].EffectiveFrom == update.EffectiveFrom {
 		return !contentsEqual(history, i, update, derived, m, w, changeDetectionCanonicalizations)
 	}
@@ -680,7 +732,7 @@ func (s *metadataStore) associationChanges(seriesHash uint64, ls labels.Labels, 
 		}
 	}
 	rows := s.bySeries[seriesHash][update.Owner.Kind]
-	i := searchMembershipsFrom(rows, update.EffectiveFrom, w)
+	i := searchMembershipsFrom(rows, update.EffectiveFrom, changeDetectionPhase, w)
 	countMembershipSearch(m, w)
 	if i < len(rows) && rows[i].effectiveFrom == update.EffectiveFrom {
 		return rows[i].owner != update.Owner
@@ -705,15 +757,22 @@ func (s *metadataStore) batchChanges(batch Batch, m *ordinaryDerivationStats, w 
 			}
 			if w != nil {
 				w.seriesHashes++
+				w.detectAssociationHashes++
 			}
 			seriesHash = metadataSeriesKey(association.Labels)
 		}
 		derived := associationDerivation{canonical: identity.canonical}
+		if w != nil {
+			w.detectAssociationChecks++
+		}
 		if s.associationChanges(seriesHash, association.Labels, association.Update, derived, m, w) {
 			return true
 		}
 	}
 	return slices.ContainsFunc(batch.OwnerUpdates, func(update Update) bool {
+		if w != nil {
+			w.detectOwnerUpdateChecks++
+		}
 		return s.ownerUpdateChanges(update, associationDerivation{}, m, w)
 	})
 }

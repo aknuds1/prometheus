@@ -608,6 +608,54 @@ func reportOwnerCardinalityWork(b *testing.B, w metadataWork, commits int) {
 	b.ReportMetric(perCommit(w.indexBucketClones), "bucket-clones/op")
 	b.ReportMetric(perCommit(w.indexBucketClonedEntries), "bucket-entries/op")
 	b.ReportMetric(perCommit(w.indexGlobalRangeUpdates), "index-range-updates/op")
+	b.ReportMetric(perCommit(w.indexContentAttributeVisits), "index-content-visits/op")
+	b.ReportMetric(perCommit(w.indexHistoryClears), "index-history-clears/op")
+	b.ReportMetric(perCommit(w.indexHistoryEntriesWritten), "index-history-writes/op")
+
+	// Phase-split searches, so change detection and apply are separable and a
+	// membership search is not confused with the owner-version search that shares its
+	// attribution helper.
+	b.ReportMetric(perCommit(w.detectVersionSearches), "detect-version-searches/op")
+	b.ReportMetric(perCommit(w.detectVersionSearchComparisons), "detect-version-cmp/op")
+	b.ReportMetric(perCommit(w.applyVersionSearches), "apply-version-searches/op")
+	b.ReportMetric(perCommit(w.applyVersionSearchComparisons), "apply-version-cmp/op")
+	b.ReportMetric(perCommit(w.detectMembershipSearches), "detect-membership-searches/op")
+	b.ReportMetric(perCommit(w.detectMembershipSearchComparisons), "detect-membership-cmp/op")
+	b.ReportMetric(perCommit(w.applyMembershipSearches), "apply-membership-searches/op")
+	b.ReportMetric(perCommit(w.applyMembershipSearchComparisons), "apply-membership-cmp/op")
+	b.ReportMetric(perCommit(w.detectAssociationChecks), "detect-association-checks/op")
+	b.ReportMetric(perCommit(w.detectOwnerUpdateChecks), "detect-owner-checks/op")
+	b.ReportMetric(perCommit(w.detectAssociationHashes), "detect-assoc-hashes/op")
+	b.ReportMetric(perCommit(w.applyAssociationHashes), "apply-assoc-hashes/op")
+	b.ReportMetric(perCommit(w.validateSeriesHashes), "validate-series-hashes/op")
+
+	// Content canonicalization and cloning volume.
+	b.ReportMetric(perCommit(w.detectCanonicalizationAttributes), "detect-canonical-attrs/op")
+	b.ReportMetric(perCommit(w.detectCanonicalizationBytes), "detect-canonical-bytes/op")
+	b.ReportMetric(perCommit(w.applyCanonicalizationAttributes), "apply-canonical-attrs/op")
+	b.ReportMetric(perCommit(w.applyCanonicalizationBytes), "apply-canonical-bytes/op")
+	b.ReportMetric(perCommit(w.clonedContentBytes), "cloned-content-bytes/op")
+
+	// Attribute-index construction and copy-on-write ownership.
+	b.ReportMetric(perCommit(w.ownerIdentityDecodes), "owner-identity-decodes/op")
+	b.ReportMetric(perCommit(w.ownerIdentityBytes), "owner-identity-bytes/op")
+	b.ReportMetric(perCommit(w.newConditionMaps), "new-condition-maps/op")
+	b.ReportMetric(perCommit(w.conditionAssignments), "condition-assignments/op")
+	b.ReportMetric(perCommit(w.conditionBytesConstructed), "condition-bytes/op")
+	b.ReportMetric(perCommit(w.toCopySets), "tocopy-sets/op")
+	b.ReportMetric(perCommit(w.toCopyInsertions), "tocopy-insertions/op")
+	b.ReportMetric(perCommit(w.ownAttributeBucketCalls), "own-bucket-calls/op")
+	b.ReportMetric(perCommit(w.ownAttributeBucketOwned), "own-bucket-owned/op")
+
+	// Version insertion geometry and bounded-history work.
+	b.ReportMetric(perCommit(w.versionInsertTailPositions), "insert-tail/op")
+	b.ReportMetric(perCommit(w.versionInsertPreRows), "insert-pre-rows/op")
+	b.ReportMetric(perCommit(w.versionInsertShiftedRows), "insert-shifted-rows/op")
+	b.ReportMetric(perCommit(w.versionInsertGrowths), "insert-growths/op")
+	b.ReportMetric(perCommit(w.evictionRetainedRowsCopied), "evict-retained-rows/op")
+	b.ReportMetric(perCommit(w.evictionVersionsScanned), "evict-versions/op")
+	b.ReportMetric(perCommit(w.evictionAttributesScanned), "evict-attrs/op")
+	b.ReportMetric(perCommit(w.evictionConditionWrites), "evict-cond-writes/op")
 }
 
 // liveHeapMiB returns the live heap after a collection, which is retained state rather
