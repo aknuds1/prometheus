@@ -24,6 +24,7 @@ package columnar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -137,13 +138,11 @@ func TestConcurrentHeadSelectAndCommit(t *testing.T) {
 	done := make(chan struct{})
 	var startOnce sync.Once
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(done)
 		for gen := int64(1); gen <= concurrentHeadBatches; gen++ {
 			app := s.AppenderV2(context.Background())
-			for j := int64(0); j < 3; j++ {
+			for j := range int64(3) {
 				ts := concurrentHeadWriterStart + gen*3 + j
 				if _, err := app.Append(0, seedLabels, 0, ts, math.Float64frombits(concurrentHeadValueBits(ts)), nil, nil, storage.AOptions{}); err != nil {
 					addErr(fmt.Errorf("append seed sample at %d: %w", ts, err))
@@ -151,7 +150,7 @@ func TestConcurrentHeadSelectAndCommit(t *testing.T) {
 					return
 				}
 			}
-			for j := int64(0); j < 2; j++ {
+			for j := range int64(2) {
 				ts := concurrentHeadNewStart + gen*2 + j
 				if _, err := app.Append(0, newLabels, 0, ts, math.Float64frombits(concurrentHeadValueBits(ts)), nil, nil, storage.AOptions{}); err != nil {
 					addErr(fmt.Errorf("append new-series sample at %d: %w", ts, err))
@@ -175,15 +174,13 @@ func TestConcurrentHeadSelectAndCommit(t *testing.T) {
 			}
 			startOnce.Do(func() { close(started) })
 		}
-	}()
+	})
 
 	// Two readers verify every sample of every buffered series; one reader only
 	// exercises no-match and range-pruned selections, which must never invent a
 	// match. All readers run until the writer has committed its last batch.
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 2 {
+		wg.Go(func() {
 			<-started
 			for {
 				if err := verifyConcurrentHeadSnapshot(s, seedLabels, newLabels, histLabels, histExpectations); err != nil {
@@ -196,11 +193,9 @@ func TestConcurrentHeadSelectAndCommit(t *testing.T) {
 				default:
 				}
 			}
-		}()
+		})
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-started
 		for {
 			if err := verifyConcurrentHeadPruned(s, seedLabels); err != nil {
@@ -217,7 +212,7 @@ func TestConcurrentHeadSelectAndCommit(t *testing.T) {
 			default:
 			}
 		}
-	}()
+	})
 	wg.Wait()
 
 	errMtx.Lock()
@@ -309,7 +304,7 @@ func verifyConcurrentHeadSnapshot(q storage.Queryable, seedLabels, newLabels, hi
 
 	seedCount, ok := counts[seedLabels.Get(labels.MetricName)]
 	if !ok {
-		return fmt.Errorf("the seeded series disappeared")
+		return errors.New("the seeded series disappeared")
 	}
 	if seedCount < concurrentHeadSeedSampleCount || (seedCount-concurrentHeadSeedSampleCount)%3 != 0 {
 		return fmt.Errorf("seed series has %d samples, which is not %d plus whole 3-sample batches",
@@ -320,7 +315,7 @@ func verifyConcurrentHeadSnapshot(q storage.Queryable, seedLabels, newLabels, hi
 	newCount, hasNew := counts[newLabels.Get(labels.MetricName)]
 	switch {
 	case batches == 0 && hasNew:
-		return fmt.Errorf("new series exists before its first batch")
+		return errors.New("new series exists before its first batch")
 	case batches > 0 && !hasNew:
 		return fmt.Errorf("new series is missing after %d batches (seed %d)", batches, seedCount)
 	case batches > 0 && newCount != 2*batches:
@@ -336,7 +331,7 @@ func verifyConcurrentHeadSnapshot(q storage.Queryable, seedLabels, newLabels, hi
 	}
 	switch {
 	case wantHist == 0 && hasHist:
-		return fmt.Errorf("histogram series exists before its first sample")
+		return errors.New("histogram series exists before its first sample")
 	case wantHist > 0 && !hasHist:
 		return fmt.Errorf("histogram series is missing after %d batches (seed %d, want %d histogram samples)", batches, seedCount, wantHist)
 	case wantHist > 0 && histCount != wantHist:
