@@ -35,20 +35,20 @@ import (
 //
 // The buffer and every overlapping block are queried separately and merged, so
 // that flushed and unflushed data look the same to the caller.
+//
+// The head is snapshotted under the storage lock here, at querier creation. The
+// snapshot copies labels and column slice headers, not sample data. Head columns
+// are append-only, so the snapshot stays a coherent view of the state committed
+// before this call and can be read without the lock while commits continue. No
+// partly applied batch and no later mutation is visible to the querier.
 func (s *Storage) Querier(mint, maxt int64) (storage.Querier, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
 	var queriers []storage.Querier
 	if len(s.buffer) > 0 {
-		// Retain only pointers here. Materialising a Series per buffered series on
-		// every query dominated query allocation, and most are filtered out by the
-		// matchers before any sample is read.
-		heads := make([]*headSeries, 0, len(s.buffer))
-		for _, hs := range s.buffer {
-			heads = append(heads, hs)
-		}
-		queriers = append(queriers, &memQuerier{heads: heads, mint: mint, maxt: maxt, reads: s.reads, storage: s})
+		heads, byName := s.snapshotHeadLocked()
+		queriers = append(queriers, &memQuerier{heads: heads, byName: byName, mint: mint, maxt: maxt, reads: s.reads})
 	}
 	for _, block := range s.blocks {
 		if !block.Overlaps(mint, maxt) {
@@ -143,23 +143,49 @@ func (s *Storage) ChunkQuerier(mint, maxt int64) (storage.ChunkQuerier, error) {
 	return chunkQuerier{q: q}, nil
 }
 
-// memQuerier serves in-memory series.
+// snapshotHeadLocked returns one Series per buffered series plus, per metric
+// name, the indices of that name's series.
+//
+// Only labels and slice headers are copied. A head column is append-only (see
+// headSeries), so the returned prefix never changes and keeps its backing arrays
+// alive after the lock is released. The caller must hold s.mtx.
+func (s *Storage) snapshotHeadLocked() ([]Series, map[string][]int) {
+	heads := make([]Series, 0, len(s.buffer))
+	byName := make(map[string][]int, len(s.headByName))
+	for name, list := range s.headByName {
+		indices := make([]int, len(list))
+		for i, hs := range list {
+			indices[i] = len(heads)
+			heads = append(heads, headToSeries(hs))
+		}
+		byName[name] = indices
+	}
+	if len(heads) != len(s.buffer) {
+		// headByName and buffer are maintained together. If they ever disagree,
+		// keep a coherent flat snapshot and let selections fall back to a scan.
+		heads = heads[:0]
+		for _, hs := range s.buffer {
+			heads = append(heads, headToSeries(hs))
+		}
+		byName = nil
+	}
+	return heads, byName
+}
+
+// memQuerier serves one coherent snapshot of the in-memory head.
 type memQuerier struct {
-	heads   []*headSeries
-	storage *Storage
-	mint    int64
-	maxt    int64
-	reads   *readStats
+	heads  []Series
+	byName map[string][]int
+	mint   int64
+	maxt   int64
+	reads  *readStats
 }
 
 func (*memQuerier) Close() error { return nil }
 
-// headCandidates narrows the head scan to one metric name when the selector
-// constrains it by equality. It returns nil when no narrowing applies, and the
-// caller then scans every buffered series. The returned slice is only read for
-// its length, and appended series enter beyond that length, so it stays valid
-// after the lock is released.
-func (s *Storage) headCandidates(matchers []*labels.Matcher) []*headSeries {
+// equalityMetricName returns the single metric name an equality __name__
+// constraint selects, and whether the name index can answer it.
+func equalityMetricName(matchers []*labels.Matcher) (string, bool) {
 	var name string
 	found := false
 	for _, m := range matchers {
@@ -167,101 +193,40 @@ func (s *Storage) headCandidates(matchers []*labels.Matcher) []*headSeries {
 			continue
 		}
 		if found && name != m.Value {
-			// Two conflicting equality matchers cannot match anything; the full
-			// scan produces that answer without special casing here.
-			return nil
+			// Two conflicting equality matchers cannot match anything.
+			return "", false
 		}
 		name, found = m.Value, true
 	}
-	if !found {
-		return nil
-	}
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	return s.headByName[name]
+	return name, found
 }
 
 func (q *memQuerier) Select(_ context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-	if q.storage != nil {
-		if candidates := q.storage.headCandidates(matchers); candidates != nil {
+	candidates := q.heads
+	if name, ok := equalityMetricName(matchers); ok && q.byName != nil {
+		if indices, found := q.byName[name]; found {
 			q.reads.headIndexHits.Inc()
-			q.reads.headScanned.Add(uint64(len(candidates)))
-			return selectFromHeads(candidates, q.mint, q.maxt, sortSeries, hints, q.reads, matchers)
+			q.reads.headScanned.Add(uint64(len(indices)))
+			candidates = make([]Series, len(indices))
+			for i, index := range indices {
+				candidates[i] = q.heads[index]
+			}
+		} else {
+			// A name that is absent from the snapshot cannot match; still report the
+			// full-scan scan cost the fallback would have paid.
+			q.reads.headScanned.Add(uint64(len(q.heads)))
 		}
+	} else {
+		q.reads.headScanned.Add(uint64(len(q.heads)))
 	}
-	q.reads.headScanned.Add(uint64(len(q.heads)))
 	var timings *queryTimings
 	if q.reads != nil {
 		timings = q.reads.timings
 	}
 	start := timings.now()
-	set := selectFromHeads(q.heads, q.mint, q.maxt, sortSeries, hints, q.reads, matchers)
+	set := selectFromSeries(candidates, q.mint, q.maxt, sortSeries, hints, q.reads, matchers)
 	timings.add(phaseHeadSelect, start)
 	return set
-}
-
-// selectFromHeads filters buffered series by matcher before materialising any
-// samples, and sizes its result from the match count rather than the input.
-// Around half of the opportunities: the head holds every ingested series, while
-// a selector usually matches few.
-func selectFromHeads(heads []*headSeries, mint, maxt int64, _ bool, hints *storage.SelectHints, reads *readStats, matchers []*labels.Matcher) storage.SeriesSet {
-	if hints != nil {
-		if hints.Start > mint {
-			mint = hints.Start
-		}
-		if hints.End < maxt {
-			maxt = hints.End
-		}
-	}
-	selected := make([]Series, 0, 16)
-	for _, hs := range heads {
-		if !matchesAll(hs.labels, matchers) {
-			continue
-		}
-		series, ok := hs.selectRange(mint, maxt)
-		if !ok {
-			continue
-		}
-		if reads != nil {
-			reads.labelRows.Inc()
-		}
-		selected = append(selected, series)
-	}
-	// Head matches are counted in the same place as block matches so the cost
-	// model attributes per-series work across both sources.
-	if reads != nil {
-		reads.seriesMatched.Add(uint64(len(selected)))
-	}
-	// Always sort inside a single source: merge queriers assume label order.
-	slices.SortFunc(selected, func(a, b Series) int { return labels.Compare(a.Labels, b.Labels) })
-	return newSeriesSet(selected, reads)
-}
-
-// selectRange returns the buffered samples within [mint, maxt] without copying.
-func (h *headSeries) selectRange(mint, maxt int64) (Series, bool) {
-	from, to := 0, len(h.ts)
-	for from < to && h.ts[from] < mint {
-		from++
-	}
-	for to > from && h.ts[to-1] > maxt {
-		to--
-	}
-	if from == to {
-		return Series{}, false
-	}
-	out := Series{
-		Labels:     h.labels,
-		Timestamps: h.ts[from:to],
-		Kinds:      h.kind[from:to],
-		Values:     h.v[from:to],
-	}
-	if len(h.st) > 0 {
-		out.StartTimestamps = h.st[from:to]
-	}
-	if len(h.hist) > 0 {
-		out.Histograms = h.hist[from:to]
-	}
-	return out, true
 }
 
 // blockQuerier serves the series of one block.
@@ -327,7 +292,15 @@ func selectFromSeries(series []Series, mint, maxt int64, sortSeries bool, hints 
 		if trimmed.Len() == 0 {
 			continue
 		}
+		if reads != nil {
+			reads.labelRows.Inc()
+		}
 		selected = append(selected, trimmed)
+	}
+	// Head matches are counted in the same place as block matches so the cost
+	// model attributes per-series work across both sources.
+	if reads != nil {
+		reads.seriesMatched.Add(uint64(len(selected)))
 	}
 
 	// Always sort inside a single source. storage.NewMergeQuerier and

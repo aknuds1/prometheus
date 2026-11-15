@@ -37,16 +37,16 @@ func (q *memQuerier) collectLabels(ctx context.Context, valueName string, hints 
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		if !matchesAll(hs.labels, matchers) {
+		if !matchesAll(hs.Labels, matchers) {
 			continue
 		}
-		if _, ok := hs.selectRange(q.mint, q.maxt); !ok {
+		if trimSeries(hs, q.mint, q.maxt).Len() == 0 {
 			continue
 		}
 		if q.reads != nil {
 			q.reads.labelRows.Inc()
 		}
-		collectLabelValue(values, hs.labels, valueName)
+		collectLabelValue(values, hs.Labels, valueName)
 	}
 	return sortedLabelValues(values, hints), nil, nil
 }

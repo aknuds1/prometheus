@@ -121,6 +121,14 @@ type Storage struct {
 
 // headSeries holds samples as typed columns. Histograms must be encoded before
 // entering the head: the caller is allowed to reuse the source histogram.
+//
+// A committed series is append-only. commitHead may append beyond a column's
+// current length, but it never rewrites an index below that length, and a
+// series' labels never change. A reader therefore snapshots the column slice
+// headers under Storage.mtx (the lock a commit holds for all of commitHead) and
+// may then read the published prefix without the lock: later appends are both
+// invisible to that snapshot and unable to corrupt it. The snapshot keeps the
+// backing arrays alive.
 type headSeries struct {
 	hash   uint64
 	labels labels.Labels

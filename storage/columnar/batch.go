@@ -614,6 +614,10 @@ func (s *Storage) AppendBatch(ctx context.Context, batch Batch) error {
 	return nil
 }
 
+// appendTypedSeries appends src's samples to dst. It must run under Storage.mtx
+// for a committed series. The columns are append-only: indices below the length
+// at entry are never rewritten, which is what lets a reader holding a snapshot
+// of an earlier prefix keep reading it without the lock.
 func appendTypedSeries(dst *headSeries, src BatchSeries) {
 	previousCount := len(dst.ts)
 	// Fill absent older columns only when this batch first supplies them.
