@@ -11,7 +11,7 @@
     "columnar",
     "tsdb"
   ],
-  "scope": "Settled sample semantics only. The fixture states no metadata, so it does not touch any open identity, association or provenance decision. Start timestamps are asserted on the columnar route alone by start_timestamps_columnar.json, because stock TSDB with default options does not retain a per-sample start timestamp.",
+  "scope": "Settled sample semantics only. The fixture states no metadata, so it does not touch any open identity, association or provenance decision. Start timestamps are asserted by start_timestamps_across_routes.json on the columnar route and on explicitly ST-enabled stock TSDB; stock TSDB with default options does not retain a per-sample start timestamp, and that configuration fact is recorded separately.",
   "events": [
     {
       "op": "append",

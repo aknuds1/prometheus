@@ -4,7 +4,7 @@
       "id": "fixed-case-1",
       "group": "fixed-case",
       "title": "Otherwise identical streams differing in one Resource, Scope, metric property or point attribute remain distinct",
-      "status": "passing",
+      "status": "partial",
       "evidence": [
         {
           "path": "storage/columnar/otap_identity_semantics_test.go",
@@ -20,8 +20,13 @@
         }
       ],
       "fixtures": [],
-      "decisions": [],
-      "note": "One-dimension-at-a-time distinctions are asserted through the native and ordinary receiver routes. A native non-label identity dimension and Entity-based identity remain decision 1."
+      "decisions": [
+        "1"
+      ],
+      "note": "Demonstrated: otherwise identical streams differing in one supported compatibility dimension - a Resource service.* tuple, Scope, metric property or point attribute - stay distinct through the native and ordinary receiver routes. Not demonstrated: a native non-label identity dimension, complete Resource/Entity identity and missing/invalid Entity fallback, which are decision 1 (gap-entity-identity).",
+      "gaps": [
+        "gap-entity-identity"
+      ]
     },
     {
       "id": "fixed-case-2",
@@ -161,7 +166,7 @@
       ],
       "fixtures": [
         "float_bits_across_routes",
-        "start_timestamps_columnar"
+        "start_timestamps_across_routes"
       ],
       "decisions": [],
       "note": "The float fixture compares the same query before flush, after flush and after reopen on the columnar route and on stock TSDB. Retention truncation is asserted as an explicit Truncated bit, not as expired validity."
@@ -258,7 +263,7 @@
       "id": "fixed-case-12",
       "group": "fixed-case",
       "title": "Kubernetes node totals, rollout totals, unattributed series, same-name/different-UID objects and unresolved conflicts equal the hand-authored results",
-      "status": "passing",
+      "status": "partial",
       "evidence": [
         {
           "path": "storage/columnar/contract_oracle_test.go",
@@ -269,15 +274,22 @@
         "kubernetes_node_and_rollout_totals"
       ],
       "decisions": [
+        "1",
+        "2",
         "4"
       ],
-      "note": "Node A gives 100+200 MiB = 300 MiB under an explicit node filter and 350 MiB unfiltered with the unattributed 50 MiB series retained; old 0.2 + new 0.3 cores = 0.5 with each input counted once. How a plain scrape acquires the association (decision 4) and how same-name/different-UID objects are identified without an explicit distinguishing attribute (decision 1) are not asserted."
+      "note": "Demonstrated: node A filtered 100+200 MiB = 300 MiB and unfiltered 350 MiB with the unattributed 50 MiB series retained; old 0.2 + new 0.3 cores = 0.5 with every input counted once; same-name series kept apart by explicit identifying attributes. Not demonstrated: collection-time acquisition through a plain scrape (decision 4, gap-k8s-acquisition), identifying same-name/different-UID objects without an explicit distinguishing attribute (decision 1, gap-entity-identity), and retaining an unresolved conflict (decision 2, gap-conflict-resolution).",
+      "gaps": [
+        "gap-k8s-acquisition",
+        "gap-conflict-resolution",
+        "gap-entity-identity"
+      ]
     },
     {
       "id": "fixed-case-13",
       "group": "fixed-case",
       "title": "Floats including signed zero and NaN bit patterns, integer and float native histograms, start timestamps, staleness and exemplars survive each supported route and lifecycle operation",
-      "status": "passing",
+      "status": "partial",
       "evidence": [
         {
           "path": "storage/columnar/contract_oracle_test.go",
@@ -286,16 +298,20 @@
       ],
       "fixtures": [
         "float_bits_across_routes",
-        "start_timestamps_columnar"
+        "start_timestamps_across_routes"
       ],
       "decisions": [],
-      "note": "Exact bits, histograms and staleness are compared on the columnar and stock TSDB routes and again after flush and reopen; per-sample start timestamps are asserted on the columnar route only because stock TSDB with default options does not retain them (route-difference-stock-start-timestamps). Exemplar persistence is a separate unsupported capability (gap-exemplars), so this obligation does not claim it."
+      "note": "Demonstrated: exact float and native histogram payloads, per-sample start timestamps on the columnar route and on explicitly ST-enabled stock TSDB, and staleness markers on the routes that carry them. Not demonstrated: exemplar survival on the scalar and scrape routes (the appender accepts an exemplar and stores nothing - gap-exemplars, a recorded defect), and native histograms, summaries or exemplars through the native OTAP sink, which rejects them explicitly before storage (gap-otap-native-samples).",
+      "gaps": [
+        "gap-exemplars",
+        "gap-otap-native-samples"
+      ]
     },
     {
       "id": "invariant-1",
       "group": "invariant",
       "title": "Resource, Scope, metric properties and point attributes survive until authoritative stream resolution",
-      "status": "passing",
+      "status": "partial",
       "evidence": [
         {
           "path": "storage/columnar/otap_identity_semantics_test.go",
@@ -307,14 +323,19 @@
         }
       ],
       "fixtures": [],
-      "decisions": [],
-      "note": ""
+      "decisions": [
+        "1"
+      ],
+      "note": "Demonstrated: Resource, Scope, metric-property and point-attribute context survives to the supported compatibility identity (the reserved service.* label tuple) and to per-series Metric and Resource owners. Not demonstrated: complete Entity-aware Resource identity and the missing/invalid Entity fallback, which are decision 1 (gap-entity-identity).",
+      "gaps": [
+        "gap-entity-identity"
+      ]
     },
     {
       "id": "invariant-2",
       "group": "invariant",
       "title": "Complete labels and complete typed content are authoritative after candidate lookup",
-      "status": "passing",
+      "status": "partial",
       "evidence": [
         {
           "path": "storage/columnar/native_association_parity_test.go",
@@ -327,7 +348,10 @@
       ],
       "fixtures": [],
       "decisions": [],
-      "note": "Typed content beyond strings is not represented at all: see gap-typed-content."
+      "note": "Demonstrated: complete labels and the complete string content are authoritative after candidate lookup; a hash only locates a candidate and every semantic decision re-checks the real content. Not demonstrated: complete typed content, because only strings are representable (gap-typed-content).",
+      "gaps": [
+        "gap-typed-content"
+      ]
     },
     {
       "id": "invariant-3",
@@ -409,7 +433,7 @@
       "id": "invariant-7",
       "group": "invariant",
       "title": "Same-time content and membership conflicts have deterministic outcomes; map order or newest-arrival selection is forbidden",
-      "status": "passing",
+      "status": "partial",
       "evidence": [
         {
           "path": "storage/columnar/metadata_model_test.go",
@@ -426,7 +450,10 @@
       "decisions": [
         "2"
       ],
-      "note": "Deterministic rejection is asserted. Whether a conflict should instead retain samples with an unresolved association is decision 2 and is not answered."
+      "note": "Demonstrated: equal-time conflicting content and membership are rejected deterministically, without map-order or arrival-order selection. Not demonstrated: the alternative contract outcome of retaining samples with an explicitly unresolved association, which is decision 2 (gap-conflict-resolution).",
+      "gaps": [
+        "gap-conflict-resolution"
+      ]
     },
     {
       "id": "invariant-8",
@@ -489,7 +516,7 @@
       "id": "invariant-11",
       "group": "invariant",
       "title": "Unassociated series survive enrichment, enrichment contributes each input series at most once, and conflicting associations remain unresolved",
-      "status": "passing",
+      "status": "partial",
       "evidence": [
         {
           "path": "storage/columnar/metadata_info_test.go",
@@ -502,7 +529,10 @@
       "decisions": [
         "2"
       ],
-      "note": "Survival and single contribution are asserted exactly. The unresolved-conflict clause is decision 2: the store currently rejects a contradictory same-time association instead of retaining it unresolved."
+      "note": "Demonstrated: unassociated series survive enrichment and each input series contributes at most once, including across ownership transitions. Not demonstrated: retaining a conflicting association as unresolved; the store rejects a contradictory same-time association instead, which is decision 2 (gap-conflict-resolution).",
+      "gaps": [
+        "gap-conflict-resolution"
+      ]
     },
     {
       "id": "invariant-12",
@@ -591,17 +621,17 @@
     {
       "id": "route-scrape",
       "group": "route",
-      "title": "The scrape append route reaches the columnar store",
+      "title": "A real scrape executes parsing, relabeling, metadata forwarding and commit into the columnar store",
       "status": "passing",
       "evidence": [
         {
-          "path": "storage/columnar/scrape_concurrency_test.go",
-          "test": "TestConcurrentScalarAppendersShareCommittedTail"
+          "path": "scrape/columnar_contract_route_test.go",
+          "test": "TestColumnarScrapeRouteStoresExactSamplesAndMetadata"
         }
       ],
       "fixtures": [],
       "decisions": [],
-      "note": "Concurrent scalar appenders are the scrape-shaped path; N0 adds no scrape loop of its own."
+      "note": "A real scrape pool, real HTTP target and real scrape loop run with the columnar store as the AppendableV2. Exact samples, a target-group label, a metric relabel drop, forwarded type/help/unit metadata, a report sample and a staleness marker after the series disappears are asserted. The separate concurrency-scalar-appenders obligation keeps the direct AppenderV2 concurrency test, which is not scrape evidence."
     },
     {
       "id": "route-ordinary-otlp",
@@ -699,12 +729,20 @@
     {
       "id": "route-remote-write",
       "group": "route",
-      "title": "Remote-write requests are demonstrated against the columnar store",
-      "status": "unsupported",
-      "evidence": [],
+      "title": "Remote-write requests are executed against the columnar store and stock TSDB",
+      "status": "partial",
+      "evidence": [
+        {
+          "path": "storage/columnar/remote_write_route_test.go",
+          "test": "TestRemoteWriteRouteExecutesRealRequests"
+        }
+      ],
       "fixtures": [],
       "decisions": [],
-      "note": "The columnar store is installed as the local Appendable in columnar-prototype mode, and the shared append path is the one exercised by the other routes, but N0 did not execute an RW1/RW2 request against it. Reachability is not inferred from wiring."
+      "note": "Real RW1 and RW2 requests run through remote.NewWriteHandler. Stock TSDB accepts them and preserves exact float bits, timestamps, integer and float native histograms, RW2 start timestamps, symbol-derived labels, exemplars and response statistics; duplicate, out-of-order, invalid-label and invalid-metadata-symbol requests produce the stock-compatible 400 responses with the expected written-sample headers. The columnar route rejects every RW1 and RW2 request with HTTP 500 because its appender does not implement storage.ExemplarAppenderV2, and writes nothing (gap-rw-exemplar-appender). Per-series metadata is not demonstrated on either route: RW1 request metadata is ignored by the receiver, and stock TSDB's native metadata has no exported read surface. Reopened/replayed RW state is not demonstrated either: teststorage offers no reopen helper and the columnar route stores nothing. RW1 also cannot carry a negative zero sample value (proto3 implicit presence omits -0.0), which is a protocol representation difference, not a store behaviour. The remote-write contract is therefore not covered, and complete architecture comparison remains blocked for it.",
+      "gaps": [
+        "gap-rw-exemplar-appender"
+      ]
     },
     {
       "id": "route-equivalence",
@@ -724,16 +762,31 @@
       "note": "Bit-exact differential sample rendering across both routes, including float edge cases and native histograms. Route representation differences are recorded separately (route-difference-stock-start-timestamps)."
     },
     {
+      "id": "concurrency-scalar-appenders",
+      "group": "concurrency",
+      "title": "Independent scalar AppenderV2 transactions commit and remain selectable under concurrency",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/scrape_concurrency_test.go",
+          "test": "TestConcurrentScalarAppendersShareCommittedTail"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "TestConcurrentScalarAppendersShareCommittedTail drives 64 goroutines with their own AppenderV2 transactions; it is a scalar append-concurrency obligation only. It does not parse, relabel or commit a scrape, so it is not scrape-route evidence (see route-scrape)."
+    },
+    {
       "id": "route-difference-stock-start-timestamps",
       "group": "route-difference",
       "title": "Stock TSDB with default options does not retain a per-sample start timestamp",
       "status": "recorded",
       "evidence": [],
       "fixtures": [
-        "start_timestamps_columnar"
+        "start_timestamps_across_routes"
       ],
       "decisions": [],
-      "note": "tsdb.Options does not expose EnableSTStorage, so the stock route stores ST=0. The columnar route preserves it; the fixture asserts the columnar side alone instead of weakening the obligation to the legacy view."
+      "note": "Stock TSDB with default options does not retain a per-sample start timestamp: default XOR chunks return AtST()==0 and the default Options leave EnableSTStorage false. That is a legacy-configuration fact, not a stock TSDB defect. tsdb.Options.EnableSTStorage exists; with EnableSTStorage=true, FloatChunkEncoding=EncXOR2 and EnableHistogramSTEncoding=true the same exact start_timestamps_across_routes fixture asserts ST=1500 before and after head compaction on route tsdb_st. N0's statement that the option was unreachable through tsdb.Options is corrected by the dated N0-R erratum."
     },
     {
       "id": "gap-typed-content",
@@ -820,17 +873,22 @@
       ],
       "fixtures": [],
       "decisions": [],
-      "note": "The native sink converts number data points only and rejects the rest before storage rather than dropping them silently. Widening it is production work outside N0."
+      "note": "The native sink converts number data points only and rejects histograms, summaries and exemplars before storage rather than dropping them silently. That explicit rejection is safe fail-closed behaviour and is distinct from the scalar accept-then-discard exemplar defect (gap-exemplars). Widening it is production work outside this package."
     },
     {
       "id": "gap-exemplars",
       "group": "capability-gap",
-      "title": "Exemplar persistence",
-      "status": "unsupported",
-      "evidence": [],
+      "title": "The columnar routes accept an exemplar and silently discard it",
+      "status": "defect",
+      "evidence": [
+        {
+          "path": "scrape/columnar_contract_route_test.go",
+          "test": "TestColumnarScrapeDropsExemplarsWithoutError"
+        }
+      ],
       "fixtures": [],
       "decisions": [],
-      "note": "appender.AppendExemplar accepts and discards exemplars, and the native OTAP route rejects them. No fixture asserts exemplar storage."
+      "note": "Reproduced: a real OpenMetrics scrape whose sample carries an exemplar stores the sample and reports success, the store exposes no exemplar query surface, and the scalar V1 AppendExemplar returns a reference and no error while retaining nothing queryable. Silent loss is not acceptable target behaviour. The native OTAP route instead rejects exemplars explicitly before storage (gap-otap-native-samples), which is safe fail-closed behaviour and is recorded separately. No exemplar persistence is implemented here."
     },
     {
       "id": "gap-info-band-execution",
@@ -942,6 +1000,21 @@
       "fixtures": [],
       "decisions": [],
       "note": "Recorded, not repaired: the routes disagree on input validation for a histogram whose buckets state more observations than Count. Whether validation belongs in the contract, and with which error class, is not settled; the test fails if either route changes so the entry must be revisited."
+    },
+    {
+      "id": "gap-rw-exemplar-appender",
+      "group": "capability-gap",
+      "title": "The columnar appender does not implement storage.ExemplarAppenderV2, so remote write fails closed",
+      "status": "unsupported",
+      "evidence": [
+        {
+          "path": "storage/columnar/remote_write_route_test.go",
+          "test": "TestRemoteWriteRouteExecutesRealRequests"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [],
+      "note": "storage/remote type-asserts the appender to storage.ExemplarAppenderV2 before appending anything and answers HTTP 500 when the assertion fails. The columnar *appender implements neither AppendExemplars nor exemplar persistence, so a real RW1 or RW2 request is rejected with the exact interface error and stores no sample. That is fail-closed behaviour, not silent loss; implementing the interface is production work and was not done here."
     }
   ]
 }

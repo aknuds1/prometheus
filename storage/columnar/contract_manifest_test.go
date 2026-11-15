@@ -19,9 +19,14 @@ package columnar
 // deleted, renamed or skipped.
 //
 // Every fixed case and invariant in the assignment must appear exactly once with
-// one of five statuses:
+// one of six statuses:
 //
-//   - passing:    an executable test or fixture asserts the obligation.
+//   - passing:    an executable test or fixture asserts the complete obligation.
+//   - partial:    some clauses have executable passing evidence, while other
+//                 clauses are defective, unsupported or blocked by a named
+//                 decision. A partial obligation must name the demonstrated
+//                 subset in its note and link the non-passing remainder through
+//                 `gaps` and/or `decisions`; it may never be read as covered.
 //   - defect:     an executable test reproduces incumbent behaviour that the
 //                 contract does not accept; it is recorded, not repaired here.
 //   - unsupported: the incumbent cannot express the behaviour at all.
@@ -31,8 +36,8 @@ package columnar
 //
 // The test also proves that every evidence entry names a real Go test function
 // in a real file, that every listed fixture exists and lists the obligation
-// back, and that every open decision is attached to at least one blocked
-// obligation.
+// back, that every gap names a non-passing obligation that really exists, and
+// that every open decision is attached to at least one blocked obligation.
 
 import (
 	"encoding/json"
@@ -62,7 +67,12 @@ type contractObligation struct {
 	Evidence  []contractEvidence `json:"evidence"`
 	Fixtures  []string           `json:"fixtures"`
 	Decisions []string           `json:"decisions"`
-	Note      string             `json:"note"`
+	// Gaps names the non-passing obligations that carry a partial obligation's
+	// undemonstrated clauses. It keeps a compound obligation from looking wholly
+	// covered when a clause is a recorded defect, an unsupported capability or an
+	// independently blocked gap.
+	Gaps []string `json:"gaps"`
+	Note string   `json:"note"`
 }
 
 // contractEvidence names one executable test.
@@ -87,10 +97,10 @@ type contractDecision struct {
 }
 
 // contractStatuses are the permitted coverage statuses.
-var contractStatuses = []string{"passing", "defect", "unsupported", "blocked", "recorded"}
+var contractStatuses = []string{"passing", "partial", "defect", "unsupported", "blocked", "recorded"}
 
 // contractGroups are the permitted obligation groups.
-var contractGroups = []string{"fixed-case", "invariant", "route", "route-difference", "capability-gap"}
+var contractGroups = []string{"fixed-case", "invariant", "route", "route-difference", "capability-gap", "concurrency"}
 
 // TestContractManifest is the coverage gate.
 func TestContractManifest(t *testing.T) {
@@ -148,6 +158,13 @@ func TestContractManifest(t *testing.T) {
 			case "blocked":
 				require.NotEmpty(t, obligation.Decisions,
 					"%s is blocked but names no semantic decision", obligation.ID)
+			case "partial":
+				// A partial obligation demonstrates some clauses and must say which
+				// remainder it is not claiming, so it can never read as covered.
+				require.NotEmpty(t, obligation.Evidence,
+					"%s is partial but names no executable evidence for its demonstrated subset", obligation.ID)
+				require.Positive(t, len(obligation.Decisions)+len(obligation.Gaps),
+					"%s is partial but links neither a decision nor a non-passing gap", obligation.ID)
 			}
 			if obligation.Status != "passing" {
 				require.NotEmpty(t, obligation.Note,
@@ -167,6 +184,14 @@ func TestContractManifest(t *testing.T) {
 				if obligation.Status == "blocked" {
 					blockedDecisions[id] = true
 				}
+			}
+
+			for _, id := range obligation.Gaps {
+				gap, ok := byID[id]
+				require.True(t, ok, "%s names unknown gap %q", obligation.ID, id)
+				require.NotEqual(t, obligation.ID, id, "%s cannot be its own gap", obligation.ID)
+				require.NotEqual(t, "passing", gap.Status,
+					"%s names %q as a gap, but that obligation is passing; a gap must be non-passing", obligation.ID, id)
 			}
 
 			for _, id := range obligation.Fixtures {
@@ -195,7 +220,7 @@ func TestContractManifest(t *testing.T) {
 			require.Equal(t, "open", decision.Status)
 		}
 		for _, route := range fixture.Routes {
-			require.Contains(t, []string{contractRouteColumnar, contractRouteTSDB}, route,
+			require.Contains(t, []string{contractRouteColumnar, contractRouteTSDB, contractRouteTSDBST}, route,
 				"fixture %q names unknown route %q", fixture.ID, route)
 		}
 	}
@@ -213,7 +238,7 @@ func TestContractManifest(t *testing.T) {
 	for _, obligation := range manifest.Obligations {
 		statuses[obligation.Status]++
 	}
-	for _, status := range []string{"passing", "unsupported", "blocked", "defect", "recorded"} {
+	for _, status := range []string{"passing", "partial", "unsupported", "blocked", "defect", "recorded"} {
 		require.Positive(t, statuses[status], "the manifest must record at least one %q obligation", status)
 	}
 }

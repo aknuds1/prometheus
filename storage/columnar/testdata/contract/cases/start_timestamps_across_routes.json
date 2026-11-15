@@ -1,16 +1,17 @@
 {
-  "id": "start_timestamps_columnar",
-  "title": "Per-sample start timestamps survive append, flush and reopen on the columnar route for float and histogram samples",
+  "id": "start_timestamps_across_routes",
+  "title": "Per-sample start timestamps are exact before and after both applicable persistence operations: flush plus reopen on the columnar route and head compaction on an explicitly ST-enabled stock TSDB",
   "obligations": [
     "fixed-case-13",
     "fixed-case-8",
     "route-difference-stock-start-timestamps"
   ],
   "routes": [
-    "columnar"
+    "columnar",
+    "tsdb_st"
   ],
   "open_decisions": [],
-  "scope": "The columnar route preserves a per-sample start timestamp. Stock TSDB with default options does not retain one (EnableSTStorage is not reachable through tsdb.Options), so this fixture declares the columnar route alone and the manifest records that legacy-view difference explicitly rather than asserting equality.",
+  "scope": "Both routes preserve a per-sample start timestamp for float and integer-histogram samples. The fixture asserts the complete sample payload and ST before any persistence and again after the applicable operation: flush plus reopen for the columnar route, head compaction for the stock route. The stock comparator is explicitly configured with EnableSTStorage, EncXOR2 float chunks and EnableHistogramSTEncoding; the default tsdb route is not ST-capable, and that default-configuration fact is what route-difference-stock-start-timestamps records. ST-enabled columnar is never compared with ST-disabled stock TSDB. No exemplar is claimed here: exemplar persistence is gap-exemplars.",
   "events": [
     {
       "op": "append",
@@ -67,10 +68,46 @@
       }
     },
     {
-      "op": "flush"
+      "op": "state",
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"contract_st\", kind=\"float\"}",
+            "samples": [
+              "2000|0x3ff0000000000000|float|1500",
+              "3000|0x4000000000000000|float|1500"
+            ]
+          },
+          {
+            "labels": "{__name__=\"contract_st\", kind=\"histogram\"}",
+            "samples": [
+              "2000|h:count=1;sum=0x3ff0000000000000;schema=0;zero_threshold=0x0000000000000000;zero_count=0;pos=[0/1]1;neg=[];hint=0|histogram|1500"
+            ]
+          }
+        ]
+      }
     },
     {
-      "op": "reopen"
+      "op": "flush",
+      "routes": [
+        "columnar"
+      ]
+    },
+    {
+      "op": "reopen",
+      "routes": [
+        "columnar"
+      ]
+    },
+    {
+      "op": "compact",
+      "routes": [
+        "tsdb_st"
+      ],
+      "args": {
+        "mint": 2000,
+        "maxt": 3000
+      }
     },
     {
       "op": "promql",

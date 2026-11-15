@@ -46,6 +46,12 @@ package columnar
 //     sample/PromQL subset only. Metadata, HTTP and lifecycle events are
 //     unsupported there and a fixture that claims one for this route fails
 //     loudly instead of being skipped.
+//   - "tsdb_st" is the same stock TSDB explicitly configured for start-timestamp
+//     storage (EnableSTStorage, EncXOR2 float chunks, histogram ST encoding).
+//     The default "tsdb" route is deliberately not ST-capable: its observed
+//     ST=0 is a property of that configuration, not of stock TSDB. A fixture
+//     that needs start timestamps must name "tsdb_st" so the comparison never
+//     matches an ST-enabled candidate against an ST-disabled comparator.
 //
 // Route-independent logical semantics do not imply byte-identical
 // representations. The store's own observables are rendered canonically:
@@ -84,6 +90,7 @@ import (
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/promql/promqltest"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/util/teststorage"
 )
@@ -92,6 +99,8 @@ import (
 const (
 	contractRouteColumnar = "columnar"
 	contractRouteTSDB     = "tsdb"
+	// contractRouteTSDBST is stock TSDB configured for start-timestamp storage.
+	contractRouteTSDBST = "tsdb_st"
 )
 
 // contractFixtureDir holds the machine-readable logical fixtures.
@@ -246,6 +255,12 @@ type contractLifecycleArgs struct {
 	Before int64 `json:"before"`
 }
 
+// contractCompactArgs is one head-compaction range for the stock routes.
+type contractCompactArgs struct {
+	MinT int64 `json:"mint"`
+	MaxT int64 `json:"maxt"`
+}
+
 // contractStats is the subset of exposed physical-work counters a fixture may
 // assert. Only counters that carry a contract obligation belong here.
 type contractStats struct {
@@ -363,6 +378,14 @@ func contractNewRoute(t *testing.T, name string) *contractRoute {
 		t.Cleanup(func() { require.NoError(t, store.Close()) })
 	case contractRouteTSDB:
 		route.tsdb = teststorage.New(t)
+	case contractRouteTSDBST:
+		// The supported stock start-timestamp configuration: ST storage requires
+		// an ST-capable float encoding, and histograms need their own ST encoding.
+		route.tsdb = teststorage.New(t, func(opts *tsdb.Options) {
+			opts.EnableSTStorage = true
+			opts.FloatChunkEncoding = chunkenc.EncXOR2
+			opts.EnableHistogramSTEncoding = true
+		})
 	default:
 		t.Fatalf("unknown contract route %q", name)
 	}
@@ -452,8 +475,13 @@ func contractRunEvent(t *testing.T, route *contractRoute, event contractEvent) {
 		route.requireColumnar(event.Op)
 		_, err = route.columnar.RetainBefore(t.Context(), args.Before)
 	case "compact":
-		route.requireColumnar(event.Op)
-		_, err = route.columnar.Compact(t.Context())
+		var args contractCompactArgs
+		contractDecodeArgs(t, event, &args)
+		if route.columnar != nil {
+			_, err = route.columnar.Compact(t.Context())
+		} else {
+			err = route.compactHead(args)
+		}
 	case "promql":
 		var args contractPromQLArgs
 		contractDecodeArgs(t, event, &args)
@@ -468,6 +496,16 @@ func contractRunEvent(t *testing.T, route *contractRoute, event contractEvent) {
 		var args contractSeriesQueryArgs
 		contractDecodeArgs(t, event, &args)
 		contractRequireJSON(t, route.metadataSeries(t, args), event.Expect)
+		return
+	case "state":
+		// A mid-fixture complete state assertion, so a fixture can prove the same
+		// exact payload survives both before and after a persistence operation.
+		var want contractState
+		require.NotEmpty(t, event.Expect, "a state event needs a complete expectation")
+		decoder := json.NewDecoder(strings.NewReader(string(event.Expect)))
+		decoder.DisallowUnknownFields()
+		require.NoError(t, decoder.Decode(&want), "decode the state expectation")
+		contractRequireState(t, route, &want)
 		return
 	case "stats_reset":
 		route.requireColumnar(event.Op)
@@ -639,6 +677,17 @@ func (r *contractRoute) commit(args contractCommitArgs) error {
 		batch.OwnerUpdates = append(batch.OwnerUpdates, update.update())
 	}
 	return store.AppendBatch(context.Background(), batch)
+}
+
+// compactHead compacts a stock head range. It is the applicable persistence
+// operation for the stock routes: the block chunks are what a stock TSDB
+// restart would read, and start timestamps must survive that write.
+func (r *contractRoute) compactHead(args contractCompactArgs) error {
+	store, ok := r.tsdb.(*teststorage.TestStorage)
+	if !ok {
+		panic(fmt.Sprintf("contract route %q cannot compact a %T", r.name, r.tsdb))
+	}
+	return store.CompactHead(tsdb.NewRangeHead(store.Head(), args.MinT, args.MaxT))
 }
 
 // update resolves one fixture observation into the exported Update type.
