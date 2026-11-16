@@ -21,7 +21,11 @@ package columnar
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/prometheus/common/model"
@@ -194,6 +198,7 @@ func TestAppendMixedValidAndInconsistentMatchesStock(t *testing.T) {
 	}
 	validLS := labels.FromStrings(labels.MetricName, "mixed_valid")
 	invalidLS := labels.FromStrings(labels.MetricName, "mixed_invalid")
+	validMetadata := metadata.Metadata{Type: model.MetricTypeGauge, Help: "mixed help", Unit: "mixed unit"}
 
 	routes := []struct {
 		name  string
@@ -205,19 +210,46 @@ func TestAppendMixedValidAndInconsistentMatchesStock(t *testing.T) {
 	for _, route := range routes {
 		t.Run(route.name, func(t *testing.T) {
 			app := route.route.appendable()
-			_, err := app.Append(0, validLS, 0, 1000, 1.5, nil, nil, storage.AOptions{})
+			_, err := app.Append(0, validLS, 0, 1000, 1.5, nil, nil, storage.AOptions{Metadata: validMetadata})
 			require.NoError(t, err)
 			_, err = app.Append(0, invalidLS, 0, 1000, 0, inconsistent, nil, storage.AOptions{})
 			require.ErrorIs(t, err, histogram.ErrHistogramCountMismatch)
 			require.NoError(t, app.Commit())
 
-			// The valid sample commits; the rejected one was never staged, matching
-			// stock's per-append failure semantics.
+			// The valid sample and its metadata commit; the rejected one was never
+			// staged, matching stock's per-append failure semantics.
 			require.Equal(t, []string{"1000|0x3ff8000000000000|float|0"},
 				contractSeriesSamples(t, route.route, validLS))
 			requireNoSeries(t, route.route.queryable(), invalidLS)
+			if route.name == "columnar" {
+				history, ok := route.route.columnar.MetadataHistory(MetricOwner(validLS))
+				require.True(t, ok)
+				require.Len(t, history.Versions, 1)
+				require.Equal(t, map[string]string{
+					"type": "gauge", "help": "mixed help", "unit": "mixed unit",
+				}, history.Versions[0].Content.Attributes)
+			}
 		})
 	}
+}
+
+// walDigest hashes every retained WAL segment name and byte, so a rejected
+// transaction cannot change WAL contents unnoticed.
+func walDigest(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dir, walDirName))
+	require.NoError(t, err)
+	hash := sha256.New()
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		contents, err := os.ReadFile(filepath.Join(dir, walDirName, entry.Name()))
+		require.NoError(t, err)
+		_, _ = hash.Write([]byte(entry.Name()))
+		_, _ = hash.Write(contents)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func TestAppendRejectedHistogramPublishesNothing(t *testing.T) {
@@ -233,6 +265,7 @@ func TestAppendRejectedHistogramPublishesNothing(t *testing.T) {
 	beforeSeries := route.captureSeries(t)
 	beforeOwners := route.captureOwners(t)
 	beforeStats := route.stats(t)
+	beforeWAL := walDigest(t, route.dir)
 
 	inconsistent := &histogram.Histogram{
 		Count: 4, Sum: 10.5, Schema: 0,
@@ -246,6 +279,7 @@ func TestAppendRejectedHistogramPublishesNothing(t *testing.T) {
 	require.Equal(t, beforeSeries, route.captureSeries(t), "a rejected append must not change samples")
 	require.Equal(t, beforeOwners, route.captureOwners(t), "a rejected append must not change metadata")
 	require.Equal(t, beforeStats, route.stats(t), "a rejected append must not change WAL or committed counters")
+	require.Equal(t, beforeWAL, walDigest(t, route.dir), "a rejected append must not change WAL contents")
 }
 
 func TestValidHistogramsSurviveFlushAndReopen(t *testing.T) {
