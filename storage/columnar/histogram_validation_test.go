@@ -154,7 +154,7 @@ func TestAppendHistogramValidationMatchesStock(t *testing.T) {
 	for _, routeName := range []string{contractRouteColumnar, contractRouteTSDB} {
 		for _, tc := range cases {
 			t.Run(routeName+"/"+tc.name, func(t *testing.T) {
-				route := contractNewRoute(t, routeName)
+				route := contractNewRoute(t, routeName, 0)
 				ls := labels.FromStrings(labels.MetricName, "histogram_validation")
 				app := route.appendable()
 				_, err := app.Append(0, ls, 0, 1000, 0, tc.h, tc.fh, storage.AOptions{})
@@ -204,8 +204,8 @@ func TestAppendMixedValidAndInconsistentMatchesStock(t *testing.T) {
 		name  string
 		route *contractRoute
 	}{
-		{name: "columnar", route: contractNewRoute(t, contractRouteColumnar)},
-		{name: "stock_tsdb", route: contractNewRoute(t, contractRouteTSDB)},
+		{name: "columnar", route: contractNewRoute(t, contractRouteColumnar, 0)},
+		{name: "stock_tsdb", route: contractNewRoute(t, contractRouteTSDB, 0)},
 	}
 	for _, route := range routes {
 		t.Run(route.name, func(t *testing.T) {
@@ -253,7 +253,7 @@ func walDigest(t *testing.T, dir string) string {
 }
 
 func TestAppendRejectedHistogramPublishesNothing(t *testing.T) {
-	route := contractNewRoute(t, contractRouteColumnar)
+	route := contractNewRoute(t, contractRouteColumnar, 0)
 	seed := labels.FromStrings(labels.MetricName, "histogram_validation_seed")
 	app := route.appendable()
 	_, err := app.Append(0, seed, 0, 1000, 1, nil, nil, storage.AOptions{
@@ -283,7 +283,7 @@ func TestAppendRejectedHistogramPublishesNothing(t *testing.T) {
 }
 
 func TestValidHistogramsSurviveFlushAndReopen(t *testing.T) {
-	route := contractNewRoute(t, contractRouteColumnar)
+	route := contractNewRoute(t, contractRouteColumnar, 0)
 	intLS := labels.FromStrings(labels.MetricName, "valid_int_histogram")
 	floatLS := labels.FromStrings(labels.MetricName, "valid_float_histogram")
 	intH := &histogram.Histogram{

@@ -38,6 +38,13 @@ package columnar
 // in a real file, that every listed fixture exists and lists the obligation
 // back, that every gap names a non-passing obligation that really exists, and
 // that every open decision is attached to at least one blocked obligation.
+//
+// Decisions distinguish `open` from `decided`. A decided decision records a
+// resolution, an authority and a date and may stay attached as provenance; it
+// never makes a partial obligation look covered and it never blocks a case. A
+// target case that the incumbent cannot execute is recorded in its fixture as a
+// gap-controlled absence and must name a non-passing obligation, so accepted but
+// unimplemented semantics stay visible instead of becoming passing cases.
 
 import (
 	"encoding/json"
@@ -86,18 +93,46 @@ type contractDecisionFile struct {
 	Decisions []contractDecision `json:"decisions"`
 }
 
-// contractDecision is one unresolved semantic decision.
+// contractDecision is one semantic decision. An open decision names who still
+// holds it; a decided decision records the resolution, its authority and date.
 type contractDecision struct {
-	ID        string `json:"id"`
-	Question  string `json:"question"`
-	Status    string `json:"status"`
-	Authority string `json:"authority"`
-	Date      string `json:"date"`
-	HeldBy    string `json:"held_by"`
+	ID         string `json:"id"`
+	Question   string `json:"question"`
+	Status     string `json:"status"`
+	Authority  string `json:"authority"`
+	Date       string `json:"date"`
+	Resolution string `json:"resolution,omitempty"`
+	Limits     string `json:"limits,omitempty"`
+	HeldBy     string `json:"held_by,omitempty"`
 }
 
 // contractStatuses are the permitted coverage statuses.
 var contractStatuses = []string{"passing", "partial", "defect", "unsupported", "blocked", "recorded"}
+
+// contractDecisionStatuses are the permitted decision statuses.
+var contractDecisionStatuses = []string{"open", "decided"}
+
+// contractDecidedDecisions must be decided by this package. Decisions 1 and 2
+// were accepted by the user/product owner on 2026-11-15.
+var contractDecidedDecisions = []string{"1", "2"}
+
+// contractOpenDecisions must remain open here: this package may not guess a
+// resolution from incumbent behaviour.
+var contractOpenDecisions = []string{"3", "4", "5", "6", "7", "8", "9", "10"}
+
+// contractRequiredTargetCases pins accepted target behaviour that the incumbent
+// cannot execute. Removing or renaming one of these absences is a coverage
+// regression, not a cleanup.
+var contractRequiredTargetCases = []string{
+	"identity-absent-vs-empty-fallback",
+	"identity-candidate-collision",
+	"identity-entity-adoption",
+	"identity-entity-description-only",
+	"identity-entity-malformed-duplicate-rejection",
+	"identity-entity-schema-url",
+	"identity-entity-typed-content",
+	"identity-entity-typed-ids",
+}
 
 // contractGroups are the permitted obligation groups.
 var contractGroups = []string{"fixed-case", "invariant", "route", "route-difference", "capability-gap", "concurrency"}
@@ -129,14 +164,47 @@ func TestContractManifest(t *testing.T) {
 	for _, decision := range decisions.Decisions {
 		require.NotEmpty(t, decision.ID)
 		require.NotContains(t, decisionByID, decision.ID, "duplicate decision %q", decision.ID)
-		require.Equal(t, "open", decision.Status,
-			"decision %q must be open: N0 may not resolve a semantic decision", decision.ID)
+		require.Contains(t, contractDecisionStatuses, decision.Status,
+			"decision %q has unknown status %q", decision.ID, decision.Status)
 		require.NotEmpty(t, decision.Question, "decision %q needs its question", decision.ID)
+		switch decision.Status {
+		case "open":
+			require.Empty(t, decision.Authority,
+				"open decision %q must not carry an authority", decision.ID)
+			require.Empty(t, decision.Date,
+				"open decision %q must not carry a date", decision.ID)
+			require.Empty(t, decision.Resolution,
+				"open decision %q must not carry a resolution", decision.ID)
+			require.NotEmpty(t, decision.HeldBy,
+				"open decision %q must state who still holds it", decision.ID)
+		case "decided":
+			require.NotEmpty(t, decision.Authority,
+				"decided decision %q must name its authority", decision.ID)
+			require.Regexp(t, `^[0-9]{4}-[0-9]{2}-[0-9]{2}$`, decision.Date,
+				"decided decision %q must state its decision date", decision.ID)
+			require.NotEmpty(t, decision.Resolution,
+				"decided decision %q must record its resolution", decision.ID)
+			require.NotEmpty(t, decision.Limits,
+				"decided decision %q must record its scope limits or exclusions", decision.ID)
+			require.Empty(t, decision.HeldBy,
+				"decided decision %q cannot still be held by someone", decision.ID)
+		}
 		decisionByID[decision.ID] = decision
 	}
-	for i := 1; i <= 10; i++ {
-		require.Contains(t, decisionByID, itoa(i),
-			"semantic decision %d is missing from the register", i)
+	// The register is an exact set: deleting or renaming a decision fails here,
+	// including a decision that has since been answered.
+	require.Len(t, decisionByID, 10, "the decision register must contain exactly decisions 1-10")
+	for _, id := range contractDecidedDecisions {
+		decision, ok := decisionByID[id]
+		require.True(t, ok, "semantic decision %s is missing from the register", id)
+		require.Equal(t, "decided", decision.Status,
+			"decision %s is accepted and must be recorded as decided", id)
+	}
+	for _, id := range contractOpenDecisions {
+		decision, ok := decisionByID[id]
+		require.True(t, ok, "semantic decision %s is missing from the register", id)
+		require.Equal(t, "open", decision.Status,
+			"decision %s is not answered by this package and must stay open", id)
 	}
 	blockedDecisions := map[string]bool{}
 
@@ -151,6 +219,25 @@ func TestContractManifest(t *testing.T) {
 			require.NotEmpty(t, obligation.Title, "an obligation needs a title")
 			require.Contains(t, contractGroups, obligation.Group, "unknown obligation group %q", obligation.Group)
 			require.Contains(t, contractStatuses, obligation.Status, "unknown status %q", obligation.Status)
+			openDecision := false
+			for _, id := range obligation.Decisions {
+				decision, ok := decisionByID[id]
+				require.True(t, ok, "%s names unknown decision %q", obligation.ID, id)
+				if decision.Status == "open" {
+					openDecision = true
+					if obligation.Status == "blocked" {
+						blockedDecisions[id] = true
+					}
+				}
+				if obligation.Status == "blocked" {
+					require.Equal(t, "open", decision.Status,
+						"%s is blocked by decision %q, which is already decided", obligation.ID, id)
+				}
+			}
+			if obligation.Status == "blocked" {
+				require.True(t, openDecision,
+					"%s is blocked but names no open decision", obligation.ID)
+			}
 			switch obligation.Status {
 			case "passing", "defect":
 				require.NotEmpty(t, obligation.Evidence,
@@ -160,11 +247,13 @@ func TestContractManifest(t *testing.T) {
 					"%s is blocked but names no semantic decision", obligation.ID)
 			case "partial":
 				// A partial obligation demonstrates some clauses and must say which
-				// remainder it is not claiming, so it can never read as covered.
+				// remainder it is not claiming, so it can never read as covered. A
+				// decided decision is provenance, not a non-passing remainder: only an
+				// open decision or a named non-passing gap keeps the remainder visible.
 				require.NotEmpty(t, obligation.Evidence,
 					"%s is partial but names no executable evidence for its demonstrated subset", obligation.ID)
-				require.Positive(t, len(obligation.Decisions)+len(obligation.Gaps),
-					"%s is partial but links neither a decision nor a non-passing gap", obligation.ID)
+				require.True(t, openDecision || len(obligation.Gaps) > 0,
+					"%s is partial but links neither an open decision nor a non-passing gap", obligation.ID)
 			}
 			if obligation.Status != "passing" {
 				require.NotEmpty(t, obligation.Note,
@@ -175,15 +264,6 @@ func TestContractManifest(t *testing.T) {
 				require.NotEmpty(t, evidence.Path, "%s has an evidence entry without a path", obligation.ID)
 				require.NotEmpty(t, evidence.Test, "%s has an evidence entry without a test", obligation.ID)
 				contractRequireGoTest(t, evidence)
-			}
-
-			for _, id := range obligation.Decisions {
-				decision, ok := decisionByID[id]
-				require.True(t, ok, "%s names unknown decision %q", obligation.ID, id)
-				require.Equal(t, "open", decision.Status)
-				if obligation.Status == "blocked" {
-					blockedDecisions[id] = true
-				}
 			}
 
 			for _, id := range obligation.Gaps {
@@ -226,10 +306,44 @@ func TestContractManifest(t *testing.T) {
 	}
 
 	// Every open decision must be attached to at least one blocked obligation, so
-	// the register cannot grow without a corresponding blocked case.
-	for id := range decisionByID {
+	// the register cannot grow without a corresponding blocked case. A decided
+	// decision may stay attached as provenance and needs no blocked obligation.
+	for id, decision := range decisionByID {
+		if decision.Status != "open" {
+			continue
+		}
 		require.True(t, blockedDecisions[id],
 			"decision %q is open but no blocked obligation names it; the decision register and the coverage report disagree", id)
+	}
+
+	// A target case is accepted semantics the incumbent cannot execute. It must
+	// name a non-passing obligation and the fixture must declare that obligation,
+	// so it cannot quietly become a passing case or disappear.
+	targetCaseObligation := map[string]string{}
+	targetCaseFixture := map[string]string{}
+	for _, fixture := range fixtures {
+		for _, target := range fixture.TargetCases {
+			require.NotEmpty(t, target.ID, "fixture %q has a target case without an id", fixture.ID)
+			require.NotContains(t, targetCaseObligation, target.ID, "duplicate target case %q", target.ID)
+			require.NotEmpty(t, target.Accepted, "target case %q must state the accepted behaviour", target.ID)
+			require.NotEmpty(t, target.Reason, "target case %q must state why it cannot execute", target.ID)
+			require.Contains(t, fixture.Obligations, target.Obligation,
+				"fixture %q must declare obligation %q for target case %q", fixture.ID, target.Obligation, target.ID)
+			targetCaseObligation[target.ID] = target.Obligation
+			targetCaseFixture[target.ID] = fixture.ID
+		}
+	}
+	for id, obligationID := range targetCaseObligation {
+		obligation, ok := byID[obligationID]
+		require.True(t, ok, "target case %q names unknown obligation %q", id, obligationID)
+		require.NotEqual(t, "passing", obligation.Status,
+			"target case %q is attached to passing obligation %q; an unexecuted case cannot be coverage", id, obligationID)
+		require.Contains(t, obligation.Fixtures, targetCaseFixture[id],
+			"obligation %q must list fixture %q for target case %q", obligationID, targetCaseFixture[id], id)
+	}
+	for _, id := range contractRequiredTargetCases {
+		require.Contains(t, targetCaseObligation, id,
+			"required target case %q is missing; an accepted but unimplemented case may not disappear", id)
 	}
 
 	// The populated statuses keep the report honest: a suite that silently marks

@@ -19,11 +19,13 @@
           "test": "TestOTAPSinkResourceIdentityAndDescriptiveVersions"
         }
       ],
-      "fixtures": [],
+      "fixtures": [
+        "resource_identity_fallback"
+      ],
       "decisions": [
         "1"
       ],
-      "note": "Demonstrated: otherwise identical streams differing in one supported compatibility dimension - a Resource service.* tuple, Scope, metric property or point attribute - stay distinct through the native and ordinary receiver routes. Not demonstrated: a native non-label identity dimension, complete Resource/Entity identity and missing/invalid Entity fallback, which are decision 1 (gap-entity-identity).",
+      "note": "Demonstrated: otherwise identical streams differing in one supported compatibility dimension - the compatibility Resource service.* tuple, a promoted Scope label, a metric property or a point attribute - stay distinct through the native and ordinary receiver routes. Decision 1 is decided (2026-11-15) and is retained here as provenance, not implementation evidence. Not demonstrated: Entity-aware Resource identity, typed Entity IDs, absent-versus-empty fallback presence and malformed/duplicate EntityRef rejection (gap-entity-identity, whose target cases are recorded in resource_identity_fallback), and complete Scope-injective stream identity, which decision 1 explicitly defers as a current-phase limitation.",
       "gaps": [
         "gap-entity-identity"
       ]
@@ -34,9 +36,11 @@
       "title": "Forced series/content candidate-hash collisions are rejected or disambiguated by complete labels/content and never merged",
       "status": "unsupported",
       "evidence": [],
-      "fixtures": [],
+      "fixtures": [
+        "resource_identity_fallback"
+      ],
       "decisions": [],
-      "note": "Complete-label collision guards exist (sharedSeriesLabels and associateWithHistory return ErrSeriesHashCollision), but a 64-bit labels.StableHash collision cannot be constructed from a test without a production injection point. N0 records the guard as untestable rather than adding production code or claiming coverage from reading it."
+      "note": "Complete-label collision guards exist (sharedSeriesLabels and associateWithHistory return ErrSeriesHashCollision), but a 64-bit labels.StableHash collision cannot be constructed from a test without a production injection point. Decision 1 now states that hashes are lookup and candidate encodings, never substitutes for complete canonical identity and complete-content comparison; the target case identity-candidate-collision in resource_identity_fallback records the accepted rule. No production hook was added and no forced-collision coverage is claimed."
     },
     {
       "id": "fixed-case-3",
@@ -69,10 +73,13 @@
         }
       ],
       "fixtures": [
-        "temporal_bands_and_disjoint_overlap"
+        "temporal_bands_and_disjoint_overlap",
+        "association_history_and_replay"
       ],
-      "decisions": [],
-      "note": "The fixture probes info() immediately before and at each boundary and asserts that a backfilled observation of the active content extends observation bounds without inserting a version or moving the successor."
+      "decisions": [
+        "2"
+      ],
+      "note": "The fixture association_history_and_replay probes info() immediately before and at each boundary. It asserts A/B/A as three epochs, that a backfilled observation extends only the epoch it observes, that a late actual B change starts at its effective time and ends the predecessor A epoch exclusively, and that a backfilled B equal to its immediate successor coalesces that successor while preserving both observation histories. The unit tests remain the direct boundary checks."
     },
     {
       "id": "fixed-case-5",
@@ -109,8 +116,10 @@
       "fixtures": [
         "rollback_conflict"
       ],
-      "decisions": [],
-      "note": "The fixture batches a valid new association, a conflicting owner version and a sample, then asserts the error class, the unchanged complete state, unchanged committed-work counters and an unchanged WAL segment count."
+      "decisions": [
+        "2"
+      ],
+      "note": "The fixture rollback_conflict batches a valid new association, a conflicting owner content version and a sample, then repeats with a same-time competing membership on a series that is already associated, and asserts the error class, the unchanged complete state, unchanged committed-work counters and an unchanged WAL segment count in both cases. The observation tests cover the same rejection without a fixture."
     },
     {
       "id": "fixed-case-7",
@@ -166,10 +175,12 @@
       ],
       "fixtures": [
         "float_bits_across_routes",
-        "start_timestamps_across_routes"
+        "start_timestamps_across_routes",
+        "association_replay_and_truncation",
+        "association_history_and_replay"
       ],
       "decisions": [],
-      "note": "The float fixture compares the same query before flush, after flush and after reopen on the columnar route and on stock TSDB. Retention truncation is asserted as an explicit Truncated bit, not as expired validity."
+      "note": "The float fixture compares the same query before flush, after flush and after reopen on the columnar route and on stock TSDB. Retention truncation is asserted as an explicit Truncated bit, not as expired validity. association_history_and_replay asserts that ordered content and membership histories survive WAL replay, and association_replay_and_truncation asserts that a bounded retained history and its explicit truncation survive replay without manufacturing versions or bounds."
     },
     {
       "id": "fixed-case-9",
@@ -262,7 +273,7 @@
     {
       "id": "fixed-case-12",
       "group": "fixed-case",
-      "title": "Kubernetes node totals, rollout totals, unattributed series, same-name/different-UID objects and unresolved conflicts equal the hand-authored results",
+      "title": "Kubernetes node totals, rollout totals, unattributed series, same-name/different-UID objects and rejected contradictory associations equal the hand-authored results",
       "status": "partial",
       "evidence": [
         {
@@ -278,10 +289,9 @@
         "2",
         "4"
       ],
-      "note": "Demonstrated: node A filtered 100+200 MiB = 300 MiB and unfiltered 350 MiB with the unattributed 50 MiB series retained; old 0.2 + new 0.3 cores = 0.5 with every input counted once; same-name series kept apart by explicit identifying attributes. Not demonstrated: collection-time acquisition through a plain scrape (decision 4, gap-k8s-acquisition), identifying same-name/different-UID objects without an explicit distinguishing attribute (decision 1, gap-entity-identity), and retaining an unresolved conflict (decision 2, gap-conflict-resolution).",
+      "note": "Demonstrated: node A filtered 100+200 MiB = 300 MiB and unfiltered 350 MiB with the unattributed 50 MiB series retained; old 0.2 + new 0.3 cores = 0.5 with every input counted once; same-name series kept apart by explicit identifying attributes. Decision 2 is decided: a contradictory association at the same series/kind/effective time is rejected atomically rather than retained unresolved, evidenced by gap-conflict-resolution and rollback_conflict. Not demonstrated: collection-time acquisition through a plain scrape (decision 4, gap-k8s-acquisition) and identifying same-name/different-UID objects without an explicit distinguishing attribute (decision 1, gap-entity-identity).",
       "gaps": [
         "gap-k8s-acquisition",
-        "gap-conflict-resolution",
         "gap-entity-identity"
       ]
     },
@@ -322,11 +332,13 @@
           "test": "TestIngestionEquivalence"
         }
       ],
-      "fixtures": [],
+      "fixtures": [
+        "resource_identity_fallback"
+      ],
       "decisions": [
         "1"
       ],
-      "note": "Demonstrated: Resource, Scope, metric-property and point-attribute context survives to the supported compatibility identity (the reserved service.* label tuple) and to per-series Metric and Resource owners. Not demonstrated: complete Entity-aware Resource identity and the missing/invalid Entity fallback, which are decision 1 (gap-entity-identity).",
+      "note": "Demonstrated: Resource, Scope, metric-property and point-attribute context survives to the supported compatibility identity (the reserved service.* label tuple) and to per-series Metric, Resource and Scope owners. Decision 1 is decided and retained as provenance. Not demonstrated: complete Entity-aware Resource identity, typed Entity IDs and the absent-versus-empty fallback, which are gap-entity-identity (target cases in resource_identity_fallback).",
       "gaps": [
         "gap-entity-identity"
       ]
@@ -368,9 +380,11 @@
           "test": "TestNativeMetadataIdentityReferenceDecodeOrder"
         }
       ],
-      "fixtures": [],
+      "fixtures": [
+        "association_replay_and_truncation"
+      ],
       "decisions": [],
-      "note": "Dictionary and reference deltas are exercised; no test claims exactly-once delivery."
+      "note": "Dictionary and reference deltas are exercised; no test claims exactly-once delivery. association_replay_and_truncation repeats an ordinary storage transaction with the same sample and metadata and records the duplicate rejection rather than a deduplicated success, so no exactly-once delivery is implied and no phantom Resource identity is created. That is storage-boundary evidence; OTAP/OTLP reset and receiver-retry semantics remain outside this package."
     },
     {
       "id": "invariant-4",
@@ -407,10 +421,13 @@
         }
       ],
       "fixtures": [
-        "temporal_bands_and_disjoint_overlap"
+        "temporal_bands_and_disjoint_overlap",
+        "association_history_and_replay"
       ],
-      "decisions": [],
-      "note": ""
+      "decisions": [
+        "2"
+      ],
+      "note": "The fixture association_history_and_replay probes immediately before and at each boundary, including a backfilled B change point that ends the predecessor A epoch exclusively."
     },
     {
       "id": "invariant-6",
@@ -424,16 +441,18 @@
         }
       ],
       "fixtures": [
-        "owner_only_publication"
+        "owner_only_publication",
+        "association_history_and_replay",
+        "association_replay_and_truncation"
       ],
       "decisions": [],
-      "note": "Truncation is reported as an explicit bit; observation bounds never become validity bounds."
+      "note": "Truncation is reported as an explicit bit; observation bounds never become validity bounds. association_replay_and_truncation asserts that a discarded oldest version is reported as history_truncated and is not resurrected by a query or by replay."
     },
     {
       "id": "invariant-7",
       "group": "invariant",
       "title": "Same-time content and membership conflicts have deterministic outcomes; map order or newest-arrival selection is forbidden",
-      "status": "partial",
+      "status": "passing",
       "evidence": [
         {
           "path": "storage/columnar/metadata_model_test.go",
@@ -442,6 +461,10 @@
         {
           "path": "storage/columnar/metadata_model_test.go",
           "test": "TestMetadataMembershipChanges"
+        },
+        {
+          "path": "storage/columnar/metadata_observation_test.go",
+          "test": "TestMetadataObservationConflictsLeaveNoState"
         }
       ],
       "fixtures": [
@@ -450,10 +473,8 @@
       "decisions": [
         "2"
       ],
-      "note": "Demonstrated: equal-time conflicting content and membership are rejected deterministically, without map-order or arrival-order selection. Not demonstrated: the alternative contract outcome of retaining samples with an explicitly unresolved association, which is decision 2 (gap-conflict-resolution).",
-      "gaps": [
-        "gap-conflict-resolution"
-      ]
+      "note": "Decision 2 is decided: same-time differing content and same-time differing membership both reject the whole transaction atomically, with no map-order or arrival-order selection. Fixed-case-6 and invariant-8 assert the complete rollback, and rollback_conflict exercises both conflict classes. Retaining an explicitly unresolved association is no longer a target requirement.",
+      "gaps": []
     },
     {
       "id": "invariant-8",
@@ -515,24 +536,27 @@
     {
       "id": "invariant-11",
       "group": "invariant",
-      "title": "Unassociated series survive enrichment, enrichment contributes each input series at most once, and conflicting associations remain unresolved",
-      "status": "partial",
+      "title": "Unassociated series survive enrichment, enrichment contributes each input series at most once, and contradictory associations are rejected rather than retained unresolved",
+      "status": "passing",
       "evidence": [
         {
           "path": "storage/columnar/metadata_info_test.go",
           "test": "TestInfoFallsBackToTargetInfoWithoutResourceAssociation"
+        },
+        {
+          "path": "storage/columnar/metadata_observation_test.go",
+          "test": "TestMetadataObservationConflictsLeaveNoState"
         }
       ],
       "fixtures": [
-        "kubernetes_node_and_rollout_totals"
+        "kubernetes_node_and_rollout_totals",
+        "association_history_and_replay"
       ],
       "decisions": [
         "2"
       ],
-      "note": "Demonstrated: unassociated series survive enrichment and each input series contributes at most once, including across ownership transitions. Not demonstrated: retaining a conflicting association as unresolved; the store rejects a contradictory same-time association instead, which is decision 2 (gap-conflict-resolution).",
-      "gaps": [
-        "gap-conflict-resolution"
-      ]
+      "note": "Demonstrated: unassociated series survive enrichment and each input series contributes at most once, including across ownership transitions. Decision 2 selects atomic rejection for contradictory associations, so no stored unresolved association is implied or tested; that rejection is asserted by TestMetadataObservationConflictsLeaveNoState and rollback_conflict.",
+      "gaps": []
     },
     {
       "id": "invariant-12",
@@ -619,6 +643,20 @@
       "note": "An architecture-scope rule recorded for review; nothing in N0 adds distribution."
     },
     {
+      "id": "scope-identity-current-phase",
+      "group": "capability-gap",
+      "title": "Scope identity does not distinguish otherwise identical streams in the current phase",
+      "status": "recorded",
+      "evidence": [],
+      "fixtures": [
+        "resource_identity_fallback"
+      ],
+      "decisions": [
+        "1"
+      ],
+      "note": "Decision 1 explicitly defers Scope-injective stream identity for the current phase. Scope metadata is still retained, versioned and queryable as its own owner kind; resource_identity_fallback asserts that survival without claiming that Scope alone distinguishes otherwise identical streams. Metric properties and data-point attributes remain distinct logical stream dimensions under existing translation semantics."
+    },
+    {
       "id": "route-scrape",
       "group": "route",
       "title": "A real scrape executes parsing, relabeling, metadata forwarding and commit into the columnar store",
@@ -699,12 +737,14 @@
         }
       ],
       "fixtures": [
-        "temporal_bands_and_disjoint_overlap"
+        "temporal_bands_and_disjoint_overlap",
+        "association_replay_and_truncation",
+        "association_history_and_replay"
       ],
       "decisions": [
         "7"
       ],
-      "note": "The fixture drives /resources through httptest with the real handler. Which response fields are contractual is decision 7."
+      "note": "The fixtures drive /resources through httptest with the real handler, including an explicit history_truncated response. Which response fields are contractual is decision 7."
     },
     {
       "id": "route-promql-info",
@@ -719,12 +759,14 @@
       ],
       "fixtures": [
         "kubernetes_node_and_rollout_totals",
-        "temporal_bands_and_disjoint_overlap"
+        "temporal_bands_and_disjoint_overlap",
+        "association_history_and_replay",
+        "association_replay_and_truncation"
       ],
       "decisions": [
         "6"
       ],
-      "note": "Current info() semantics only. PR99 grammar and promotion syntax are decision 6."
+      "note": "Current info() semantics only, including absent and explicitly truncated histories. PR99 grammar and promotion syntax are decision 6."
     },
     {
       "id": "route-remote-write",
@@ -794,21 +836,25 @@
       "title": "Typed metadata content (booleans, integers, doubles, arrays, maps, null, unknown)",
       "status": "unsupported",
       "evidence": [],
-      "fixtures": [],
+      "fixtures": [
+        "resource_identity_fallback"
+      ],
       "decisions": [],
-      "note": "Content.Attributes and every HTTP value are string-only. Boolean true versus the string \"true\", integer 1 versus double 1, array order, map equality and null versus absent are not representable, so no fixture may assert them."
+      "note": "Content.Attributes and every HTTP value are string-only. Boolean true versus the string \"true\", integer 1 versus double 1, array order, map equality and null versus absent are not representable, so no fixture may assert them. The target case identity-entity-typed-content in resource_identity_fallback records the accepted typed-content clause."
     },
     {
       "id": "gap-entity-identity",
       "group": "capability-gap",
-      "title": "Entity-aware Resource identity and EntityRefs",
-      "status": "blocked",
+      "title": "Entity-aware Resource identity, EntityRefs and fallback presence semantics",
+      "status": "unsupported",
       "evidence": [],
-      "fixtures": [],
+      "fixtures": [
+        "resource_identity_fallback"
+      ],
       "decisions": [
         "1"
       ],
-      "note": "Resource identity is the fixed service.name/service.namespace/service.instance.id triple and EntityRefs are ignored. The target identity representation is decision 1."
+      "note": "Decision 1 is decided, so this is no longer semantically blocked. The incumbent still stores only the fixed service.name/service.namespace/service.instance.id compatibility identity, ignores EntityRefs, cannot distinguish an absent fallback attribute from an explicitly empty one, and has no malformed/duplicate same-type EntityRef rejection. resource_identity_fallback executes the representable compatibility cases and records the unimplemented clauses as machine-checked target cases."
     },
     {
       "id": "gap-source-provenance",
@@ -837,14 +883,29 @@
     {
       "id": "gap-conflict-resolution",
       "group": "capability-gap",
-      "title": "Retaining a conflicting association as explicitly unresolved",
-      "status": "blocked",
-      "evidence": [],
-      "fixtures": [],
+      "title": "Contradictory same-time associations are rejected atomically",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataConflictingContentRejected"
+        },
+        {
+          "path": "storage/columnar/metadata_model_test.go",
+          "test": "TestMetadataMembershipChanges"
+        },
+        {
+          "path": "storage/columnar/metadata_observation_test.go",
+          "test": "TestMetadataObservationConflictsLeaveNoState"
+        }
+      ],
+      "fixtures": [
+        "rollback_conflict"
+      ],
       "decisions": [
         "2"
       ],
-      "note": "The store rejects contradictory same-time claims. Whether that is the target policy, and what replay must then do, is decision 2."
+      "note": "The historical entry asked whether a conflicting association could be retained as explicitly unresolved. Decision 2 rejected that alternative: contradictory same-time content or membership rejects the whole transaction atomically, publishes nothing and leaves committed state unchanged. The evidence exercises both conflict classes and the complete rollback; no unresolved-retention subsystem exists or is required by the target."
     },
     {
       "id": "gap-k8s-acquisition",
@@ -897,10 +958,11 @@
       "status": "unsupported",
       "evidence": [],
       "fixtures": [
-        "temporal_bands_and_disjoint_overlap"
+        "temporal_bands_and_disjoint_overlap",
+        "association_history_and_replay"
       ],
       "decisions": [],
-      "note": "info() resolves metadata per evaluation instant rather than once per stable band. The observable results at each boundary are correct and asserted; this entry records the mechanism gap without claiming a performance result."
+      "note": "info() resolves metadata per evaluation instant rather than once per stable band. The observable results at each boundary are correct and asserted, including by association_history_and_replay; this entry records the mechanism gap without claiming a performance result."
     },
     {
       "id": "gap-snapshot-cursor",

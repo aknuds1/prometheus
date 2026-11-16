@@ -1,18 +1,16 @@
 {
   "id": "rollback_conflict",
-  "title": "A transaction whose valid metadata prefix is followed by a same-time conflict publishes no sample, metadata, membership, WAL segment or committed-work counter",
+  "title": "A transaction whose valid metadata prefix is followed by a same-time content or membership conflict publishes no sample, metadata, membership, WAL segment or committed-work counter",
   "obligations": [
     "fixed-case-6",
     "invariant-7",
-    "invariant-8"
+    "invariant-8",
+    "gap-conflict-resolution"
   ],
   "routes": [
     "columnar"
   ],
-  "open_decisions": [
-    "2"
-  ],
-  "scope": "Settled rejected-transaction atomicity only. The fixture states a conflict that is already rejected at the same owner and effective time, so it does not decide association cardinality, late/multi-writer policy or replay of unresolved associations (decision 2). The WAL assertion compares the segment count before and after the rejected transaction; the absolute count is a property of this fixture's incumbent layout, not a semantic value.",
+  "scope": "Settled rejected-transaction atomicity only. The fixture first rejects a same-owner different-content assertion, then establishes one accepted Scrape membership and rejects a same-time competing Scrape owner while the transaction also carries a valid sample. Both conflicts are already rejected at the same series/kind/effective time, so the fixture does not decide association cardinality, late/multi-writer policy or replay of unresolved associations (decision 2 is decided as atomic rejection, not unresolved retention). The WAL assertion compares the segment count before and after each rejected transaction; the absolute count is a property of this fixture's incumbent layout, not a semantic value.",
   "events": [
     {
       "op": "commit",
@@ -275,6 +273,169 @@
       "expect": {
         "series": []
       }
+    },
+    {
+      "op": "commit",
+      "args": {
+        "parts": [
+          {
+            "series": {
+              "__name__": "conflict_metric"
+            },
+            "resource_owner": {
+              "kind": "resource",
+              "identifying": {
+                "service.name": "checkout",
+                "service.namespace": "shop",
+                "service.instance.id": "pod-9"
+              }
+            },
+            "observes": [
+              {
+                "series": {
+                  "__name__": "conflict_metric"
+                },
+                "resource_owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "checkout",
+                    "service.namespace": "shop",
+                    "service.instance.id": "pod-9"
+                  }
+                },
+                "owner": {
+                  "kind": "scrape",
+                  "identifying": {
+                    "scrape": "job-a"
+                  }
+                },
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_metadata_transactions": 2,
+        "committed_versions": 2,
+        "committed_memberships": 2
+      }
+    },
+    {
+      "op": "commit",
+      "args": {
+        "parts": [
+          {
+            "series": {
+              "__name__": "conflict_metric"
+            },
+            "resource_owner": {
+              "kind": "resource",
+              "identifying": {
+                "service.name": "checkout",
+                "service.namespace": "shop",
+                "service.instance.id": "pod-9"
+              }
+            },
+            "samples": [
+              {
+                "t": 4000,
+                "value": "4"
+              }
+            ],
+            "observes": [
+              {
+                "series": {
+                  "__name__": "conflict_metric"
+                },
+                "resource_owner": {
+                  "kind": "resource",
+                  "identifying": {
+                    "service.name": "checkout",
+                    "service.namespace": "shop",
+                    "service.instance.id": "pod-9"
+                  }
+                },
+                "owner": {
+                  "kind": "scrape",
+                  "identifying": {
+                    "scrape": "job-b"
+                  }
+                },
+                "content": {
+                  "interval": "60s"
+                },
+                "effective_from": 1000
+              }
+            ]
+          }
+        ]
+      },
+      "expect_error": "conflicting_membership"
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_metadata_transactions": "$previous",
+        "committed_versions": "$previous",
+        "committed_memberships": "$previous",
+        "wal_segments": "$previous"
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "conflict_metric",
+        "at": 4000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"conflict_metric\", __otel_resource__=\"<resource>\"}",
+            "samples": [
+              "0x4000000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 0,
+        "end": 4000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"conflict_metric\", __otel_resource__=\"<resource>\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
     }
   ],
   "state": {
@@ -300,6 +461,23 @@
           {
             "content": {
               "host": "a"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      },
+      {
+        "kind": "scrape",
+        "identifying": {
+          "scrape": "job-a"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "interval": "15s"
             },
             "effective_from": 1000,
             "observed_from": 1000,

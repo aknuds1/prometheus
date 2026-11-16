@@ -117,6 +117,15 @@ type contractFixture struct {
 	// OpenDecisions names semantic decisions the fixture deliberately does not
 	// answer. The behaviour it does assert must be independent of them.
 	OpenDecisions []string `json:"open_decisions,omitempty"`
+	// RetainedVersionLimit asks the store to retain at most this many versions
+	// per owner. Zero leaves the route default, which the columnar contract route
+	// deliberately makes unbounded. A route that cannot honour a bound must not be
+	// listed for a fixture that states one.
+	RetainedVersionLimit int `json:"retained_version_limit,omitempty"`
+	// TargetCases are accepted target behaviours this fixture deliberately does
+	// not execute because the incumbent cannot express them. Each names the
+	// non-passing obligation that keeps the absence visible.
+	TargetCases []contractTargetCase `json:"target_cases,omitempty"`
 	// Scope records what the fixture does and does not claim, for review.
 	Scope string `json:"scope"`
 	// Events are applied in order.
@@ -124,6 +133,17 @@ type contractFixture struct {
 	// State is the complete retained state after every event. A nil slice means
 	// "do not assert"; an empty slice means "assert there are none".
 	State *contractState `json:"state,omitempty"`
+}
+
+// contractTargetCase is one accepted target behaviour the incumbent cannot
+// execute. It is a machine-checked record of an absent test, not a skipped test:
+// the runner never attempts it, and the manifest gate requires a non-passing
+// obligation to own it.
+type contractTargetCase struct {
+	ID         string `json:"id"`
+	Obligation string `json:"obligation"`
+	Accepted   string `json:"accepted"`
+	Reason     string `json:"reason"`
 }
 
 // contractEvent is one ordered operation with its expectation.
@@ -293,7 +313,10 @@ type contractPromQLSeries struct {
 }
 
 // TestContractFixtures runs every machine-readable fixture on every route it
-// declares and compares every observation and the final state.
+// declares and compares every observation and the final state. A fixture's
+// target_cases are accepted behaviours the incumbent cannot execute; they are
+// never attempted here and the manifest gate requires each to name a non-passing
+// obligation, so an absent test cannot look like a passing one.
 func TestContractFixtures(t *testing.T) {
 	fixtures := contractLoadFixtures(t)
 	require.NotEmpty(t, fixtures, "the contract fixture directory must not be empty")
@@ -302,7 +325,7 @@ func TestContractFixtures(t *testing.T) {
 			require.NotEmpty(t, fixture.Routes, "fixture %s declares no route", fixture.ID)
 			for _, routeName := range fixture.Routes {
 				t.Run(routeName, func(t *testing.T) {
-					route := contractNewRoute(t, routeName)
+					route := contractNewRoute(t, routeName, fixture.RetainedVersionLimit)
 					for i, event := range fixture.Events {
 						if !contractEventApplies(event, routeName) {
 							continue
@@ -364,21 +387,30 @@ type contractRoute struct {
 }
 
 // contractNewRoute builds one route adapter for a fixture. Routes own their
-// temporary directory and are closed when the test ends.
-func contractNewRoute(t *testing.T, name string) *contractRoute {
+// temporary directory and are closed when the test ends. A fixture that bounds
+// retained history must not be run on a route that cannot honour the bound.
+func contractNewRoute(t *testing.T, name string, retainedVersionLimit int) *contractRoute {
 	t.Helper()
 	route := &contractRoute{name: name, engine: contractEngine(t)}
 	switch name {
 	case contractRouteColumnar:
 		route.dir = t.TempDir()
-		route.opts = StorageOptions{FlushSamples: 1_000, MetadataVersionCap: -1}
+		limit := -1
+		if retainedVersionLimit > 0 {
+			limit = retainedVersionLimit
+		}
+		route.opts = StorageOptions{FlushSamples: 1_000, MetadataVersionCap: limit}
 		store, err := NewStorage(route.dir, route.opts)
 		require.NoError(t, err)
 		route.columnar = store
 		t.Cleanup(func() { require.NoError(t, store.Close()) })
 	case contractRouteTSDB:
+		require.Zero(t, retainedVersionLimit,
+			"stock TSDB route cannot honour a retained version limit; restrict the fixture to the columnar route")
 		route.tsdb = teststorage.New(t)
 	case contractRouteTSDBST:
+		require.Zero(t, retainedVersionLimit,
+			"stock TSDB route cannot honour a retained version limit; restrict the fixture to the columnar route")
 		// The supported stock start-timestamp configuration: ST storage requires
 		// an ST-capable float encoding, and histograms need their own ST encoding.
 		route.tsdb = teststorage.New(t, func(opts *tsdb.Options) {
@@ -891,7 +923,16 @@ func (r *contractRoute) captureSeries(t *testing.T) []contractSeriesState {
 		out = append(out, entry)
 	}
 	require.NoError(t, set.Err())
-	slices.SortFunc(out, func(a, b contractSeriesState) int { return strings.Compare(a.Labels, b.Labels) })
+	slices.SortFunc(out, func(a, b contractSeriesState) int {
+		if byLabels := strings.Compare(a.Labels, b.Labels); byLabels != 0 {
+			return byLabels
+		}
+		// The canonical rendering replaces the Resource reference with a
+		// placeholder, so two Resources that differ only in identity render the
+		// same labels. Sort their exact samples as a tie-breaker so the complete
+		// state expectation has a deterministic order and still shows both series.
+		return strings.Compare(strings.Join(a.Samples, ","), strings.Join(b.Samples, ","))
+	})
 	return out
 }
 
@@ -996,7 +1037,12 @@ func contractRenderPromQL(t *testing.T, route *contractRoute, args contractPromQ
 			Labels: contractNormalizeLabels(sample.Metric), Samples: []string{value},
 		})
 	}
-	slices.SortFunc(out.Series, func(a, b contractPromQLSeries) int { return strings.Compare(a.Labels, b.Labels) })
+	slices.SortFunc(out.Series, func(a, b contractPromQLSeries) int {
+		if byLabels := strings.Compare(a.Labels, b.Labels); byLabels != 0 {
+			return byLabels
+		}
+		return strings.Compare(strings.Join(a.Samples, ","), strings.Join(b.Samples, ","))
+	})
 	return out
 }
 
@@ -1366,9 +1412,9 @@ func TestHistogramValidationMatchesStock(t *testing.T) {
 	}
 
 	ls := labels.FromStrings("__name__", "inconsistent_histogram")
-	columnarRoute := contractNewRoute(t, contractRouteColumnar)
+	columnarRoute := contractNewRoute(t, contractRouteColumnar, 0)
 	_, columnarErr := columnarRoute.appendable().Append(0, ls, 0, 1000, 0, inconsistent, nil, storage.AOptions{})
-	tsdbRoute := contractNewRoute(t, contractRouteTSDB)
+	tsdbRoute := contractNewRoute(t, contractRouteTSDB, 0)
 	_, tsdbErr := tsdbRoute.appendable().Append(0, ls, 0, 1000, 0, inconsistent, nil, storage.AOptions{})
 
 	require.ErrorIs(t, columnarErr, histogram.ErrHistogramCountMismatch,

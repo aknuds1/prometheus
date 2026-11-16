@@ -1,0 +1,640 @@
+{
+  "id": "resource_identity_fallback",
+  "title": "The compatibility Resource identity distinguishes otherwise identical streams and survives a descriptive content change, while Entity-aware identity remains a recorded target gap",
+  "obligations": [
+    "fixed-case-1",
+    "fixed-case-2",
+    "gap-entity-identity",
+    "gap-typed-content",
+    "invariant-1",
+    "scope-identity-current-phase"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "scope": "Executable part: the current-phase compatibility identity is the service.name/service.namespace/service.instance.id tuple carried in the ordinary __otel_resource__ label; two otherwise identical streams under different tuples stay distinct, a descriptive content change keeps the same owner and series identity, and Scope metadata survives as its own owner kind without any claim that Scope alone distinguishes streams. Entity-aware identity, typed Entity ID content, absent-versus-empty fallback presence, Entity Schema URL context, EntityRef rejection and a forced candidate collision are accepted but not executable in this incumbent; target_cases records them against non-passing obligations instead of asserting a guessed golden. Nothing here selects a physical identity representation beyond the accepted ordinary-label carrier.",
+  "target_cases": [
+    {
+      "id": "identity-absent-vs-empty-fallback",
+      "obligation": "gap-entity-identity",
+      "accepted": "An absent service.name, service.namespace or service.instance.id is a different compatibility identity from the same attribute explicitly set to the empty string; the fallback preserves the absent-versus-empty distinction.",
+      "reason": "ResourceOwner canonicalises all three compatibility keys and reads a missing key as the empty string, so the incumbent cannot distinguish the two inputs. The fixture does not execute either interpretation as the accepted answer."
+    },
+    {
+      "id": "identity-entity-typed-ids",
+      "obligation": "gap-entity-identity",
+      "accepted": "Typed Entity IDs differing by Entity type, ID-key grouping, typed ID value or raw Resource attribute remain distinct Resource identities; typed content is not stringified and Entity set membership is part of the identity.",
+      "reason": "EntityRefs are ignored at translation and the owner key is the fixed service.* tuple, so no representation exists that could execute the case."
+    },
+    {
+      "id": "identity-entity-description-only",
+      "obligation": "gap-entity-identity",
+      "accepted": "Attributes referenced only by description_keys do not participate in Resource identity, while a key that is an ID key of one Entity remains identifying even if another Entity lists it as a description key.",
+      "reason": "EntityRef id_keys and description_keys are not decoded, so the incumbent cannot classify or preserve the distinction."
+    },
+    {
+      "id": "identity-entity-adoption",
+      "obligation": "gap-entity-identity",
+      "accepted": "Adding, removing or changing valid EntityRefs may intentionally change the Resource and series identity and is not reinterpreted as an ordinary descriptive content update.",
+      "reason": "EntityRefs are dropped at translation, so adoption cannot change a stored Resource or series identity."
+    },
+    {
+      "id": "identity-entity-schema-url",
+      "obligation": "gap-entity-identity",
+      "accepted": "Entity Schema URL context is preserved separately and is not silently folded into an identifying attribute.",
+      "reason": "Entity context is not represented at all; the separate Resource Schema owner kind is not an Entity Schema URL carrier."
+    },
+    {
+      "id": "identity-entity-malformed-duplicate-rejection",
+      "obligation": "gap-entity-identity",
+      "accepted": "Malformed EntityRefs and duplicate same-type EntityRefs atomically reject the affected batch or transaction with no fixed-triplet fallback and no samples, metadata/index prefix, WAL prefix or committed-work counters.",
+      "reason": "EntityRefs are ignored rather than validated, so neither the rejection nor its rollback exists on the incumbent route."
+    },
+    {
+      "id": "identity-candidate-collision",
+      "obligation": "fixed-case-2",
+      "accepted": "A hash or other candidate encoding that collides never merges complete unequal identity; complete canonical Resource identity and complete content remain authoritative.",
+      "reason": "No production injection point can force a candidate collision, and the fixture cannot manufacture one. Distinct tuples are asserted, but forced-collision coverage remains unsupported."
+    },
+    {
+      "id": "identity-entity-typed-content",
+      "obligation": "gap-typed-content",
+      "accepted": "Typed Entity ID and raw Resource content participates in the identity hash without stringification: boolean true differs from string \"true\", integer 1 differs from double 1, arrays preserve order, maps ignore order and null differs from absent.",
+      "reason": "Content.Attributes is string-only, so typed equality cannot be represented or compared."
+    }
+  ],
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "identity_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "1"
+          },
+          {
+            "t": 2000,
+            "value": "2"
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "identity_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-2"
+          }
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "3"
+          },
+          {
+            "t": 2000,
+            "value": "4"
+          }
+        ]
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "identity_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "content": {
+          "host.name": "h1"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "identity_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-2"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-2"
+          }
+        },
+        "content": {
+          "host.name": "h2"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "identity_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "content": {
+          "host.name": "h1"
+        },
+        "effective_from": 1500
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "identity_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "content": {
+          "host.name": "h1",
+          "zone": "east"
+        },
+        "effective_from": 2000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "identity_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-1"
+          }
+        },
+        "owner": {
+          "kind": "scope",
+          "identifying": {
+            "name": "runtime",
+            "version": "1.2.0"
+          }
+        },
+        "content": {
+          "schema_url": "https://opentelemetry.io/schemas/1.24.0"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_versions": 4,
+        "committed_memberships": 3
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(identity_metric)",
+        "at": 1500
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"identity_metric\", __otel_resource__=\"<resource>\", host_name=\"h1\", route=\"/a\"}",
+            "samples": [
+              "0x3ff0000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"identity_metric\", __otel_resource__=\"<resource>\", host_name=\"h2\", route=\"/a\"}",
+            "samples": [
+              "0x4008000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(identity_metric)",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"identity_metric\", __otel_resource__=\"<resource>\", host_name=\"h1\", route=\"/a\", zone=\"east\"}",
+            "samples": [
+              "0x4000000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"identity_metric\", __otel_resource__=\"<resource>\", host_name=\"h2\", route=\"/a\"}",
+            "samples": [
+              "0x4010000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "host.name",
+            "value": "h1"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"identity_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+            "owner": "{\"service.instance.id\":\"pod-1\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-1",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 2000,
+            "versions": [
+              {
+                "content": {
+                  "host.name": "h1"
+                },
+                "effective_from": 1000,
+                "valid_until": 2000,
+                "observed_from": 1000,
+                "observed_until": 1500
+              },
+              {
+                "content": {
+                  "host.name": "h1",
+                  "zone": "east"
+                },
+                "effective_from": 2000,
+                "observed_from": 2000,
+                "observed_until": 2000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "host.name",
+            "value": "h2"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"identity_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+            "owner": "{\"service.instance.id\":\"pod-2\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-2",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "host.name": "h2"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scope",
+        "start": 0,
+        "end": 3000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"identity_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+            "owner": "{\"name\":\"runtime\",\"version\":\"1.2.0\"}",
+            "kind": "scope",
+            "owner_identifying": {
+              "name": "runtime",
+              "version": "1.2.0"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "schema_url": "https://opentelemetry.io/schemas/1.24.0"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "stats_reset"
+    },
+    {
+      "op": "http",
+      "args": {
+        "path": "/resources?kind=resource&start=1&end=3"
+      },
+      "expect": {
+        "status": 200,
+        "data": {
+          "status": "success",
+          "data": {
+            "owners": [
+              {
+                "id": "{\"service.instance.id\":\"pod-1\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+                "kind": "resource",
+                "identifying": {
+                  "service.instance.id": "pod-1",
+                  "service.name": "checkout",
+                  "service.namespace": "shop"
+                },
+                "history_truncated": false,
+                "versions": [
+                  {
+                    "descriptive": {
+                      "host.name": "h1"
+                    },
+                    "effective_from": 1000,
+                    "valid_until": 2000,
+                    "observed_from": 1000,
+                    "observed_until": 1500
+                  },
+                  {
+                    "descriptive": {
+                      "host.name": "h1",
+                      "zone": "east"
+                    },
+                    "effective_from": 2000,
+                    "observed_from": 2000,
+                    "observed_until": 2000
+                  }
+                ]
+              },
+              {
+                "id": "{\"service.instance.id\":\"pod-2\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+                "kind": "resource",
+                "identifying": {
+                  "service.instance.id": "pod-2",
+                  "service.name": "checkout",
+                  "service.namespace": "shop"
+                },
+                "history_truncated": false,
+                "versions": [
+                  {
+                    "descriptive": {
+                      "host.name": "h2"
+                    },
+                    "effective_from": 1000,
+                    "observed_from": 1000,
+                    "observed_until": 1000
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "op": "http",
+      "args": {
+        "path": "/resources?kind=scope&start=0&end=3"
+      },
+      "expect": {
+        "status": 200,
+        "data": {
+          "status": "success",
+          "data": {
+            "owners": [
+              {
+                "id": "{\"name\":\"runtime\",\"version\":\"1.2.0\"}",
+                "kind": "scope",
+                "identifying": {
+                  "name": "runtime",
+                  "version": "1.2.0"
+                },
+                "history_truncated": false,
+                "versions": [
+                  {
+                    "descriptive": {
+                      "schema_url": "https://opentelemetry.io/schemas/1.24.0"
+                    },
+                    "effective_from": 1000,
+                    "observed_from": 1000,
+                    "observed_until": 1000
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"identity_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+        "samples": [
+          "1000|0x3ff0000000000000|float|0",
+          "2000|0x4000000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"identity_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+        "samples": [
+          "1000|0x4008000000000000|float|0",
+          "2000|0x4010000000000000|float|0"
+        ]
+      }
+    ],
+    "owners": [
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "pod-1",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "host.name": "h1"
+            },
+            "effective_from": 1000,
+            "valid_until": 2000,
+            "observed_from": 1000,
+            "observed_until": 1500
+          },
+          {
+            "content": {
+              "host.name": "h1",
+              "zone": "east"
+            },
+            "effective_from": 2000,
+            "observed_from": 2000,
+            "observed_until": 2000
+          }
+        ]
+      },
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "pod-2",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "host.name": "h2"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      },
+      {
+        "kind": "scope",
+        "identifying": {
+          "name": "runtime",
+          "version": "1.2.0"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "schema_url": "https://opentelemetry.io/schemas/1.24.0"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      }
+    ]
+  }
+}

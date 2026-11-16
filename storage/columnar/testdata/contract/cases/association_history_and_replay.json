@@ -1,0 +1,693 @@
+{
+  "id": "association_history_and_replay",
+  "title": "Ordered content and membership histories keep independent validity and observation bounds across backfill, equal-successor coalescing, ownership movement and WAL replay",
+  "obligations": [
+    "fixed-case-4",
+    "fixed-case-8",
+    "gap-info-band-execution",
+    "invariant-11",
+    "invariant-5",
+    "invariant-6",
+    "route-metadata-http",
+    "route-promql-info"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "9"
+  ],
+  "scope": "Settled decision-2 history semantics only. Effective time defines order; the fixture commits a forward A/B/A sequence and then backfills an observation inside the first A epoch and an actual B change point equal to its immediate successor. The retained history is A [1000,1800), B [1800,3000), A [3000,inf): the late B observation coalesces the redundant change point at 2000 while preserving both observation ranges, and observation bounds never become validity bounds. A Scrape owner history changes at 2500 outside the series' Scrape membership band [1200,2200), proving content and membership histories are independent. The fixture states no unresolved-association retention, no clearing/expiry operation, no acquisition path, no Source cardinality, no PR99 grammar, no snapshot cursor and no admission budget; those remain open decisions. Replay is asserted from the same committed log after reopening the store, not as a commutativity claim for unrelated commit orders.",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "history_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "samples": [
+          {
+            "t": 500,
+            "value": "1"
+          },
+          {
+            "t": 1000,
+            "value": "2"
+          },
+          {
+            "t": 1500,
+            "value": "3"
+          },
+          {
+            "t": 1800,
+            "value": "4"
+          },
+          {
+            "t": 2000,
+            "value": "5"
+          },
+          {
+            "t": 2500,
+            "value": "6"
+          },
+          {
+            "t": 3000,
+            "value": "7"
+          },
+          {
+            "t": 3500,
+            "value": "8"
+          }
+        ]
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "history_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "content": {
+          "host.name": "h1"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "history_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "content": {
+          "host.name": "h2"
+        },
+        "effective_from": 2000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "history_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "content": {
+          "host.name": "h1"
+        },
+        "effective_from": 3000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "history_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "content": {
+          "host.name": "h1"
+        },
+        "effective_from": 1400
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "history_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "content": {
+          "host.name": "h2"
+        },
+        "effective_from": 1800
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "history_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "job-a"
+          }
+        },
+        "content": {
+          "interval": "15s"
+        },
+        "effective_from": 1200
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "history_metric",
+          "route": "/a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "history",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-3"
+          }
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "job-b"
+          }
+        },
+        "content": {
+          "interval": "60s"
+        },
+        "effective_from": 2200
+      }
+    },
+    {
+      "op": "commit",
+      "args": {
+        "parts": [],
+        "owner_updates": [
+          {
+            "series": {},
+            "owner": {
+              "kind": "scrape",
+              "identifying": {
+                "scrape": "job-a"
+              }
+            },
+            "content": {
+              "interval": "30s"
+            },
+            "effective_from": 2500
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(history_metric)",
+        "at": 999
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+            "samples": [
+              "0x3ff0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(history_metric)",
+        "at": 1799
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", host_name=\"h1\", route=\"/a\"}",
+            "samples": [
+              "0x4008000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(history_metric)",
+        "at": 1800
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", host_name=\"h2\", route=\"/a\"}",
+            "samples": [
+              "0x4010000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(history_metric)",
+        "at": 2999
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", host_name=\"h2\", route=\"/a\"}",
+            "samples": [
+              "0x4018000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(history_metric)",
+        "at": 3000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", host_name=\"h1\", route=\"/a\"}",
+            "samples": [
+              "0x401c000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "interval",
+            "value": "15s"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+            "owner": "{\"scrape\":\"job-a\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-a"
+            },
+            "membership_start": 1200,
+            "membership_until": 2200,
+            "membership_observed_until": 1200,
+            "versions": [
+              {
+                "content": {
+                  "interval": "15s"
+                },
+                "effective_from": 1200,
+                "valid_until": 2500,
+                "observed_from": 1200,
+                "observed_until": 1200
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "interval",
+            "value": "30s"
+          }
+        ]
+      },
+      "expect": {
+        "series": []
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 1000,
+        "end": 3000,
+        "attributes": [
+          {
+            "name": "interval",
+            "value": "60s"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+            "owner": "{\"scrape\":\"job-b\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "job-b"
+            },
+            "membership_start": 2200,
+            "membership_observed_until": 2200,
+            "versions": [
+              {
+                "content": {
+                  "interval": "60s"
+                },
+                "effective_from": 2200,
+                "observed_from": 2200,
+                "observed_until": 2200
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 1790,
+        "end": 1800,
+        "attributes": [
+          {
+            "name": "host.name",
+            "value": "h1"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+            "owner": "{\"service.instance.id\":\"pod-3\",\"service.name\":\"history\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-3",
+              "service.name": "history",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 3000,
+            "versions": [
+              {
+                "content": {
+                  "host.name": "h1"
+                },
+                "effective_from": 1000,
+                "valid_until": 1800,
+                "observed_from": 1000,
+                "observed_until": 1400
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "http",
+      "args": {
+        "path": "/resources?kind=resource&start=1&end=3.5"
+      },
+      "expect": {
+        "status": 200,
+        "data": {
+          "status": "success",
+          "data": {
+            "owners": [
+              {
+                "id": "{\"service.instance.id\":\"pod-3\",\"service.name\":\"history\",\"service.namespace\":\"shop\"}",
+                "kind": "resource",
+                "identifying": {
+                  "service.instance.id": "pod-3",
+                  "service.name": "history",
+                  "service.namespace": "shop"
+                },
+                "history_truncated": false,
+                "versions": [
+                  {
+                    "descriptive": {
+                      "host.name": "h1"
+                    },
+                    "effective_from": 1000,
+                    "valid_until": 1800,
+                    "observed_from": 1000,
+                    "observed_until": 1400
+                  },
+                  {
+                    "descriptive": {
+                      "host.name": "h2"
+                    },
+                    "effective_from": 1800,
+                    "valid_until": 3000,
+                    "observed_from": 1800,
+                    "observed_until": 2000
+                  },
+                  {
+                    "descriptive": {
+                      "host.name": "h1"
+                    },
+                    "effective_from": 3000,
+                    "observed_from": 3000,
+                    "observed_until": 3000
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "op": "reopen"
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(history_metric)",
+        "at": 1800
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", host_name=\"h2\", route=\"/a\"}",
+            "samples": [
+              "0x4010000000000000"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"history_metric\", __otel_resource__=\"<resource>\", route=\"/a\"}",
+        "samples": [
+          "500|0x3ff0000000000000|float|0",
+          "1000|0x4000000000000000|float|0",
+          "1500|0x4008000000000000|float|0",
+          "1800|0x4010000000000000|float|0",
+          "2000|0x4014000000000000|float|0",
+          "2500|0x4018000000000000|float|0",
+          "3000|0x401c000000000000|float|0",
+          "3500|0x4020000000000000|float|0"
+        ]
+      }
+    ],
+    "owners": [
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "pod-3",
+          "service.name": "history",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "host.name": "h1"
+            },
+            "effective_from": 1000,
+            "valid_until": 1800,
+            "observed_from": 1000,
+            "observed_until": 1400
+          },
+          {
+            "content": {
+              "host.name": "h2"
+            },
+            "effective_from": 1800,
+            "valid_until": 3000,
+            "observed_from": 1800,
+            "observed_until": 2000
+          },
+          {
+            "content": {
+              "host.name": "h1"
+            },
+            "effective_from": 3000,
+            "observed_from": 3000,
+            "observed_until": 3000
+          }
+        ]
+      },
+      {
+        "kind": "scrape",
+        "identifying": {
+          "scrape": "job-a"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "interval": "15s"
+            },
+            "effective_from": 1200,
+            "valid_until": 2500,
+            "observed_from": 1200,
+            "observed_until": 1200
+          },
+          {
+            "content": {
+              "interval": "30s"
+            },
+            "effective_from": 2500,
+            "observed_from": 2500,
+            "observed_until": 2500
+          }
+        ]
+      },
+      {
+        "kind": "scrape",
+        "identifying": {
+          "scrape": "job-b"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "interval": "60s"
+            },
+            "effective_from": 2200,
+            "observed_from": 2200,
+            "observed_until": 2200
+          }
+        ]
+      }
+    ]
+  }
+}
