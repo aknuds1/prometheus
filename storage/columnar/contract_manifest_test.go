@@ -112,13 +112,13 @@ var contractStatuses = []string{"passing", "partial", "defect", "unsupported", "
 // contractDecisionStatuses are the permitted decision statuses.
 var contractDecisionStatuses = []string{"open", "decided"}
 
-// contractDecidedDecisions must be decided by this package. Decisions 1 and 2
-// were accepted by the user/product owner on 2026-11-15.
-var contractDecidedDecisions = []string{"1", "2"}
+// contractDecidedDecisions must be decided by this package. Decisions 1, 2 and
+// 3 were accepted by the user/product owner on 2026-11-15.
+var contractDecidedDecisions = []string{"1", "2", "3"}
 
 // contractOpenDecisions must remain open here: this package may not guess a
 // resolution from incumbent behaviour.
-var contractOpenDecisions = []string{"3", "4", "5", "6", "7", "8", "9", "10"}
+var contractOpenDecisions = []string{"4", "5", "6", "7", "8", "9", "10"}
 
 // contractRequiredTargetCases pins accepted target behaviour that the incumbent
 // cannot execute. Removing or renaming one of these absences is a coverage
@@ -132,6 +132,16 @@ var contractRequiredTargetCases = []string{
 	"identity-entity-schema-url",
 	"identity-entity-typed-content",
 	"identity-entity-typed-ids",
+	"state-association-termination-reassociation",
+	"state-clear-diff-state-encoding",
+	"state-complete-omission-vs-partial-unknown",
+	"state-explicit-key-clear-reappearance",
+	"state-idempotent-clear-termination",
+	"state-missing-value-filtering",
+	"state-owner-termination-conflict-rollback",
+	"state-tombstone-lifecycle-durability",
+	"state-truncated-read-reporting",
+	"state-typed-present-null-absent",
 }
 
 // contractGroups are the permitted obligation groups.

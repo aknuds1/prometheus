@@ -15,14 +15,13 @@
     "columnar"
   ],
   "open_decisions": [
-    "3",
     "4",
     "5",
     "6",
     "7",
     "9"
   ],
-  "scope": "Settled decision-2 history semantics only. Effective time defines order; the fixture commits a forward A/B/A sequence and then backfills an observation inside the first A epoch and an actual B change point equal to its immediate successor. The retained history is A [1000,1800), B [1800,3000), A [3000,inf): the late B observation coalesces the redundant change point at 2000 while preserving both observation ranges, and observation bounds never become validity bounds. A Scrape owner history changes at 2500 outside the series' Scrape membership band [1200,2200), proving content and membership histories are independent. The fixture states no unresolved-association retention, no clearing/expiry operation, no acquisition path, no Source cardinality, no PR99 grammar, no snapshot cursor and no admission budget; those remain open decisions. Replay is asserted from the same committed log after reopening the store, not as a commutativity claim for unrelated commit orders.",
+  "scope": "Settled decision-2 history semantics only. Effective time defines order; the fixture commits a forward A/B/A sequence and then backfills an observation inside the first A epoch and an actual B change point equal to its immediate successor. The retained history is A [1000,1800), B [1800,3000), A [3000,inf): the late B observation coalesces the redundant change point at 2000 while preserving both observation ranges, and observation bounds never become validity bounds. A Scrape owner history changes at 2500 outside the series' Scrape membership band [1200,2200), proving content and membership histories are independent. The fixture exercises no explicit clear or association termination: decision 3 (2026-11-15) accepts those semantics, but the incumbent cannot represent them and they remain target cases. It states no unresolved-association retention, no acquisition path, no Source cardinality, no PR99 grammar, no snapshot cursor and no admission budget; those remain open decisions. Replay is asserted from the same committed log after reopening the store, not as a commutativity claim for unrelated commit orders.",
   "events": [
     {
       "op": "append",

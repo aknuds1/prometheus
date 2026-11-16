@@ -20,12 +20,13 @@
         }
       ],
       "fixtures": [
-        "resource_identity_fallback"
+        "resource_identity_fallback",
+        "observation_states_and_independent_resources"
       ],
       "decisions": [
         "1"
       ],
-      "note": "Demonstrated: otherwise identical streams differing in one supported compatibility dimension - the compatibility Resource service.* tuple, a promoted Scope label, a metric property or a point attribute - stay distinct through the native and ordinary receiver routes. Decision 1 is decided (2026-11-15) and is retained here as provenance, not implementation evidence. Not demonstrated: Entity-aware Resource identity, typed Entity IDs, absent-versus-empty fallback presence and malformed/duplicate EntityRef rejection (gap-entity-identity, whose target cases are recorded in resource_identity_fallback), and complete Scope-injective stream identity, which decision 1 explicitly defers as a current-phase limitation.",
+      "note": "Demonstrated: otherwise identical streams differing in one supported compatibility dimension - the compatibility Resource service.* tuple, a promoted Scope label, a metric property or a point attribute - stay distinct through the native and ordinary receiver routes. Decision 1 is decided (2026-11-15) and is retained here as provenance, not implementation evidence. Not demonstrated: Entity-aware Resource identity, typed Entity IDs, absent-versus-empty fallback presence and malformed/duplicate EntityRef rejection (gap-entity-identity, whose target cases are recorded in resource_identity_fallback), and complete Scope-injective stream identity, which decision 1 explicitly defers as a current-phase limitation. observation_states_and_independent_resources additionally keeps two Resources that share service.name and service.namespace but differ in service.instance.id as separate owners with independent content and memberships, so matching names alone do not merge them.",
       "gaps": [
         "gap-entity-identity"
       ]
@@ -443,10 +444,13 @@
       "fixtures": [
         "owner_only_publication",
         "association_history_and_replay",
-        "association_replay_and_truncation"
+        "association_replay_and_truncation",
+        "observation_states_and_independent_resources"
       ],
-      "decisions": [],
-      "note": "Truncation is reported as an explicit bit; observation bounds never become validity bounds. association_replay_and_truncation asserts that a discarded oldest version is reported as history_truncated and is not resurrected by a query or by replay."
+      "decisions": [
+        "3"
+      ],
+      "note": "Decision 3 (2026-11-15) makes observation-is-not-expiry explicit: an observation-only reassertion after samples stop extends observation bounds without creating a version, and content remains applicable after flush, compaction and reopen. Observation bounds never become validity bounds. Truncation is reported as an explicit bit; association_replay_and_truncation asserts that a discarded oldest version is reported as history_truncated, is not resurrected by a query or by replay, and keeps the same state through flush, compaction and block reopen. The stronger requirement that a discarded-coverage read report unknown or truncated rather than an absent-like empty result is recorded separately as the state-truncated-read-reporting target case under gap-value-state-distinction."
     },
     {
       "id": "invariant-7",
@@ -505,10 +509,11 @@
         }
       ],
       "fixtures": [
-        "owner_only_publication"
+        "owner_only_publication",
+        "observation_states_and_independent_resources"
       ],
       "decisions": [],
-      "note": ""
+      "note": "observation_states_and_independent_resources asserts that a metadata-only observation and a repeated reassertion create no samples and leave the appended sample state unchanged."
     },
     {
       "id": "invariant-10",
@@ -550,12 +555,13 @@
       ],
       "fixtures": [
         "kubernetes_node_and_rollout_totals",
-        "association_history_and_replay"
+        "association_history_and_replay",
+        "observation_states_and_independent_resources"
       ],
       "decisions": [
         "2"
       ],
-      "note": "Demonstrated: unassociated series survive enrichment and each input series contributes at most once, including across ownership transitions. Decision 2 selects atomic rejection for contradictory associations, so no stored unresolved association is implied or tested; that rejection is asserted by TestMetadataObservationConflictsLeaveNoState and rollback_conflict.",
+      "note": "Demonstrated: unassociated series survive enrichment and each input series contributes at most once, including across ownership transitions. Decision 2 selects atomic rejection for contradictory associations, so no stored unresolved association is implied or tested; that rejection is asserted by TestMetadataObservationConflictsLeaveNoState and rollback_conflict. observation_states_and_independent_resources adds an unassociated series that still appears in info() without any promoted metadata label.",
       "gaps": []
     },
     {
@@ -570,10 +576,11 @@
         }
       ],
       "fixtures": [
-        "temporal_bands_and_disjoint_overlap"
+        "temporal_bands_and_disjoint_overlap",
+        "observation_states_and_independent_resources"
       ],
       "decisions": [],
-      "note": "The disjoint-member series is absent while its neighbours are reported, and the reverse queries assert zero sample-payload opens."
+      "note": "The disjoint-member series is absent while its neighbours are reported, and the reverse queries assert zero sample-payload opens. observation_states_and_independent_resources additionally asserts that a positive value filter selects only the owner whose content currently states that value and excludes the independent same-named owner."
     },
     {
       "id": "invariant-13",
@@ -588,10 +595,11 @@
       ],
       "fixtures": [
         "owner_only_publication",
-        "kubernetes_node_and_rollout_totals"
+        "kubernetes_node_and_rollout_totals",
+        "observation_states_and_independent_resources"
       ],
       "decisions": [],
-      "note": "The fixtures assert SamplePayloadOpens and SegmentsRead are zero for metadata-only reads of a block-backed store."
+      "note": "The fixtures assert SamplePayloadOpens and SegmentsRead are zero for metadata-only reads of a block-backed store. observation_states_and_independent_resources asserts zero sample-payload opens for an attribute-filtered reverse query against a block-backed store."
     },
     {
       "id": "invariant-14",
@@ -872,13 +880,31 @@
       "id": "gap-clearing-expiry",
       "group": "capability-gap",
       "title": "Explicit unknown, clearing and expiry semantics",
-      "status": "blocked",
+      "status": "unsupported",
       "evidence": [],
-      "fixtures": [],
+      "fixtures": [
+        "observation_states_and_independent_resources"
+      ],
       "decisions": [
         "3"
       ],
-      "note": "No producer/API operation clears content or ends membership beyond a successor version, and absent versus cleared is not distinguishable. Decision 3 owns the answer."
+      "note": "Decision 3 is decided (2026-11-15) and retained as provenance, so this is an implementation gap rather than a blocked semantic question. The incumbent has no explicit key clear, tombstone, association termination or unassociated membership successor; an empty content map is an ordinary present version. Machine-checked target cases state-explicit-key-clear-reappearance, state-association-termination-reassociation, state-idempotent-clear-termination, state-owner-termination-conflict-rollback, state-clear-diff-state-encoding and state-tombstone-lifecycle-durability keep the accepted behavior visible. Retained observation bounds and history_truncated are executable, but no clear or termination operation is implemented or guessed from an empty map."
+    },
+    {
+      "id": "gap-value-state-distinction",
+      "group": "capability-gap",
+      "title": "Typed present/null, absent, unknown, complete-versus-partial and state-specific read semantics",
+      "status": "unsupported",
+      "evidence": [],
+      "fixtures": [
+        "observation_states_and_independent_resources",
+        "association_replay_and_truncation"
+      ],
+      "decisions": [
+        "3"
+      ],
+      "note": "Decision 3 is decided (2026-11-15) and retained as provenance, so this is an implementation gap rather than a blocked semantic question. The incumbent stores only string maps with no key-presence, type, null, completeness or provenance marker. Typed present, typed null and absent; authoritative complete omission versus partial-source unknown; explicit truncated or unknown read and diff responses; and an explicit state predicate are not representable. Machine-checked target cases state-typed-present-null-absent, state-complete-omission-vs-partial-unknown, state-missing-value-filtering and state-truncated-read-reporting keep them visible. The ordinary empty-string matcher divergence is separately reproduced by defect-absent-empty-filter, not repaired here.",
+      "gaps": []
     },
     {
       "id": "gap-conflict-resolution",
@@ -950,6 +976,23 @@
       "fixtures": [],
       "decisions": [],
       "note": "Reproduced: a real OpenMetrics scrape whose sample carries an exemplar stores the sample and reports success, the store exposes no exemplar query surface, and the scalar V1 AppendExemplar returns a reference and no error while retaining nothing queryable. Silent loss is not acceptable target behaviour. The native OTAP route instead rejects exemplars explicitly before storage (gap-otap-native-samples), which is safe fail-closed behaviour and is recorded separately. No exemplar persistence is implemented here."
+    },
+    {
+      "id": "defect-absent-empty-filter",
+      "group": "capability-gap",
+      "title": "An absent metadata key satisfies an ordinary empty-string value filter",
+      "status": "defect",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_state_contract_test.go",
+          "test": "TestMetadataEmptyAttributeMatcherSelectsAbsentValue"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [
+        "3"
+      ],
+      "note": "Reproduced: QueryMetadataSeries resolves a missing content key through the owner identity and then to the empty string, so a host.name=\"\" condition selects an owner whose content and identity omit host.name. Decision 3 requires a positive filter to match only an applicable present value and forbids absent, cleared or unknown from silently equalling the empty string. Recorded as a defect, not repaired; selecting a missing state explicitly is deferred to decision 6."
     },
     {
       "id": "gap-info-band-execution",

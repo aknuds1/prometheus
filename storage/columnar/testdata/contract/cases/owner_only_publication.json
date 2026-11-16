@@ -11,10 +11,9 @@
     "columnar"
   ],
   "open_decisions": [
-    "3",
     "9"
   ],
-  "scope": "Settled metadata-only publication semantics only. An unchanged observation extends observation bounds without manufacturing a version, a changed observation creates one version, neither invents samples or sample time coverage, and a metadata-only read of a block-backed store opens no sample payload. What an explicit clearing or expiry operation means, and how admission/coalescing budgets work under churn, remain decisions 3 and 9 and are not assumed here.",
+  "scope": "Settled metadata-only publication semantics only. An unchanged observation extends observation bounds without manufacturing a version, a changed observation creates one version, neither invents samples or sample time coverage, and a metadata-only read of a block-backed store opens no sample payload. Explicit clearing and association termination are decided by decision 3 (2026-11-15) but the incumbent cannot represent them; this fixture exercises neither and records no guessed tombstone. How admission/coalescing budgets work under churn remains decision 9 and is not assumed here.",
   "events": [
     {
       "op": "append",

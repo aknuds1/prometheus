@@ -3,6 +3,7 @@
   "title": "A repeated storage transaction creates no phantom Resource identity and no exactly-once claim, while discarded history is reported as explicit truncation and survives replay",
   "obligations": [
     "fixed-case-8",
+    "gap-value-state-distinction",
     "invariant-3",
     "invariant-6",
     "route-metadata-http",
@@ -13,12 +14,19 @@
   ],
   "retained_version_limit": 2,
   "open_decisions": [
-    "3",
     "6",
     "7",
     "9"
   ],
-  "scope": "Settled retry and truncation semantics only. The fixture repeats an ordinary storage transaction with the same sample and metadata: the duplicate sample rejects the whole retry, so it is neither an exactly-once delivery claim nor a phantom Resource identity. The evidence is at the storage commit boundary; no OTAP/OTLP reset or receiver-retry semantics are claimed, and transport acknowledgements do not imply exactly-once delivery. A metadata-only repetition of the same content and effective time is idempotent and an observation at another point only extends bounds. The retained_version_limit of 2 is the available bounded-history mechanism; once it discards the oldest version the fixture requires explicit history_truncated reporting, absence rather than a resurrected answer, and the same truncated state after WAL replay. It does not decide an explicit clearing or expiry operation (decision 3), an admission or coalescing budget (decision 9), PR99 grammar (decision 6) or a snapshot cursor (decision 7).",
+  "target_cases": [
+    {
+      "id": "state-truncated-read-reporting",
+      "obligation": "gap-value-state-distinction",
+      "accepted": "A read or history response that depends on discarded coverage reports unknown or truncated with the retained coverage limit where representable, rather than returning an empty result that is indistinguishable from absent or cleared. Truncation remains explicit in owner history, HTTP history and diffs.",
+      "reason": "QueryMetadataSeries and info() enrichment expose no truncation marker. The empty reverse result for discarded content below is the incumbent's current shape, not the accepted state response, so a future implementation must add an explicit state instead of preserving this golden as coverage."
+    }
+  ],
+  "scope": "Settled retry and truncation semantics only. The fixture repeats an ordinary storage transaction with the same sample and metadata: the duplicate sample rejects the whole retry, so it is neither an exactly-once delivery claim nor a phantom Resource identity. The evidence is at the storage commit boundary; no OTAP/OTLP reset or receiver-retry semantics are claimed, and transport acknowledgements do not imply exactly-once delivery. A metadata-only repetition of the same content and effective time is idempotent and an observation at another point only extends bounds. The retained_version_limit of 2 is the available bounded-history mechanism; once it discards the oldest version the fixture requires explicit history_truncated reporting and no resurrected answer, and the same truncated state after WAL replay and after flush, compaction and block reopen. Decision 3 (2026-11-15) is decided: explicit clear and association termination are accepted semantics but no such operation exists here, so none is guessed. Its stronger requirement that a read depending on discarded coverage report unknown or truncated rather than an empty absent-like result is recorded as the state-truncated-read-reporting target case; the empty reverse result is the incumbent's current shape, not accepted coverage. The fixture does not decide an admission or coalescing budget (decision 9), PR99 grammar (decision 6) or a snapshot cursor (decision 7).",
   "events": [
     {
       "op": "append",
@@ -392,6 +400,16 @@
             ]
           }
         }
+      }
+    },
+    {
+      "op": "flush"
+    },
+    {
+      "op": "compact",
+      "args": {
+        "mint": 0,
+        "maxt": 10000
       }
     },
     {

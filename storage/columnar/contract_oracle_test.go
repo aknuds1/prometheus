@@ -29,6 +29,12 @@ package columnar
 // maps, null) is a recorded capability gap, not a decision that strings are the
 // target representation.
 //
+// Decision 3 distinguishes present, typed null, absent, explicitly cleared,
+// unknown, truncated and coalesced states. The incumbent can execute only the
+// string-present, observation-bound and explicit-truncation parts; the typed,
+// clear, termination, partial-source and state-specific read clauses are
+// recorded as target cases owned by non-passing obligations.
+//
 // Expectations are authored from the fixture's stated arithmetic and semantics,
 // never captured from a store and then declared independent. The companion
 // manifest test (contract_manifest_test.go) refuses to let a contract obligation
@@ -801,6 +807,25 @@ func (r *contractRoute) metadataSeries(t *testing.T, args contractSeriesQueryArg
 	if page.NextToken != "" {
 		rendered.NextToken = "<token>"
 	}
+	// The store's page order is defined over opaque owner references, which are
+	// implementation-derived. Sort the rendered rows by their canonical labels
+	// and identity so a multi-owner expectation states semantic content rather
+	// than an accidental digest order. Page membership itself is unchanged.
+	slices.SortFunc(rendered.Series, func(a, b contractSeriesRow) int {
+		if byLabels := strings.Compare(a.Labels, b.Labels); byLabels != 0 {
+			return byLabels
+		}
+		if byOwner := strings.Compare(a.Owner, b.Owner); byOwner != 0 {
+			return byOwner
+		}
+		if a.MembershipStart < b.MembershipStart {
+			return -1
+		}
+		if a.MembershipStart > b.MembershipStart {
+			return 1
+		}
+		return 0
+	})
 	return rendered
 }
 

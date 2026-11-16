@@ -1,0 +1,584 @@
+{
+  "id": "observation_states_and_independent_resources",
+  "title": "Observation-only reassertion never expires content, metadata-only changes fabricate no samples, reverse metadata work opens no sample payload, and same-named independent Resources stay separate",
+  "obligations": [
+    "fixed-case-1",
+    "gap-clearing-expiry",
+    "gap-value-state-distinction",
+    "invariant-6",
+    "invariant-9",
+    "invariant-11",
+    "invariant-12",
+    "invariant-13"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [
+    "6",
+    "7"
+  ],
+  "target_cases": [
+    {
+      "id": "state-typed-present-null-absent",
+      "obligation": "gap-value-state-distinction",
+      "accepted": "A present value carries its complete typed content; an explicitly supplied typed null is present rather than absent or unknown; and an authoritative complete content assertion that omits a key asserts absence. The three states stay distinct through reads and enrichment.",
+      "reason": "Content.Attributes is map[string]string with no type, null or key-presence representation and no completeness marker, so typed present, typed null and absent cannot be encoded without guessing a string convention."
+    },
+    {
+      "id": "state-complete-omission-vs-partial-unknown",
+      "obligation": "gap-value-state-distinction",
+      "accepted": "Only authoritative complete content can assert absence from omission. A key missing from a partial Resource description is unknown for that source and stays unresolved until an authoritative complete assertion or an explicit policy supplies the answer.",
+      "reason": "Every stored Content is treated as a complete string map. The incumbent records no source completeness or provenance marker, so a partial description and an authoritative complete omission are indistinguishable and neither can be executed."
+    },
+    {
+      "id": "state-explicit-key-clear-reappearance",
+      "obligation": "gap-clearing-expiry",
+      "accepted": "An explicit key clear ends the old value at the clear's inclusive EffectiveFrom with the preceding version exclusive immediately before it, promotes no current value, keeps earlier history readable, leaves unrelated keys and domains unaffected, and a later reappearance creates a new version without fabricating a promoted label or sample. Clearing every Resource attribute does not itself remove Resource identity or its series associations.",
+      "reason": "The incumbent has no tombstone or clear operation. An empty content map is an ordinary present version with no attributes, so cleared, absent and empty content cannot be separated, and no test may guess that an empty map means a clear."
+    },
+    {
+      "id": "state-association-termination-reassociation",
+      "obligation": "gap-clearing-expiry",
+      "accepted": "Explicit association termination is an actual membership successor that ends the previous owner exclusively, makes later queries report the series as unassociated under the selected explicit semantics, creates a new band on later reassociation, and does not delete owner content or other members' history.",
+      "reason": "seriesMembershipRow always names an owner. There is no unassociated membership successor, so termination and subsequent reassociation cannot be represented without inventing an owner or treating a missing row as an explicit state."
+    },
+    {
+      "id": "state-idempotent-clear-termination",
+      "obligation": "gap-clearing-expiry",
+      "accepted": "Repeated equivalent clear or termination observations are idempotent state changes under decision 2: they create no new version or membership band and publish no additional committed change point.",
+      "reason": "No clear or termination operation exists, so its repeated-observation idempotence cannot be exercised. Equal repeated content observations are separately asserted by the executable history and truncation fixtures, but that is not evidence for a tombstone."
+    },
+    {
+      "id": "state-owner-termination-conflict-rollback",
+      "obligation": "gap-clearing-expiry",
+      "accepted": "An equal-time owner-versus-termination disagreement is a decision-2 atomic conflict: the whole transaction rejects and publishes no sample, metadata or index prefix, WAL prefix or committed counter.",
+      "reason": "Termination has no representation, so an owner-versus-termination conflict cannot be constructed. The owner-versus-owner half is executable in rollback_conflict and is not duplicated here."
+    },
+    {
+      "id": "state-clear-diff-state-encoding",
+      "obligation": "gap-clearing-expiry",
+      "accepted": "Historical diffs express an explicit clear as a before/after state change rather than encoding it as an ordinary old-> value transition, and do not report a cleared key as a present empty value.",
+      "reason": "DiffMetadata computes string differences between content maps and encodes a removed key as old->. It has no state field, so an explicit clear cannot be distinguished from an ordinary value removal in its response."
+    },
+    {
+      "id": "state-missing-value-filtering",
+      "obligation": "gap-value-state-distinction",
+      "accepted": "A positive value filter matches only an applicable present value; absent, cleared and unknown states do not satisfy an ordinary empty-string or other value matcher. Selecting one of those states requires an explicit state predicate, whose PR99 syntax is deferred to decision 6 rather than guessed here.",
+      "reason": "The current attribute matcher falls back to owner identity and then to the empty string, so an absent key can satisfy an empty-string value matcher (reproduced by defect-absent-empty-filter). There is no state predicate or typed matcher to select a missing state explicitly."
+    },
+    {
+      "id": "state-tombstone-lifecycle-durability",
+      "obligation": "gap-clearing-expiry",
+      "accepted": "Explicit clear and termination tombstones survive close/reopen, flush, compaction and replay exactly, together with observation bounds and coverage flags. An older immutable part or a newer-part recovery cannot resurrect cleared content or a terminated association.",
+      "reason": "There is no tombstone to persist. The executable lifecycle evidence in association_replay_and_truncation covers retained versions, observation bounds and history_truncated through flush, compaction and reopen, but older-part non-resurrection of cleared state cannot be exercised."
+    }
+  ],
+  "scope": "Decision-3 coverage that the incumbent can execute, plus explicit accepted target cases it cannot execute. Two Resources share service.name and service.namespace but differ in service.instance.id, so matching names do not merge them: each owner keeps its own content and membership. An observation-only reassertion at 8000 after samples stop at 2000 extends observation bounds without a version, and content stays applicable at 6000 after flush, compaction and reopen; observation is not expiry. The metadata-only observation and the reverse metadata reads fabricate no samples and open no sample payload. An unassociated series survives info() unfiltered without a fake promoted label. The target cases record typed present/null/absent, complete omission versus partial-source unknown, explicit clear and association termination, their idempotence and conflict, clear-aware diffs, missing-state filtering and tombstone lifecycle durability. The fixture does not decide or guess an explicit clear or termination operation, Source cardinality, PR99 state-selection syntax or HTTP/cursor encoding; those remain decisions 3 (semantics accepted, implementation absent), 5, 6 and 7.",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests",
+          "instance": "a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "1"
+          },
+          {
+            "t": 2000,
+            "value": "2"
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests",
+          "instance": "b"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-b"
+          }
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "10"
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests",
+          "instance": "c"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "100"
+          }
+        ]
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests",
+          "instance": "a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "content": {
+          "host.name": "a-host"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests",
+          "instance": "b"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-b"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-b"
+          }
+        },
+        "content": {
+          "host.name": "b-host"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_versions": 2,
+        "committed_memberships": 2
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "checkout_requests",
+          "instance": "a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "content": {
+          "host.name": "a-host"
+        },
+        "effective_from": 8000
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_versions": 2,
+        "committed_memberships": 2
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "host.name",
+            "value": "a-host"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", instance=\"a\"}",
+            "owner": "{\"service.instance.id\":\"pod-a\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-a",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 8000,
+            "versions": [
+              {
+                "content": {
+                  "host.name": "a-host"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 8000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "host.name",
+            "value": "b-host"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", instance=\"b\"}",
+            "owner": "{\"service.instance.id\":\"pod-b\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-b",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "host.name": "b-host"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "service.name",
+            "value": "checkout"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", instance=\"a\"}",
+            "owner": "{\"service.instance.id\":\"pod-a\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-a",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 8000,
+            "versions": [
+              {
+                "content": {
+                  "host.name": "a-host"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 8000
+              }
+            ]
+          },
+          {
+            "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", instance=\"b\"}",
+            "owner": "{\"service.instance.id\":\"pod-b\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-b",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "host.name": "b-host"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "flush"
+    },
+    {
+      "op": "stats_reset"
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "host.name",
+            "value": "b-host"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", instance=\"b\"}",
+            "owner": "{\"service.instance.id\":\"pod-b\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-b",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "host.name": "b-host"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0,
+        "blocks": 1
+      }
+    },
+    {
+      "op": "compact",
+      "args": {
+        "mint": 0,
+        "maxt": 10000
+      }
+    },
+    {
+      "op": "reopen"
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(checkout_requests)",
+        "at": 6000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", host_name=\"a-host\", instance=\"a\"}",
+            "samples": [
+              "0x4000000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", host_name=\"b-host\", instance=\"b\"}",
+            "samples": [
+              "0x4024000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"checkout_requests\", instance=\"c\"}",
+            "samples": [
+              "0x4059000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "host.name",
+            "value": "a-host"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", instance=\"a\"}",
+            "owner": "{\"service.instance.id\":\"pod-a\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-a",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 8000,
+            "versions": [
+              {
+                "content": {
+                  "host.name": "a-host"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 8000
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", instance=\"a\"}",
+        "samples": [
+          "1000|0x3ff0000000000000|float|0",
+          "2000|0x4000000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"checkout_requests\", __otel_resource__=\"<resource>\", instance=\"b\"}",
+        "samples": [
+          "1000|0x4024000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"checkout_requests\", instance=\"c\"}",
+        "samples": [
+          "1000|0x4059000000000000|float|0"
+        ]
+      }
+    ],
+    "owners": [
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "pod-a",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "host.name": "a-host"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 8000
+          }
+        ]
+      },
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "pod-b",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "host.name": "b-host"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      }
+    ]
+  }
+}
