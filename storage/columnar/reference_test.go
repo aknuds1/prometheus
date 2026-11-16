@@ -252,7 +252,7 @@ func TestAppendReferenceWithHistograms(t *testing.T) {
 	ls := referenceTestLabels("hist")
 
 	h := &histogram.Histogram{
-		Count: 3, Sum: 6, Schema: 0, ZeroThreshold: 1e-6, ZeroCount: 1,
+		Count: 6, Sum: 6, Schema: 0, ZeroThreshold: 1e-6, ZeroCount: 1,
 		PositiveSpans: []histogram.Span{{Offset: 0, Length: 2}}, PositiveBuckets: []int64{2, 1},
 	}
 
@@ -269,7 +269,7 @@ func TestAppendReferenceWithHistograms(t *testing.T) {
 	// The reset hint is inferred from the previous sample, which the reference
 	// path resolves without hashing.
 	reset := &histogram.Histogram{
-		Count: 1, Sum: 1, Schema: 0, ZeroThreshold: 1e-6, ZeroCount: 1,
+		Count: 1, Sum: 1, Schema: 0, ZeroThreshold: 1e-6,
 		PositiveSpans: []histogram.Span{{Offset: 0, Length: 1}}, PositiveBuckets: []int64{1},
 		CounterResetHint: histogram.UnknownCounterReset,
 	}

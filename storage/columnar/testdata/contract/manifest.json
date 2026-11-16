@@ -989,17 +989,17 @@
     {
       "id": "gap-histogram-validation",
       "group": "capability-gap",
-      "title": "The columnar appender accepts histograms stock TSDB rejects",
-      "status": "defect",
+      "title": "The columnar appender rejects internally inconsistent native histograms exactly like stock TSDB",
+      "status": "passing",
       "evidence": [
         {
           "path": "storage/columnar/contract_oracle_test.go",
-          "test": "TestHistogramValidationDivergenceIsRecorded"
+          "test": "TestHistogramValidationMatchesStock"
         }
       ],
       "fixtures": [],
       "decisions": [],
-      "note": "Recorded, not repaired: the routes disagree on input validation for a histogram whose buckets state more observations than Count. Whether validation belongs in the contract, and with which error class, is not settled; the test fails if either route changes so the entry must be revisited."
+      "note": "The N0 divergence is closed. The columnar appender now validates integer and float native histograms with the model's Histogram.Validate/FloatHistogram.Validate before staging anything, at the same point as stock TSDB. A real OTLP request with a count/bucket disagreement proves the route: stock and columnar both reject it, roll back and publish nothing, while valid histograms and the model's accepted zero-count boundaries still ingest. The entry is retained as a passing obligation rather than deleted so the closed defect stays traceable."
     },
     {
       "id": "gap-rw-exemplar-appender",

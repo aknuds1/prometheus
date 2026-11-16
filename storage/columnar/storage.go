@@ -435,6 +435,19 @@ func (a *appender) Append(ref storage.SeriesRef, ls labels.Labels, st, t int64, 
 	if a.done {
 		return 0, errors.New("columnar: appender used after Commit or Rollback")
 	}
+	// Reject an inconsistent histogram before staging anything, at the same
+	// point and with the same model validator as stock TSDB. OTLP translation and
+	// protobuf scrape can hand the appender a histogram whose buckets disagree
+	// with its count, and the model is the single semantic authority for this.
+	if fh != nil {
+		if err := fh.Validate(); err != nil {
+			return 0, err
+		}
+	} else if h != nil {
+		if err := h.Validate(); err != nil {
+			return 0, err
+		}
+	}
 	if t < a.s.minValidTime {
 		return 0, fmt.Errorf("%w: timestamp %d precedes retention cutoff %d", storage.ErrOutOfBounds, t, a.s.minValidTime)
 	}

@@ -162,7 +162,7 @@ func TestArrowEndpointCarriesStalenessAndHistograms(t *testing.T) {
 	h := labels.FromStrings("__name__", "hist_metric")
 	hist := &histogram.Histogram{
 		Schema:          0,
-		Count:           4,
+		Count:           8,
 		Sum:             8,
 		PositiveSpans:   []histogram.Span{{Offset: 0, Length: 3}},
 		PositiveBuckets: []int64{1, 2, 1},

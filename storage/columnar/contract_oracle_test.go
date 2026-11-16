@@ -1351,17 +1351,13 @@ func contractCanonicalIdentity(value map[string]any) string {
 	return string(encoded)
 }
 
-// TestHistogramValidationDivergenceIsRecorded records a route difference this
-// package found while authoring the float-bit fixture: the columnar appender
-// accepts an internally inconsistent native histogram that stock TSDB rejects.
-//
-// The fixture itself uses a consistent histogram, because the target behaviour
-// for invalid input is not a settled contract: whether a store must validate
-// histograms on append, and with which error class, is a semantic decision that
-// the contract note records rather than answers. This test exists so the
-// divergence cannot disappear unnoticed: if either route changes its behaviour,
-// the assertion fails and the manifest entry must be revisited.
-func TestHistogramValidationDivergenceIsRecorded(t *testing.T) {
+// TestHistogramValidationMatchesStock pins the validation both appenders now
+// share. The N0 oracle originally recorded a divergence: the columnar appender
+// accepted an internally inconsistent native histogram that stock TSDB rejected.
+// The defect has since been closed by validating with the model in the columnar
+// appender. This test keeps both routes on the same semantics and fails if
+// either moves again.
+func TestHistogramValidationMatchesStock(t *testing.T) {
 	// Count 4, but the two positive deltas state 1 and 4 observations and the zero
 	// count is 0, so the buckets state 5 observations.
 	inconsistent := &histogram.Histogram{
@@ -1375,7 +1371,10 @@ func TestHistogramValidationDivergenceIsRecorded(t *testing.T) {
 	tsdbRoute := contractNewRoute(t, contractRouteTSDB)
 	_, tsdbErr := tsdbRoute.appendable().Append(0, ls, 0, 1000, 0, inconsistent, nil, storage.AOptions{})
 
-	require.NoError(t, columnarErr, "the columnar appender does not validate histogram consistency")
-	require.ErrorContains(t, tsdbErr, "observations found in buckets",
+	require.ErrorIs(t, columnarErr, histogram.ErrHistogramCountMismatch,
+		"the columnar appender must reject a histogram whose buckets state more observations than Count")
+	require.ErrorIs(t, tsdbErr, histogram.ErrHistogramCountMismatch,
 		"stock TSDB rejects a histogram whose buckets state more observations than Count")
+	require.ErrorContains(t, columnarErr, "observations found in buckets")
+	require.ErrorContains(t, tsdbErr, "observations found in buckets")
 }
