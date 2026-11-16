@@ -290,7 +290,7 @@
         "2",
         "4"
       ],
-      "note": "Demonstrated: node A filtered 100+200 MiB = 300 MiB and unfiltered 350 MiB with the unattributed 50 MiB series retained; old 0.2 + new 0.3 cores = 0.5 with every input counted once; same-name series kept apart by explicit identifying attributes. Decision 2 is decided: a contradictory association at the same series/kind/effective time is rejected atomically rather than retained unresolved, evidenced by gap-conflict-resolution and rollback_conflict. Not demonstrated: collection-time acquisition through a plain scrape (decision 4, gap-k8s-acquisition) and identifying same-name/different-UID objects without an explicit distinguishing attribute (decision 1, gap-entity-identity).",
+      "note": "Demonstrated: node A filtered 100+200 MiB = 300 MiB and unfiltered 350 MiB with the unattributed 50 MiB series retained; old 0.2 + new 0.3 cores = 0.5 with every input counted once; same-name series kept apart by explicit identifying attributes. Decision 2 is decided: a contradictory association at the same series/kind/effective time is rejected atomically rather than retained unresolved, evidenced by gap-conflict-resolution and rollback_conflict. Decision 4 is decided (2026-11-15): collector-supplied association is sufficient and no built-in resolver is selected. Not demonstrated: authoritative acquisition and reconciliation (gap-k8s-acquisition, gap-k8s-combined-view) and identifying same-name/different-UID objects without an explicit distinguishing attribute (decision 1, gap-entity-identity). The arithmetic stays executable, but UID-like strings do not make the acquisition or identity clauses pass.",
       "gaps": [
         "gap-k8s-acquisition",
         "gap-entity-identity"
@@ -445,7 +445,8 @@
         "owner_only_publication",
         "association_history_and_replay",
         "association_replay_and_truncation",
-        "observation_states_and_independent_resources"
+        "observation_states_and_independent_resources",
+        "kubernetes_collection_identity_and_reconciliation"
       ],
       "decisions": [
         "3"
@@ -556,7 +557,8 @@
       "fixtures": [
         "kubernetes_node_and_rollout_totals",
         "association_history_and_replay",
-        "observation_states_and_independent_resources"
+        "observation_states_and_independent_resources",
+        "kubernetes_collection_identity_and_reconciliation"
       ],
       "decisions": [
         "2"
@@ -596,7 +598,8 @@
       "fixtures": [
         "owner_only_publication",
         "kubernetes_node_and_rollout_totals",
-        "observation_states_and_independent_resources"
+        "observation_states_and_independent_resources",
+        "kubernetes_collection_identity_and_reconciliation"
       ],
       "decisions": [],
       "note": "The fixtures assert SamplePayloadOpens and SegmentsRead are zero for metadata-only reads of a block-backed store. observation_states_and_independent_resources asserts zero sample-payload opens for an attribute-filtered reverse query against a block-backed store."
@@ -769,7 +772,8 @@
         "kubernetes_node_and_rollout_totals",
         "temporal_bands_and_disjoint_overlap",
         "association_history_and_replay",
-        "association_replay_and_truncation"
+        "association_replay_and_truncation",
+        "kubernetes_collection_identity_and_reconciliation"
       ],
       "decisions": [
         "6"
@@ -857,12 +861,14 @@
       "status": "unsupported",
       "evidence": [],
       "fixtures": [
-        "resource_identity_fallback"
+        "resource_identity_fallback",
+        "kubernetes_collection_identity_and_reconciliation"
       ],
       "decisions": [
-        "1"
+        "1",
+        "4"
       ],
-      "note": "Decision 1 is decided, so this is no longer semantically blocked. The incumbent still stores only the fixed service.name/service.namespace/service.instance.id compatibility identity, ignores EntityRefs, cannot distinguish an absent fallback attribute from an explicitly empty one, and has no malformed/duplicate same-type EntityRef rejection. resource_identity_fallback executes the representable compatibility cases and records the unimplemented clauses as machine-checked target cases."
+      "note": "Decision 1 is decided, so this is no longer semantically blocked, and decision 4 (2026-11-15) also requires supplied Kubernetes UIDs - k8s.pod.uid, pod UID plus container name, runtime container.id and node/workload UIDs - to be authoritative and malformed or duplicate same-type EntityRefs to reject atomically on the acquisition path. The incumbent still stores only the fixed service.name/service.namespace/service.instance.id compatibility identity, ignores EntityRefs, cannot distinguish an absent fallback attribute from an explicitly empty one, and has no malformed/duplicate same-type EntityRef rejection. resource_identity_fallback executes the representable compatibility cases and records the unimplemented identity clauses as target cases; kubernetes_collection_identity_and_reconciliation records k8s-authoritative-uid-identity and k8s-entityref-atomic-rejection, whose executable owners differ only by an explicit service.instance.id value that is not Entity evidence."
     },
     {
       "id": "gap-source-provenance",
@@ -936,16 +942,31 @@
     {
       "id": "gap-k8s-acquisition",
       "group": "capability-gap",
-      "title": "Collection-time Kubernetes association acquisition and partial-description reconciliation",
-      "status": "blocked",
+      "title": "Collection-time Kubernetes association acquisition under collector-supplied identity",
+      "status": "unsupported",
       "evidence": [],
       "fixtures": [
-        "kubernetes_node_and_rollout_totals"
+        "kubernetes_node_and_rollout_totals",
+        "kubernetes_collection_identity_and_reconciliation"
       ],
       "decisions": [
         "4"
       ],
-      "note": "The arithmetic is settled and asserted with explicit associations; how a plain scrape or a collector supplies them, and whether partial descriptions merge, is decision 4."
+      "note": "Decision 4 is decided (2026-11-15) and is retained here as provenance, so the semantics no longer block a case; this is an implementation gap. Collector-supplied association is sufficient for this phase: Prometheus preserves supplied Resource identity, associations, temporal bounds, Entity grouping and provenance without rederiving them, and no Kubernetes informer, API client, ownership graph, _info/_owner/name-pattern resolver or per-series Pod->ReplicaSet->Deployment lookup is selected. The incumbent has no acquisition or reconciliation path at all: a caller must state an explicit association, the stored Resource identity is the fixed service.name/service.namespace/service.instance.id compatibility triplet, and content is one untyped string map with no Entity grouping, per-assertion producer attribution or unresolved-relation state. kubernetes_node_and_rollout_totals executes the settled enrichment arithmetic with explicit associations; kubernetes_collection_identity_and_reconciliation executes explicit-association storage, incarnation separation, plain-scrape non-assignment and lifecycle retention. Machine-checked target cases k8s-supplied-grouping-and-provenance and k8s-missing-identity-unresolved keep the unimplemented acquisition clauses visible; authoritative UID identity and EntityRef rejection are owned by gap-entity-identity and the combined context view by gap-k8s-combined-view."
+    },
+    {
+      "id": "gap-k8s-combined-view",
+      "group": "capability-gap",
+      "title": "Combined Kubernetes context view over separate logical Resources",
+      "status": "unsupported",
+      "evidence": [],
+      "fixtures": [
+        "kubernetes_collection_identity_and_reconciliation"
+      ],
+      "decisions": [
+        "4"
+      ],
+      "note": "Decision 4 is decided (2026-11-15) and retained as provenance, so this is an implementation gap. Decision 4 preserves original logical Resources and independent assertions and allows a combined context view only where authoritative typed Entity evidence establishes the relation: no metric stream merge, no rewritten stored Resource identity, no universal replacement attribute map, no newest-observation or arbitrary canonical winner, and a field missing from a partial description cannot clear another source's known content. The incumbent has no combined-view surface, no per-source provenance or completeness marker, no typed Entity content and no execution-level identity, so none of that can be executed; the executable separation cases in kubernetes_collection_identity_and_reconciliation show only that two explicit Resources are not merged. Machine-checked target cases k8s-combined-view-separate-assertions, k8s-partial-does-not-clear, k8s-runtime-execution-distinct and k8s-discovery-no-payload-reads keep the accepted behavior visible without binding it to an exact JSON shape."
     },
     {
       "id": "gap-otap-native-samples",

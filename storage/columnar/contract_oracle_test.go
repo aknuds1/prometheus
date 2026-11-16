@@ -35,6 +35,15 @@ package columnar
 // clear, termination, partial-source and state-specific read clauses are
 // recorded as target cases owned by non-passing obligations.
 //
+// Decision 4 decides Kubernetes acquisition, identity and reconciliation:
+// collector-supplied association is sufficient, plain scrape selects no
+// built-in resolver, authoritative object identity comes from supplied UIDs,
+// and partial descriptions produce a combined context view rather than a
+// merged Resource. The incumbent executes only explicit association storage and
+// lifecycle retention; supplied Entity grouping, provenance, authoritative UID
+// identity, unresolved relations and the combined view are target cases owned
+// by non-passing obligations.
+//
 // Expectations are authored from the fixture's stated arithmetic and semantics,
 // never captured from a store and then declared independent. The companion
 // manifest test (contract_manifest_test.go) refuses to let a contract obligation

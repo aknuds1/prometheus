@@ -1,0 +1,1036 @@
+{
+  "id": "kubernetes_collection_identity_and_reconciliation",
+  "title": "Collector-supplied pod, node and workload context stays attached to its own incarnation, a plain scrape does not inherit target-level context, and two partial descriptions remain separate Resources",
+  "obligations": [
+    "gap-entity-identity",
+    "gap-k8s-acquisition",
+    "gap-k8s-combined-view",
+    "invariant-6",
+    "invariant-11",
+    "invariant-13",
+    "route-promql-info"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [
+    "5",
+    "6",
+    "7"
+  ],
+  "target_cases": [
+    {
+      "id": "k8s-supplied-grouping-and-provenance",
+      "obligation": "gap-k8s-acquisition",
+      "accepted": "A collector-supplied association is preserved as supplied: Resource identity, Entity grouping and set membership, producer/producer-source attribution, temporal bounds and retained coverage survive storage without Prometheus rederiving them, and a component that drops EntityRefs must preserve them or add valid ones under an explicit producer or proxy policy before storage loses them.",
+      "reason": "The incumbent Resource identity is the fixed service.name/service.namespace/service.instance.id compatibility key and Content is one untyped string map. It holds no Entity grouping and no per-assertion producer or completeness marker, so a supplied structure cannot be distinguished from a Prometheus guess. The executable events assert only that the explicit association and its content survive; they do not claim supplied EntityRefs were preserved."
+    },
+    {
+      "id": "k8s-authoritative-uid-identity",
+      "obligation": "gap-entity-identity",
+      "accepted": "Authoritative object identity comes from supplied Kubernetes UIDs: k8s.pod.uid for a pod incarnation, pod UID plus container name for a named container, runtime container.id for a running execution, and supplied UIDs plus applicable namespace/kind/cluster/source context for nodes and owning workloads. Reused names do not conflate incarnations, and restart count is descriptive context rather than a universal Entity ID.",
+      "reason": "The incumbent cannot express a typed Entity or an EntityRef. k8s.pod.uid and container.id can only be stored as string content or a series label, so the fixture can show two owners kept apart by an explicit service.instance.id value but not that the UID rather than a matching name authorised the association."
+    },
+    {
+      "id": "k8s-missing-identity-unresolved",
+      "obligation": "gap-k8s-acquisition",
+      "accepted": "Missing authoritative identity produces an unresolved relationship rather than a guessed merge, and a raw UID that is dropped or contributes to neither Resource nor series identity is insufficient.",
+      "reason": "The incumbent has no unresolved-relation state. An association either names a compatibility-triple owner or does not exist, so 'known to be the same object but not yet resolvable' cannot be represented or distinguished from a name-based merge."
+    },
+    {
+      "id": "k8s-entityref-atomic-rejection",
+      "obligation": "gap-entity-identity",
+      "accepted": "Malformed or duplicate same-type EntityRefs in a collector-supplied Resource reject the affected batch atomically with no fixed-triplet fallback and no samples, metadata or index prefix, WAL prefix or committed counter.",
+      "reason": "The incumbent never parses EntityRefs, so it cannot detect a malformed or duplicate one. There is no fallback decision to execute and no rejection class to observe; identity-entity-malformed-duplicate-rejection records the same absence for the pure identity fixture, and this case records the acquisition-path clause."
+    },
+    {
+      "id": "k8s-combined-view-separate-assertions",
+      "obligation": "gap-k8s-combined-view",
+      "accepted": "A combined context view groups separate logical Resources only where authoritative typed Entity evidence establishes the relation. Every component keeps its original Resource identity, complete typed content, Entity grouping and Schema URL context, producer attribution, observation bounds and effective validity, and retained coverage or truncation state. No metric stream is merged, no stored Resource identity is rewritten, no universal replacement attribute map is substituted and no value is chosen as canonical by newest observation.",
+      "reason": "The incumbent has no combined-view surface and no per-Resource provenance, Schema URL context or typed Entity content; its only per-series answer is one compatibility-triple Resource owner with one string content map. Rendering a combined view would require inventing the merge policy decision 4 rejects."
+    },
+    {
+      "id": "k8s-partial-does-not-clear",
+      "obligation": "gap-k8s-combined-view",
+      "accepted": "A field omitted from one partial description stays unknown for that source and cannot clear another source's assertion. Conflicting values keep their assertions and temporal and provenance context instead of selecting a canonical winner, and an actual OTel Resource merge, if a producer needs one, belongs outside Prometheus.",
+      "reason": "Every stored Content map is treated as complete: there is no source-scoped assertion, completeness marker or per-source content history, so omission cannot be distinguished from this source never having mentioned the key. The underlying unknown-versus-absent capability is also recorded by gap-value-state-distinction."
+    },
+    {
+      "id": "k8s-runtime-execution-distinct",
+      "obligation": "gap-k8s-combined-view",
+      "accepted": "Distinct container restart and runtime executions remain distinct objects. A named-container description does not automatically identify a particular runtime execution, and restart count is descriptive context rather than an execution Entity ID.",
+      "reason": "The incumbent cannot hold two typed Entities for one Resource or relate a pod UID plus container name to one runtime container.id execution. Both descriptions collapse into one compatibility-triple owner or two unrelated owners, so execution distinctness cannot be asserted."
+    },
+    {
+      "id": "k8s-discovery-no-payload-reads",
+      "obligation": "gap-k8s-combined-view",
+      "accepted": "A combined view, entity discovery and reverse metadata navigation answer from metadata, association and coverage state and open no sample payloads.",
+      "reason": "There is no combined-view or entity-discovery path to observe. The executable reverse-metadata path opens zero sample payloads, but a non-existent surface cannot be measured, so the accepted combined-view clause stays a target rather than being inferred from the reverse-index result."
+    }
+  ],
+  "scope": "Executable decision-4 coverage that the incumbent can express, plus explicit accepted target cases it cannot execute. A collector-supplied association is stored as an explicit Resource owner whose content carries the pod UID, node, container, Deployment and ReplicaSet UIDs and the producer source; it stays applicable to its own series at 6000 without a further observation, and survives flush, compaction and block reopen. Two incarnations of the same pod and container name carry different explicit UIDs in service.instance.id, so the recreated incarnation is a distinct series with its own owner and the old association is not overwritten or expired. A plain-scrape series has no Resource association: target-level node context is stored as a Scrape owner on the target's own series only, and info() neither promotes it nor lets it satisfy a node filter for a child series. Two partial descriptions that name the same k8s.pod.uid remain two separate Resources with their own content; no field flows between them. The target cases record supplied Entity grouping and provenance, authoritative UID identity, an unresolved missing identity, atomic EntityRef rejection, and the combined context view with independent assertions, partial input, runtime execution distinctness and zero sample-payload reads. The fixture does not decide Source cardinality (decision 5), PR99 state-selection or enrichment syntax (decision 6) or HTTP/cursor encoding (decision 7), and it does not infer acquisition, reconciliation, Entity identity or provenance from prototype behaviour.",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "container_cpu_usage_seconds_total",
+          "pod": "checkout-7d9",
+          "container": "app",
+          "instance": "node-a"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "0.125"
+          },
+          {
+            "t": 2000,
+            "value": "0.25"
+          }
+        ],
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-uid-7d9-old"
+          }
+        }
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "container_cpu_usage_seconds_total",
+          "pod": "checkout-7d9",
+          "container": "app",
+          "instance": "node-a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-uid-7d9-old"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-uid-7d9-old"
+          }
+        },
+        "content": {
+          "k8s.pod.uid": "pod-uid-7d9-old",
+          "k8s.node.name": "node-a",
+          "k8s.container.name": "app",
+          "k8s.deployment.uid": "deploy-uid-checkout",
+          "k8s.replicaset.uid": "rs-uid-old",
+          "producer.source": "alloy/gateway"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "container_cpu_usage_seconds_total",
+          "pod": "checkout-7d9",
+          "container": "app",
+          "instance": "node-c"
+        },
+        "samples": [
+          {
+            "t": 6000,
+            "value": "0.5"
+          }
+        ],
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-uid-7d9-new"
+          }
+        }
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "container_cpu_usage_seconds_total",
+          "pod": "checkout-7d9",
+          "container": "app",
+          "instance": "node-c"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-uid-7d9-new"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-uid-7d9-new"
+          }
+        },
+        "content": {
+          "k8s.pod.uid": "pod-uid-7d9-new",
+          "k8s.node.name": "node-c",
+          "k8s.container.name": "app",
+          "k8s.deployment.uid": "deploy-uid-checkout",
+          "k8s.replicaset.uid": "rs-uid-new",
+          "producer.source": "alloy/gateway"
+        },
+        "effective_from": 6000
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "container_memory_working_set_bytes",
+          "pod": "checkout-7d9",
+          "container": "app",
+          "instance": "plain-node-a"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "1"
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "up",
+          "job": "kubelet",
+          "instance": "node-a"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "1"
+          }
+        ]
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "up",
+          "job": "kubelet",
+          "instance": "node-a"
+        },
+        "resource_owner": null,
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "kubelet"
+          }
+        },
+        "content": {
+          "__meta_kubernetes_node_name": "node-a",
+          "__meta_kubernetes_node_uid": "node-uid-a"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "container_memory_working_set_bytes",
+          "pod": "checkout-7d9",
+          "container": "app",
+          "instance": "manifest"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "2"
+          }
+        ],
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "manifest-description-1"
+          }
+        }
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "container_memory_working_set_bytes",
+          "pod": "checkout-7d9",
+          "container": "app",
+          "instance": "manifest"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "manifest-description-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "manifest-description-1"
+          }
+        },
+        "content": {
+          "k8s.pod.uid": "pod-uid-7d9-other",
+          "k8s.container.image.name": "busybox"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "container_memory_working_set_bytes",
+          "pod": "checkout-7d9",
+          "container": "app",
+          "instance": "runtime"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "3"
+          }
+        ],
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "runtime-description-1"
+          }
+        }
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "container_memory_working_set_bytes",
+          "pod": "checkout-7d9",
+          "container": "app",
+          "instance": "runtime"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "runtime-description-1"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "runtime-description-1"
+          }
+        },
+        "content": {
+          "k8s.pod.uid": "pod-uid-7d9-other",
+          "k8s.container.image.name": "busybox:1.36",
+          "container.id": "containerd://9f2"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(container_cpu_usage_seconds_total)",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-a\", k8s_container_name=\"app\", k8s_deployment_uid=\"deploy-uid-checkout\", k8s_node_name=\"node-a\", k8s_pod_uid=\"pod-uid-7d9-old\", k8s_replicaset_uid=\"rs-uid-old\", pod=\"checkout-7d9\", producer_source=\"alloy/gateway\"}",
+            "samples": [
+              "0x3fc0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(container_cpu_usage_seconds_total)",
+        "at": 6000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-a\", k8s_container_name=\"app\", k8s_deployment_uid=\"deploy-uid-checkout\", k8s_node_name=\"node-a\", k8s_pod_uid=\"pod-uid-7d9-old\", k8s_replicaset_uid=\"rs-uid-old\", pod=\"checkout-7d9\", producer_source=\"alloy/gateway\"}",
+            "samples": [
+              "0x3fd0000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-c\", k8s_container_name=\"app\", k8s_deployment_uid=\"deploy-uid-checkout\", k8s_node_name=\"node-c\", k8s_pod_uid=\"pod-uid-7d9-new\", k8s_replicaset_uid=\"rs-uid-new\", pod=\"checkout-7d9\", producer_source=\"alloy/gateway\"}",
+            "samples": [
+              "0x3fe0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(container_cpu_usage_seconds_total, {k8s_node_name=\"node-a\"})",
+        "at": 6000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-a\", k8s_node_name=\"node-a\", pod=\"checkout-7d9\"}",
+            "samples": [
+              "0x3fd0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(container_cpu_usage_seconds_total, {k8s_node_name=\"node-c\"})",
+        "at": 6000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-c\", k8s_node_name=\"node-c\", pod=\"checkout-7d9\"}",
+            "samples": [
+              "0x3fe0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(container_cpu_usage_seconds_total, {k8s_node_name=\"node-b\"})",
+        "at": 6000
+      },
+      "expect": {
+        "series": []
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(container_memory_working_set_bytes)",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", container=\"app\", container_id=\"containerd://9f2\", instance=\"runtime\", k8s_container_image_name=\"busybox:1.36\", k8s_pod_uid=\"pod-uid-7d9-other\", pod=\"checkout-7d9\"}",
+            "samples": [
+              "0x4008000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"manifest\", k8s_container_image_name=\"busybox\", k8s_pod_uid=\"pod-uid-7d9-other\", pod=\"checkout-7d9\"}",
+            "samples": [
+              "0x4000000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"container_memory_working_set_bytes\", container=\"app\", instance=\"plain-node-a\", pod=\"checkout-7d9\"}",
+            "samples": [
+              "0x3ff0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(container_memory_working_set_bytes, {k8s_node_name=\"node-a\"})",
+        "at": 1000
+      },
+      "expect": {
+        "series": []
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(up)",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"up\", instance=\"node-a\", job=\"kubelet\"}",
+            "samples": [
+              "0x3ff0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "k8s.pod.uid",
+            "value": "pod-uid-7d9-old"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-a\", pod=\"checkout-7d9\"}",
+            "owner": "{\"service.instance.id\":\"pod-uid-7d9-old\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-uid-7d9-old",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "k8s.pod.uid": "pod-uid-7d9-old",
+                  "k8s.node.name": "node-a",
+                  "k8s.container.name": "app",
+                  "k8s.deployment.uid": "deploy-uid-checkout",
+                  "k8s.replicaset.uid": "rs-uid-old",
+                  "producer.source": "alloy/gateway"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "k8s.replicaset.uid",
+            "value": "rs-uid-new"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-c\", pod=\"checkout-7d9\"}",
+            "owner": "{\"service.instance.id\":\"pod-uid-7d9-new\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-uid-7d9-new",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 6000,
+            "membership_observed_until": 6000,
+            "versions": [
+              {
+                "content": {
+                  "k8s.pod.uid": "pod-uid-7d9-new",
+                  "k8s.node.name": "node-c",
+                  "k8s.container.name": "app",
+                  "k8s.deployment.uid": "deploy-uid-checkout",
+                  "k8s.replicaset.uid": "rs-uid-new",
+                  "producer.source": "alloy/gateway"
+                },
+                "effective_from": 6000,
+                "observed_from": 6000,
+                "observed_until": 6000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 6000,
+        "end": 6000,
+        "attributes": [
+          {
+            "name": "k8s.pod.uid",
+            "value": "pod-uid-7d9-old"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-a\", pod=\"checkout-7d9\"}",
+            "owner": "{\"service.instance.id\":\"pod-uid-7d9-old\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-uid-7d9-old",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "k8s.pod.uid": "pod-uid-7d9-old",
+                  "k8s.node.name": "node-a",
+                  "k8s.container.name": "app",
+                  "k8s.deployment.uid": "deploy-uid-checkout",
+                  "k8s.replicaset.uid": "rs-uid-old",
+                  "producer.source": "alloy/gateway"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "k8s.pod.uid",
+            "value": "pod-uid-7d9-other"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"manifest\", pod=\"checkout-7d9\"}",
+            "owner": "{\"service.instance.id\":\"manifest-description-1\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "manifest-description-1",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "k8s.pod.uid": "pod-uid-7d9-other",
+                  "k8s.container.image.name": "busybox"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          },
+          {
+            "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"runtime\", pod=\"checkout-7d9\"}",
+            "owner": "{\"service.instance.id\":\"runtime-description-1\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "runtime-description-1",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "k8s.pod.uid": "pod-uid-7d9-other",
+                  "k8s.container.image.name": "busybox:1.36",
+                  "container.id": "containerd://9f2"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "scrape",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "__meta_kubernetes_node_name",
+            "value": "node-a"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"up\", instance=\"node-a\", job=\"kubelet\"}",
+            "owner": "{\"scrape\":\"kubelet\"}",
+            "kind": "scrape",
+            "owner_identifying": {
+              "scrape": "kubelet"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "__meta_kubernetes_node_name": "node-a",
+                  "__meta_kubernetes_node_uid": "node-uid-a"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "flush"
+    },
+    {
+      "op": "stats_reset"
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "k8s.pod.uid",
+            "value": "pod-uid-7d9-old"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-a\", pod=\"checkout-7d9\"}",
+            "owner": "{\"service.instance.id\":\"pod-uid-7d9-old\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-uid-7d9-old",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "k8s.pod.uid": "pod-uid-7d9-old",
+                  "k8s.node.name": "node-a",
+                  "k8s.container.name": "app",
+                  "k8s.deployment.uid": "deploy-uid-checkout",
+                  "k8s.replicaset.uid": "rs-uid-old",
+                  "producer.source": "alloy/gateway"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0,
+        "blocks": 1
+      }
+    },
+    {
+      "op": "compact",
+      "args": {
+        "mint": 0,
+        "maxt": 10000
+      }
+    },
+    {
+      "op": "reopen"
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(container_cpu_usage_seconds_total)",
+        "at": 6000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-a\", k8s_container_name=\"app\", k8s_deployment_uid=\"deploy-uid-checkout\", k8s_node_name=\"node-a\", k8s_pod_uid=\"pod-uid-7d9-old\", k8s_replicaset_uid=\"rs-uid-old\", pod=\"checkout-7d9\", producer_source=\"alloy/gateway\"}",
+            "samples": [
+              "0x3fd0000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-c\", k8s_container_name=\"app\", k8s_deployment_uid=\"deploy-uid-checkout\", k8s_node_name=\"node-c\", k8s_pod_uid=\"pod-uid-7d9-new\", k8s_replicaset_uid=\"rs-uid-new\", pod=\"checkout-7d9\", producer_source=\"alloy/gateway\"}",
+            "samples": [
+              "0x3fe0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 6000,
+        "end": 6000,
+        "attributes": [
+          {
+            "name": "k8s.pod.uid",
+            "value": "pod-uid-7d9-old"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-a\", pod=\"checkout-7d9\"}",
+            "owner": "{\"service.instance.id\":\"pod-uid-7d9-old\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
+            "kind": "resource",
+            "owner_identifying": {
+              "service.instance.id": "pod-uid-7d9-old",
+              "service.name": "checkout",
+              "service.namespace": "shop"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 1000,
+            "versions": [
+              {
+                "content": {
+                  "k8s.pod.uid": "pod-uid-7d9-old",
+                  "k8s.node.name": "node-a",
+                  "k8s.container.name": "app",
+                  "k8s.deployment.uid": "deploy-uid-checkout",
+                  "k8s.replicaset.uid": "rs-uid-old",
+                  "producer.source": "alloy/gateway"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 1000
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-a\", pod=\"checkout-7d9\"}",
+        "samples": [
+          "1000|0x3fc0000000000000|float|0",
+          "2000|0x3fd0000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"container_cpu_usage_seconds_total\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"node-c\", pod=\"checkout-7d9\"}",
+        "samples": [
+          "6000|0x3fe0000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"manifest\", pod=\"checkout-7d9\"}",
+        "samples": [
+          "1000|0x4000000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"container_memory_working_set_bytes\", __otel_resource__=\"<resource>\", container=\"app\", instance=\"runtime\", pod=\"checkout-7d9\"}",
+        "samples": [
+          "1000|0x4008000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"container_memory_working_set_bytes\", container=\"app\", instance=\"plain-node-a\", pod=\"checkout-7d9\"}",
+        "samples": [
+          "1000|0x3ff0000000000000|float|0"
+        ]
+      },
+      {
+        "labels": "{__name__=\"up\", instance=\"node-a\", job=\"kubelet\"}",
+        "samples": [
+          "1000|0x3ff0000000000000|float|0"
+        ]
+      }
+    ],
+    "owners": [
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "manifest-description-1",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "k8s.pod.uid": "pod-uid-7d9-other",
+              "k8s.container.image.name": "busybox"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      },
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "pod-uid-7d9-new",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "k8s.pod.uid": "pod-uid-7d9-new",
+              "k8s.node.name": "node-c",
+              "k8s.container.name": "app",
+              "k8s.deployment.uid": "deploy-uid-checkout",
+              "k8s.replicaset.uid": "rs-uid-new",
+              "producer.source": "alloy/gateway"
+            },
+            "effective_from": 6000,
+            "observed_from": 6000,
+            "observed_until": 6000
+          }
+        ]
+      },
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "pod-uid-7d9-old",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "k8s.pod.uid": "pod-uid-7d9-old",
+              "k8s.node.name": "node-a",
+              "k8s.container.name": "app",
+              "k8s.deployment.uid": "deploy-uid-checkout",
+              "k8s.replicaset.uid": "rs-uid-old",
+              "producer.source": "alloy/gateway"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      },
+      {
+        "kind": "resource",
+        "identifying": {
+          "service.instance.id": "runtime-description-1",
+          "service.name": "checkout",
+          "service.namespace": "shop"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "k8s.pod.uid": "pod-uid-7d9-other",
+              "k8s.container.image.name": "busybox:1.36",
+              "container.id": "containerd://9f2"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      },
+      {
+        "kind": "scrape",
+        "identifying": {
+          "scrape": "kubelet"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "__meta_kubernetes_node_name": "node-a",
+              "__meta_kubernetes_node_uid": "node-uid-a"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 1000
+          }
+        ]
+      }
+    ]
+  }
+}
