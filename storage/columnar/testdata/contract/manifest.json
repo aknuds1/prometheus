@@ -446,12 +446,13 @@
         "association_history_and_replay",
         "association_replay_and_truncation",
         "observation_states_and_independent_resources",
-        "kubernetes_collection_identity_and_reconciliation"
+        "kubernetes_collection_identity_and_reconciliation",
+        "source_provenance_boundaries"
       ],
       "decisions": [
         "3"
       ],
-      "note": "Decision 3 (2026-11-15) makes observation-is-not-expiry explicit: an observation-only reassertion after samples stop extends observation bounds without creating a version, and content remains applicable after flush, compaction and reopen. Observation bounds never become validity bounds. Truncation is reported as an explicit bit; association_replay_and_truncation asserts that a discarded oldest version is reported as history_truncated, is not resurrected by a query or by replay, and keeps the same state through flush, compaction and block reopen. The stronger requirement that a discarded-coverage read report unknown or truncated rather than an absent-like empty result is recorded separately as the state-truncated-read-reporting target case under gap-value-state-distinction."
+      "note": "Decision 3 (2026-11-15) makes observation-is-not-expiry explicit: an observation-only reassertion after samples stop extends observation bounds without creating a version, and content remains applicable after flush, compaction and reopen. Observation bounds never become validity bounds. Truncation is reported as an explicit bit; association_replay_and_truncation asserts that a discarded oldest version is reported as history_truncated, is not resurrected by a query or by replay, and keeps the same state through flush, compaction and block reopen. The stronger requirement that a discarded-coverage read report unknown or truncated rather than an absent-like empty result is recorded separately as the state-truncated-read-reporting target case under gap-value-state-distinction. source_provenance_boundaries adds that a Source-kind association observed once at 1000 is still applicable at 6000 with no further observation, and that its observation bound stops at the last actual observation."
     },
     {
       "id": "invariant-7",
@@ -599,10 +600,12 @@
         "owner_only_publication",
         "kubernetes_node_and_rollout_totals",
         "observation_states_and_independent_resources",
-        "kubernetes_collection_identity_and_reconciliation"
+        "kubernetes_collection_identity_and_reconciliation",
+        "source_provenance_boundaries",
+        "source_history_truncation"
       ],
       "decisions": [],
-      "note": "The fixtures assert SamplePayloadOpens and SegmentsRead are zero for metadata-only reads of a block-backed store. observation_states_and_independent_resources asserts zero sample-payload opens for an attribute-filtered reverse query against a block-backed store."
+      "note": "The fixtures assert SamplePayloadOpens and SegmentsRead are zero for metadata-only reads of a block-backed store. observation_states_and_independent_resources asserts zero sample-payload opens for an attribute-filtered reverse query against a block-backed store. source_provenance_boundaries asserts zero sample-payload opens and zero segments read for a block-backed kind=source reverse query, and source_history_truncation asserts the same after the version cap has discarded the oldest Source version."
     },
     {
       "id": "invariant-14",
@@ -773,12 +776,13 @@
         "temporal_bands_and_disjoint_overlap",
         "association_history_and_replay",
         "association_replay_and_truncation",
-        "kubernetes_collection_identity_and_reconciliation"
+        "kubernetes_collection_identity_and_reconciliation",
+        "source_provenance_boundaries"
       ],
       "decisions": [
         "6"
       ],
-      "note": "Current info() semantics only, including absent and explicitly truncated histories. PR99 grammar and promotion syntax are decision 6."
+      "note": "Current info() semantics only, including absent and explicitly truncated histories. PR99 grammar and promotion syntax are decision 6. source_provenance_boundaries asserts that Source-kind content is not promoted into info() labels and does not become a Resource attribute name."
     },
     {
       "id": "route-remote-write",
@@ -873,14 +877,17 @@
     {
       "id": "gap-source-provenance",
       "group": "capability-gap",
-      "title": "Source provenance chain and conflicting source claims",
-      "status": "blocked",
+      "title": "Source provenance roles, components and conflicting source claims",
+      "status": "unsupported",
       "evidence": [],
-      "fixtures": [],
+      "fixtures": [
+        "source_provenance_boundaries",
+        "source_history_truncation"
+      ],
       "decisions": [
         "5"
       ],
-      "note": "A Source owner kind exists, but which transport/sender/producer a source names is decision 5."
+      "note": "Decision 5 is decided (2026-11-15) and is retained here as provenance, so the semantics no longer block a case; this is an implementation gap. The accepted model gives each observation a typed record with producer, sender and final-transport roles, fail-closed trust over an explicit non-identifying channel, one record per series and validity time carrying a coverage scope and a canonical component set, explicit complete versus partial replacement and removal, and unresolved ambiguity instead of a winner. The incumbent stores one opaque SourceOwner string: native OTAP emits the single owner 'otap' with content 'transport=otap' for every series at sample timestamps, and scrape, ordinary OTLP and remote write supply no provenance record at all. source_provenance_boundaries executes the generic Source kind only - equal-observation idempotence, same-owner and same-membership conflict rejection with full rollback, observation-bound extension, no implicit expiry, replay/lifecycle retention, zero sample-payload reads and no Source attribute or label leakage - and does not claim the typed model. source_history_truncation executes the generic version cap and replay for the Source kind. defect-source-sample-time records the sample-time stamping divergence separately. Machine-checked target cases source-producer-sender-separation, source-shared-stream-sender-components, source-untrusted-producer-unknown, source-trusted-proxy-preservation, source-component-conflict-rollback, source-partial-omission-preserves, source-complete-scoped-replacement-removal, source-sender-migration-transition, source-collapsed-producer-ambiguity, source-typed-roles-equality-canonical, source-no-backdated-receipt, source-typed-discovery-state-distinctions, source-typed-discovery-no-sample-reads, source-replay-retention-preserves-record and source-no-global-registry keep the accepted behaviour visible without making any of it pass."
     },
     {
       "id": "gap-clearing-expiry",
@@ -1014,6 +1021,23 @@
         "3"
       ],
       "note": "Reproduced: QueryMetadataSeries resolves a missing content key through the owner identity and then to the empty string, so a host.name=\"\" condition selects an owner whose content and identity omit host.name. Decision 3 requires a positive filter to match only an applicable present value and forbids absent, cleared or unknown from silently equalling the empty string. Recorded as a defect, not repaired; selecting a missing state explicitly is deferred to decision 6."
+    },
+    {
+      "id": "defect-source-sample-time",
+      "group": "capability-gap",
+      "title": "Native OTAP stamps transport provenance at sample time and shares one opaque Source owner",
+      "status": "defect",
+      "evidence": [
+        {
+          "path": "storage/columnar/otap_source_provenance_test.go",
+          "test": "TestOTAPSourceStampsTransportAtSampleTime"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [
+        "5"
+      ],
+      "note": "Reproduced: the native OTAP sink associates SourceOwner(\"otap\") with {\"transport\": \"otap\"} for every series of every batch at each sample's effective time, and the store writes the version and membership observation bounds equal to that effective time. Transport accepted now is therefore reported as valid and observed at a historical sample instant, and every producer behind every collector shares one opaque owner. Decision 5 forbids backdating producer, sender or transport receipt and requires actual receipt coverage to stay separate from supplied validity. Recorded, not repaired; the accepted typed model is not implied by this reproduction. The generic Source idempotence, conflict and replay evidence in source_provenance_boundaries and source_history_truncation is separate and does not claim it either."
     },
     {
       "id": "gap-info-band-execution",

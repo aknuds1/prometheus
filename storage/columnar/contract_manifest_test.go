@@ -112,13 +112,31 @@ var contractStatuses = []string{"passing", "partial", "defect", "unsupported", "
 // contractDecisionStatuses are the permitted decision statuses.
 var contractDecisionStatuses = []string{"open", "decided"}
 
-// contractDecidedDecisions must be decided by this package. Decisions 1, 2, 3
-// and 4 were accepted by the user/product owner on 2026-11-15.
-var contractDecidedDecisions = []string{"1", "2", "3", "4"}
+// contractDecidedDecisions must be decided by this package. Decisions 1 to 5
+// were accepted by the user/product owner on 2026-11-15.
+var contractDecidedDecisions = []string{"1", "2", "3", "4", "5"}
 
 // contractOpenDecisions must remain open here: this package may not guess a
 // resolution from incumbent behaviour.
-var contractOpenDecisions = []string{"5", "6", "7", "8", "9", "10"}
+var contractOpenDecisions = []string{"6", "7", "8", "9", "10"}
+
+// contractDecisionFiveLimitClauses pins the exclusions and current-phase
+// boundaries decision 5 must keep visible in its limits. They are scope
+// records, never coverage: the accepted provenance model is unimplemented.
+var contractDecisionFiveLimitClauses = []struct {
+	clause   string
+	fragment string
+}{
+	{"receiver role excluded", "receiver role is excluded from this phase"},
+	{"partial input cannot remove", "partial observations add evidence"},
+	{"fail-closed trust", "fail-closed"},
+	{"proxy cannot overwrite", "proxy must not overwrite"},
+	{"per-component attribution", "per-Resource-component"},
+	{"no identity repair", "cannot repair a collapsed stream"},
+	{"no implicit expiry", "No implicit expiry"},
+	{"decision 6 excluded", "decision 6"},
+	{"decision 10 excluded", "decision 10"},
+}
 
 // contractRequiredTargetCases pins accepted target behaviour that the incumbent
 // cannot execute. Removing or renaming one of these absences is a coverage
@@ -140,6 +158,21 @@ var contractRequiredTargetCases = []string{
 	"k8s-partial-does-not-clear",
 	"k8s-runtime-execution-distinct",
 	"k8s-supplied-grouping-and-provenance",
+	"source-collapsed-producer-ambiguity",
+	"source-component-conflict-rollback",
+	"source-complete-scoped-replacement-removal",
+	"source-no-backdated-receipt",
+	"source-no-global-registry",
+	"source-partial-omission-preserves",
+	"source-producer-sender-separation",
+	"source-replay-retention-preserves-record",
+	"source-sender-migration-transition",
+	"source-shared-stream-sender-components",
+	"source-trusted-proxy-preservation",
+	"source-typed-discovery-no-sample-reads",
+	"source-typed-discovery-state-distinctions",
+	"source-typed-roles-equality-canonical",
+	"source-untrusted-producer-unknown",
 	"state-association-termination-reassociation",
 	"state-clear-diff-state-encoding",
 	"state-complete-omission-vs-partial-unknown",
@@ -223,6 +256,15 @@ func TestContractManifest(t *testing.T) {
 		require.True(t, ok, "semantic decision %s is missing from the register", id)
 		require.Equal(t, "open", decision.Status,
 			"decision %s is not answered by this package and must stay open", id)
+	}
+	if decision, ok := decisionByID["5"]; ok && decision.Status == "decided" {
+		// The clause fragments are matched case-insensitively so a sentence
+		// boundary cannot decide whether the limit is still visible.
+		limits := strings.ToLower(decision.Limits)
+		for _, want := range contractDecisionFiveLimitClauses {
+			require.Contains(t, limits, strings.ToLower(want.fragment),
+				"decision 5 must keep the %q clause in its limits", want.clause)
+		}
 	}
 	blockedDecisions := map[string]bool{}
 

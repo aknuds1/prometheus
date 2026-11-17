@@ -1,0 +1,489 @@
+{
+  "id": "source_provenance_boundaries",
+  "title": "Opaque Source observations are idempotent, reject same-time conflicts with full rollback, never expire, survive lifecycle replay, stay out of Resource attributes and info(), and are never treated as the typed provenance record",
+  "obligations": [
+    "gap-source-provenance",
+    "invariant-6",
+    "invariant-13",
+    "route-promql-info"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [
+    "6",
+    "7"
+  ],
+  "target_cases": [
+    {
+      "id": "source-producer-sender-separation",
+      "obligation": "gap-source-provenance",
+      "accepted": "Two genuinely distinct producers P1 and P2 behind one collector C are separated by Resource and series identity under decisions 1 and 4. Each series carries a provenance record with its own producer component and a shared sender component for C. C is never reported as the producer.",
+      "reason": "The incumbent has one opaque Source owner 'otap' shared by every series and no producer or sender role, so it can distinguish neither P1 from P2 nor name C as a sender. Distinct compatibility labels can separate the series, but they supply no provenance."
+    },
+    {
+      "id": "source-shared-stream-sender-components",
+      "obligation": "gap-source-provenance",
+      "accepted": "One logical stream observed through senders C1 and C2 keeps one Resource and one Resource content version unless the content itself changed, carries both sender observations in one provenance record, and counts each input observation at most once.",
+      "reason": "The typed record does not exist: one opaque string cannot hold two sender components, and there is no coverage scope or completeness state."
+    },
+    {
+      "id": "source-untrusted-producer-unknown",
+      "obligation": "gap-source-provenance",
+      "accepted": "A missing, untrusted or dropped producer claim leaves the producer role unknown. No fallback infers it from the sender, Resource attributes, job or instance labels, hostname, metric or target names, peer address, User-Agent, writer order or OTAP batch ID.",
+      "reason": "There is no producer role and no trust policy, so the incumbent can neither accept a trusted claim nor represent an unknown one."
+    },
+    {
+      "id": "source-trusted-proxy-preservation",
+      "obligation": "gap-source-provenance",
+      "accepted": "An explicit trusted proxy mapping may assert a producer that is currently unknown while preserving that mapping's original producer and recording the proxy as sender or hop. A proxy never overwrites a known producer identity.",
+      "reason": "No channel carries producer or sender claims, and no proxy policy or original-observation preservation exists."
+    },
+    {
+      "id": "source-component-conflict-rollback",
+      "obligation": "gap-source-provenance",
+      "accepted": "Same component identity and effective time with different complete content rejects the affected transaction atomically under decision 2, publishing no samples, metadata or index prefix, WAL prefix or committed counter.",
+      "reason": "Typed components do not exist. The generic same-owner, same-time string conflict is executable and asserted in this fixture, but it does not exercise a component identity, so the typed conflict remains a target rather than coverage."
+    },
+    {
+      "id": "source-partial-omission-preserves",
+      "obligation": "gap-source-provenance",
+      "accepted": "A partial observation that omits a component cannot remove or clear it. The current set keeps the omitted component and the record states partial coverage for its scope.",
+      "reason": "There is no completeness or coverage state, and every stored content map is treated as complete, so omission and removal are indistinguishable."
+    },
+    {
+      "id": "source-complete-scoped-replacement-removal",
+      "obligation": "gap-source-provenance",
+      "accepted": "A complete authoritative record replaces the component set only within its declared scope under ordered validity. Explicit removal ends a component at its valid time, a later record may reintroduce it as a new version, and an older record cannot resurrect it.",
+      "reason": "No scoped completeness, explicit removal marker or ordered component version exists."
+    },
+    {
+      "id": "source-sender-migration-transition",
+      "obligation": "gap-source-provenance",
+      "accepted": "When C2 supersedes C1 as current sender, C1 terminates explicitly at that valid time and remains as history. Missing later C1 observations alone never terminate or expire it.",
+      "reason": "There are no sender components or explicit transitions; the opaque owner cannot express a sender set or its ordered change."
+    },
+    {
+      "id": "source-collapsed-producer-ambiguity",
+      "obligation": "gap-source-provenance",
+      "accepted": "Conflicting descriptive producer claims on an already collapsed or single stream coexist only with an explicit unresolved or ambiguous marker. They are never presented as exact attribution and never split the stream, merge Resources or authorise reconciliation.",
+      "reason": "One opaque string cannot hold two producer claims, and there is no ambiguity state."
+    },
+    {
+      "id": "source-typed-roles-equality-canonical",
+      "obligation": "gap-source-provenance",
+      "accepted": "Typed role discovery, identity and equality use canonical typed components. Identical components deduplicate by candidate identity plus complete canonical typed comparison, never digest-only, and canonical order is representation rather than semantic precedence.",
+      "reason": "Content is an untyped string map and the single opaque owner ID cannot express roles, components or typed equality."
+    },
+    {
+      "id": "source-no-backdated-receipt",
+      "obligation": "gap-source-provenance",
+      "accepted": "Provenance accepted now records actual receipt coverage and never claims validity or receipt at an earlier metric sample time. Supplied authoritative validity is used only where supported.",
+      "reason": "Update carries only EffectiveFrom, the store aliases observation bounds to it, and the native OTAP sink passes sample timestamps, so no independent receipt time exists. defect-source-sample-time records the current divergence separately."
+    },
+    {
+      "id": "source-typed-discovery-state-distinctions",
+      "obligation": "gap-source-provenance",
+      "accepted": "Typed discovery, diff and history distinguish absent, unknown, truncated and explicitly ambiguous states and synthesise no Source label into info() or ordinary series.",
+      "reason": "Only the generic kind query exists. Typed roles and ambiguity states are not representable, and the accepted state distinctions are not implemented."
+    },
+    {
+      "id": "source-typed-discovery-no-sample-reads",
+      "obligation": "gap-source-provenance",
+      "accepted": "Typed provenance discovery, diff and reverse paths open zero sample payloads.",
+      "reason": "The typed paths do not exist. The generic kind=source reverse query opens zero sample payloads and is asserted executably in this fixture, but it is not the typed discovery surface."
+    },
+    {
+      "id": "source-replay-retention-preserves-record",
+      "obligation": "gap-source-provenance",
+      "accepted": "Replay, flush, compaction, retention and reopen preserve record components, coverage, validity, observations, removals, truncations and ambiguity exactly, and older parts cannot resurrect removals.",
+      "reason": "The typed record does not exist. Generic Source replay and truncation are executable in this fixture and in source_history_truncation, but they preserve only an opaque string and cannot exercise components, coverage, removals or ambiguity."
+    },
+    {
+      "id": "source-no-global-registry",
+      "obligation": "gap-source-provenance",
+      "accepted": "The accepted model requires no global producer registry, placement, replication, cross-node metadata transaction, distributed commit or Source RPC.",
+      "reason": "A non-requirement has no positive incumbent observable. This target pins the scope exclusion so a future implementation cannot silently introduce distribution as a provenance requirement."
+    }
+  ],
+  "scope": "Generic Source-kind evidence that the incumbent can execute, plus explicit accepted target cases it cannot execute. The Source owner here is an opaque string and its content an opaque string map: this fixture asserts equal-observation idempotence, same-owner and same-membership conflict rejection with full rollback, observation-bound extension, no implicit expiry, replay and lifecycle retention, zero sample-payload reads for metadata-only reverse reads, and that Source content becomes neither a Resource attribute nor an info() label. It does not claim typed producer, sender or transport roles, trusted channels, component sets, coverage scopes, completeness, explicit removal, ambiguity, receipt timestamps or sender migration; those are the fixture's target cases and remain non-passing. The upgrade, truncation and same-time conflict cases assert only generic Source semantics. The fixture does not decide PR99 syntax or promotion aliases (decision 6) or HTTP and cursor encoding (decision 7).",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "source_boundary_metric",
+          "instance": "a"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "1"
+          }
+        ]
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "source_boundary_metric",
+          "instance": "a"
+        },
+        "owner": {
+          "kind": "source",
+          "identifying": {
+            "source": "receiver-a"
+          }
+        },
+        "content": {
+          "provenance.note": "opaque"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_versions": 1,
+        "committed_memberships": 1
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "source_boundary_metric",
+          "instance": "a"
+        },
+        "owner": {
+          "kind": "source",
+          "identifying": {
+            "source": "receiver-a"
+          }
+        },
+        "content": {
+          "provenance.note": "opaque"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_versions": 1,
+        "committed_memberships": 1,
+        "committed_metadata_transactions": "$previous"
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "source_boundary_metric",
+          "instance": "a"
+        },
+        "owner": {
+          "kind": "source",
+          "identifying": {
+            "source": "receiver-a"
+          }
+        },
+        "content": {
+          "provenance.note": "opaque"
+        },
+        "effective_from": 2000
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_versions": 1,
+        "committed_memberships": 1
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "source_boundary_metric",
+          "instance": "a"
+        },
+        "owner": {
+          "kind": "source",
+          "identifying": {
+            "source": "receiver-a"
+          }
+        },
+        "content": {
+          "provenance.note": "other"
+        },
+        "effective_from": 1000
+      },
+      "expect_error": "conflicting_metadata"
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_versions": 1,
+        "committed_memberships": 1,
+        "committed_metadata_transactions": "$previous"
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "source_boundary_metric",
+          "instance": "a"
+        },
+        "owner": {
+          "kind": "source",
+          "identifying": {
+            "source": "receiver-b"
+          }
+        },
+        "content": {
+          "provenance.note": "opaque"
+        },
+        "effective_from": 1000
+      },
+      "expect_error": "conflicting_membership"
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "committed_versions": 1,
+        "committed_memberships": 1,
+        "committed_metadata_transactions": "$previous"
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "source",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "provenance.note",
+            "value": "opaque"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"source_boundary_metric\", instance=\"a\"}",
+            "owner": "{\"source\":\"receiver-a\"}",
+            "kind": "source",
+            "owner_identifying": {
+              "source": "receiver-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 2000,
+            "versions": [
+              {
+                "content": {
+                  "provenance.note": "opaque"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 2000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "source",
+        "start": 6000,
+        "end": 6000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"source_boundary_metric\", instance=\"a\"}",
+            "owner": "{\"source\":\"receiver-a\"}",
+            "kind": "source",
+            "owner_identifying": {
+              "source": "receiver-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 2000,
+            "versions": [
+              {
+                "content": {
+                  "provenance.note": "opaque"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 2000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "resource",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "provenance.note",
+            "value": "opaque"
+          }
+        ]
+      },
+      "expect": {
+        "series": []
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(source_boundary_metric)",
+        "at": 1000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"source_boundary_metric\", instance=\"a\"}",
+            "samples": [
+              "0x3ff0000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "flush"
+    },
+    {
+      "op": "stats_reset"
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "source",
+        "start": 0,
+        "end": 10000,
+        "attributes": [
+          {
+            "name": "provenance.note",
+            "value": "opaque"
+          }
+        ]
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"source_boundary_metric\", instance=\"a\"}",
+            "owner": "{\"source\":\"receiver-a\"}",
+            "kind": "source",
+            "owner_identifying": {
+              "source": "receiver-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 2000,
+            "versions": [
+              {
+                "content": {
+                  "provenance.note": "opaque"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 2000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "stats",
+      "expect": {
+        "sample_payload_opens": 0,
+        "segments_read": 0,
+        "blocks": 1
+      }
+    },
+    {
+      "op": "compact",
+      "args": {
+        "mint": 0,
+        "maxt": 10000
+      }
+    },
+    {
+      "op": "reopen"
+    },
+    {
+      "op": "metadata_series",
+      "args": {
+        "kind": "source",
+        "start": 0,
+        "end": 10000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"source_boundary_metric\", instance=\"a\"}",
+            "owner": "{\"source\":\"receiver-a\"}",
+            "kind": "source",
+            "owner_identifying": {
+              "source": "receiver-a"
+            },
+            "membership_start": 1000,
+            "membership_observed_until": 2000,
+            "versions": [
+              {
+                "content": {
+                  "provenance.note": "opaque"
+                },
+                "effective_from": 1000,
+                "observed_from": 1000,
+                "observed_until": 2000
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "state": {
+    "series": [
+      {
+        "labels": "{__name__=\"source_boundary_metric\", instance=\"a\"}",
+        "samples": [
+          "1000|0x3ff0000000000000|float|0"
+        ]
+      }
+    ],
+    "owners": [
+      {
+        "kind": "source",
+        "identifying": {
+          "source": "receiver-a"
+        },
+        "truncated": false,
+        "versions": [
+          {
+            "content": {
+              "provenance.note": "opaque"
+            },
+            "effective_from": 1000,
+            "observed_from": 1000,
+            "observed_until": 2000
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -44,6 +44,19 @@ package columnar
 // identity, unresolved relations and the combined view are target cases owned
 // by non-passing obligations.
 //
+// Decision 5 decides Source and provenance: producer, sender and final
+// transport are distinct roles over a dedicated non-identifying, trusted
+// channel; one typed provenance record per series and validity time carries a
+// coverage scope, completeness and canonical components; partial observations
+// cannot remove, complete scoped records replace explicitly, and conflicting
+// producers stay ambiguous. The incumbent stores one opaque SourceOwner string
+// on the native OTAP route and stamps it at sample timestamps, so the Source
+// fixtures below execute only equal-observation idempotence, same-time conflict
+// rejection, retention/replay and zero sample-payload reads. The typed roles,
+// components, completeness, trust and receipt-time semantics are target cases
+// owned by non-passing obligations, and the sample-time stamping is recorded as
+// a defect.
+//
 // Expectations are authored from the fixture's stated arithmetic and semantics,
 // never captured from a store and then declared independent. The companion
 // manifest test (contract_manifest_test.go) refuses to let a contract obligation
