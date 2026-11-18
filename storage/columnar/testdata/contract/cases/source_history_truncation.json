@@ -9,12 +9,11 @@
     "columnar"
   ],
   "open_decisions": [
-    "6",
     "7",
     "9"
   ],
   "retained_version_limit": 2,
-  "scope": "Generic Source-kind truncation and replay evidence only. A retained_version_limit of 2 discards the oldest Source version, marks the owner history truncated, and preserves the retained versions, membership and observation bounds through flush, compaction and block reopen. The empty result for the discarded content is the incumbent's current shape, not accepted coverage: decision 5 requires discarded coverage to report unknown or truncated. Content keys are opaque strings, not the decision-5 typed provenance record; typed components, coverage scopes, removals and ambiguity are target cases in source_provenance_boundaries. The fixture does not decide PR99 syntax (6), HTTP and cursor encoding (7) or an admission and retention budget (9); the version cap is the available bounded-history mechanism, not a budget policy.",
+  "scope": "Generic Source-kind truncation and replay evidence only. A retained_version_limit of 2 discards the oldest Source version, marks the owner history truncated, and preserves the retained versions, membership and observation bounds through flush, compaction and block reopen. The empty result for the discarded content is the incumbent's current shape, not accepted coverage: decision 5 requires discarded coverage to report unknown or truncated. Content keys are opaque strings, not the decision-5 typed provenance record; typed components, coverage scopes, removals and ambiguity are target cases in source_provenance_boundaries. The fixture does not decide HTTP and cursor encoding (7) or an admission and retention budget (9); PR99 syntax is decision 6 (2026-11-18), accepted but unimplemented, and this fixture exercises no native reference; the version cap is the available bounded-history mechanism, not a budget policy.",
   "events": [
     {
       "op": "append",

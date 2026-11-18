@@ -15,7 +15,6 @@
     "columnar"
   ],
   "open_decisions": [
-    "6",
     "7"
   ],
   "target_cases": [
@@ -64,7 +63,7 @@
     {
       "id": "state-missing-value-filtering",
       "obligation": "gap-value-state-distinction",
-      "accepted": "A positive value filter matches only an applicable present value; absent, cleared and unknown states do not satisfy an ordinary empty-string or other value matcher. Selecting one of those states requires an explicit state predicate, whose PR99 syntax is deferred to decision 6 rather than guessed here.",
+      "accepted": "A positive value filter matches only an applicable present value; absent, cleared and unknown states do not satisfy an ordinary empty-string or other value matcher. Selecting one of those states requires an explicit state predicate; decision 6 (2026-11-18) accepts metadata_state(~~ref, axis), but the incumbent cannot execute it.",
       "reason": "The current attribute matcher falls back to owner identity and then to the empty string, so an absent key can satisfy an empty-string value matcher (reproduced by defect-absent-empty-filter). There is no state predicate or typed matcher to select a missing state explicitly."
     },
     {
@@ -74,7 +73,7 @@
       "reason": "There is no tombstone to persist. The executable lifecycle evidence in association_replay_and_truncation covers retained versions, observation bounds and history_truncated through flush, compaction and reopen, but older-part non-resurrection of cleared state cannot be exercised."
     }
   ],
-  "scope": "Decision-3 coverage that the incumbent can execute, plus explicit accepted target cases it cannot execute. Two Resources share service.name and service.namespace but differ in service.instance.id, so matching names do not merge them: each owner keeps its own content and membership. An observation-only reassertion at 8000 after samples stop at 2000 extends observation bounds without a version, and content stays applicable at 6000 after flush, compaction and reopen; observation is not expiry. The metadata-only observation and the reverse metadata reads fabricate no samples and open no sample payload. An unassociated series survives info() unfiltered without a fake promoted label. The target cases record typed present/null/absent, complete omission versus partial-source unknown, explicit clear and association termination, their idempotence and conflict, clear-aware diffs, missing-state filtering and tombstone lifecycle durability. The fixture does not decide or guess an explicit clear or termination operation, Source cardinality, PR99 state-selection syntax or HTTP/cursor encoding; those remain decisions 3 (semantics accepted, implementation absent), 5, 6 and 7.",
+  "scope": "Decision-3 coverage that the incumbent can execute, plus explicit accepted target cases it cannot execute. Two Resources share service.name and service.namespace but differ in service.instance.id, so matching names do not merge them: each owner keeps its own content and membership. An observation-only reassertion at 8000 after samples stop at 2000 extends observation bounds without a version, and content stays applicable at 6000 after flush, compaction and reopen; observation is not expiry. The metadata-only observation and the reverse metadata reads fabricate no samples and open no sample payload. An unassociated series survives info() unfiltered without a fake promoted label. The target cases record typed present/null/absent, complete omission versus partial-source unknown, explicit clear and association termination, their idempotence and conflict, clear-aware diffs, missing-state filtering and tombstone lifecycle durability. The fixture does not decide or guess an explicit clear or termination operation, Source cardinality or HTTP/cursor encoding; decision 3 (semantics accepted, implementation absent), decision 5 and decision 7 remain separate. Decision 6 (2026-11-18) accepts the state-predicate form, but this fixture executes no native reference and its state-predicate target cases stay non-passing.",
   "events": [
     {
       "op": "append",

@@ -113,12 +113,13 @@ var contractStatuses = []string{"passing", "partial", "defect", "unsupported", "
 var contractDecisionStatuses = []string{"open", "decided"}
 
 // contractDecidedDecisions must be decided by this package. Decisions 1 to 5
-// were accepted by the user/product owner on 2026-11-15.
-var contractDecidedDecisions = []string{"1", "2", "3", "4", "5"}
+// were accepted by the user/product owner on 2026-11-15 and decision 6 on
+// 2026-11-18.
+var contractDecidedDecisions = []string{"1", "2", "3", "4", "5", "6"}
 
 // contractOpenDecisions must remain open here: this package may not guess a
 // resolution from incumbent behaviour.
-var contractOpenDecisions = []string{"6", "7", "8", "9", "10"}
+var contractOpenDecisions = []string{"7", "8", "9", "10"}
 
 // contractDecisionFiveLimitClauses pins the exclusions and current-phase
 // boundaries decision 5 must keep visible in its limits. They are scope
@@ -136,6 +137,22 @@ var contractDecisionFiveLimitClauses = []struct {
 	{"no implicit expiry", "No implicit expiry"},
 	{"decision 6 excluded", "decision 6"},
 	{"decision 10 excluded", "decision 10"},
+}
+
+// contractDecisionSixLimitClauses pins the exclusions and current-phase
+// boundaries decision 6 must keep visible in its limits. They are scope
+// records, never coverage: every accepted clause is unimplemented.
+var contractDecisionSixLimitClauses = []struct {
+	clause   string
+	fragment string
+}{
+	{"structured paths deferred", "structured paths"},
+	{"direct metadata modifiers rejected", "direct metadata references in by/without/on/ignoring/grouping"},
+	{"arbitrary typed promotion deferred", "arbitrary typed promotion"},
+	{"ordered comparisons deferred", "ordered comparisons"},
+	{"decisions 7-10 excluded", "decisions 7-10"},
+	{"decision 10 performance gates", "performance gates (10)"},
+	{"current implementation gaps", "current-phase limit"},
 }
 
 // contractRequiredTargetCases pins accepted target behaviour that the incumbent
@@ -183,6 +200,27 @@ var contractRequiredTargetCases = []string{
 	"state-tombstone-lifecycle-durability",
 	"state-truncated-read-reporting",
 	"state-typed-present-null-absent",
+	"native-default-selector-and-vector-matching-isolation",
+	"native-typed-equality",
+	"native-signed-zero-nan-double-bits",
+	"native-negative-regex-nonstring-errors",
+	"native-tilde-versus-double-tilde-promotion",
+	"native-alias-selector-sides",
+	"native-promoted-alias-modifiers",
+	"native-direct-metadata-modifier-rejection",
+	"native-output-name-collisions",
+	"native-present-empty-versus-absent",
+	"native-state-predicate-axes",
+	"native-annotation-ambiguity-no-invention",
+	"native-temporal-bands-and-modifiers",
+	"native-aggregation-rejection-and-legacy-controls",
+	"native-owner-membership-transitions",
+	"native-domain-namespace-isolation",
+	"native-source-role-state-discovery",
+	"native-lifecycle-preservation",
+	"native-stable-band-work-accounting",
+	"native-fanout-merge-supplementary-ambiguity",
+	"native-reference-exact-name-identity",
 }
 
 // contractGroups are the permitted obligation groups.
@@ -257,13 +295,27 @@ func TestContractManifest(t *testing.T) {
 		require.Equal(t, "open", decision.Status,
 			"decision %s is not answered by this package and must stay open", id)
 	}
-	if decision, ok := decisionByID["5"]; ok && decision.Status == "decided" {
+	for _, decided := range []struct {
+		id     string
+		clause string
+		pins   []struct {
+			clause   string
+			fragment string
+		}
+	}{
+		{id: "5", clause: "decision 5", pins: contractDecisionFiveLimitClauses},
+		{id: "6", clause: "decision 6", pins: contractDecisionSixLimitClauses},
+	} {
+		decision, ok := decisionByID[decided.id]
+		if !ok || decision.Status != "decided" {
+			continue
+		}
 		// The clause fragments are matched case-insensitively so a sentence
 		// boundary cannot decide whether the limit is still visible.
 		limits := strings.ToLower(decision.Limits)
-		for _, want := range contractDecisionFiveLimitClauses {
+		for _, want := range decided.pins {
 			require.Contains(t, limits, strings.ToLower(want.fragment),
-				"decision 5 must keep the %q clause in its limits", want.clause)
+				"%s must keep the %q clause in its limits", decided.clause, want.clause)
 		}
 	}
 	blockedDecisions := map[string]bool{}

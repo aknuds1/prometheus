@@ -57,6 +57,15 @@ package columnar
 // owned by non-passing obligations, and the sample-time stamping is recorded as
 // a defect.
 //
+// Decision 6 accepts native metadata references (~ and ~~), category-exact
+// namespaces, typed literals, metadata_state, promotion, selector-local aliases,
+// temporal band resolution, aggregation rejection, merge ambiguity and stable-band
+// work accounting. The incumbent parser has none of that syntax, so
+// promql_native_metadata_semantics executes only current plain-selector and info()
+// controls and records the accepted rules as target cases owned by non-passing
+// obligations. TestPromQLNativeMetadataGrammarRejectedByIncumbent pins the parse
+// rejections as absence evidence; no target expression is executed here.
+//
 // Expectations are authored from the fixture's stated arithmetic and semantics,
 // never captured from a store and then declared independent. The companion
 // manifest test (contract_manifest_test.go) refuses to let a contract obligation

@@ -536,9 +536,13 @@
           "test": "TestMetadataKindsAreNotResourceLabels"
         }
       ],
-      "fixtures": [],
-      "decisions": [],
-      "note": "Plain selectors and the built-in PromQL suite run over a store that holds metadata without any metadata label appearing."
+      "fixtures": [
+        "promql_native_metadata_semantics"
+      ],
+      "decisions": [
+        "6"
+      ],
+      "note": "Plain selectors and the built-in PromQL suite run over a store that holds metadata without any metadata label appearing. promql_native_metadata_semantics additionally asserts, with Resource content present, that a plain selector, ordinary matchers, vector matching and sum by see only original labels and that no metadata label appears. Decision 6 (2026-11-18) is provenance for the accepted isolation rule, not evidence for its selector-local projection or alias clause, which remains a non-passing target case."
     },
     {
       "id": "invariant-11",
@@ -777,12 +781,13 @@
         "association_history_and_replay",
         "association_replay_and_truncation",
         "kubernetes_collection_identity_and_reconciliation",
-        "source_provenance_boundaries"
+        "source_provenance_boundaries",
+        "promql_native_metadata_semantics"
       ],
       "decisions": [
         "6"
       ],
-      "note": "Current info() semantics only, including absent and explicitly truncated histories. PR99 grammar and promotion syntax are decision 6. source_provenance_boundaries asserts that Source-kind content is not promoted into info() labels and does not become a Resource attribute name."
+      "note": "Current info() semantics only, including absent and explicitly truncated histories. Decision 6 (2026-11-18) is decided and retained as provenance; it does not make this obligation decision-6 implementation. promql_native_metadata_semantics executes current info() name translation, no-overwrite and unassociated-series behavior and keeps its native-reference target cases non-passing. source_provenance_boundaries asserts that Source-kind content is not promoted into info() labels and does not become a Resource attribute name."
     },
     {
       "id": "route-remote-write",
@@ -853,10 +858,13 @@
       "status": "unsupported",
       "evidence": [],
       "fixtures": [
-        "resource_identity_fallback"
+        "resource_identity_fallback",
+        "promql_native_metadata_semantics"
       ],
-      "decisions": [],
-      "note": "Content.Attributes and every HTTP value are string-only. Boolean true versus the string \"true\", integer 1 versus double 1, array order, map equality and null versus absent are not representable, so no fixture may assert them. The target case identity-entity-typed-content in resource_identity_fallback records the accepted typed-content clause."
+      "decisions": [
+        "6"
+      ],
+      "note": "Content.Attributes and every HTTP value are string-only. Boolean true versus the string \"true\", integer 1 versus double 1, array order, map equality and null versus absent are not representable, so no fixture may assert them. The target case identity-entity-typed-content in resource_identity_fallback records the accepted typed-content clause. Decision 6 (2026-11-18) is provenance for the query-side typed literals; it does not make typed content exist. promql_native_metadata_semantics additionally records the accepted target cases native-typed-equality, native-signed-zero-nan-double-bits and native-negative-regex-nonstring-errors."
     },
     {
       "id": "gap-entity-identity",
@@ -882,12 +890,14 @@
       "evidence": [],
       "fixtures": [
         "source_provenance_boundaries",
-        "source_history_truncation"
+        "source_history_truncation",
+        "promql_native_metadata_semantics"
       ],
       "decisions": [
-        "5"
+        "5",
+        "6"
       ],
-      "note": "Decision 5 is decided (2026-11-15) and is retained here as provenance, so the semantics no longer block a case; this is an implementation gap. The accepted model gives each observation a typed record with producer, sender and final-transport roles, fail-closed trust over an explicit non-identifying channel, one record per series and validity time carrying a coverage scope and a canonical component set, explicit complete versus partial replacement and removal, and unresolved ambiguity instead of a winner. The incumbent stores one opaque SourceOwner string: native OTAP emits the single owner 'otap' with content 'transport=otap' for every series at sample timestamps, and scrape, ordinary OTLP and remote write supply no provenance record at all. source_provenance_boundaries executes the generic Source kind only - equal-observation idempotence, same-owner and same-membership conflict rejection with full rollback, observation-bound extension, no implicit expiry, replay/lifecycle retention, zero sample-payload reads and no Source attribute or label leakage - and does not claim the typed model. source_history_truncation executes the generic version cap and replay for the Source kind. defect-source-sample-time records the sample-time stamping divergence separately. Machine-checked target cases source-producer-sender-separation, source-shared-stream-sender-components, source-untrusted-producer-unknown, source-trusted-proxy-preservation, source-component-conflict-rollback, source-partial-omission-preserves, source-complete-scoped-replacement-removal, source-sender-migration-transition, source-collapsed-producer-ambiguity, source-typed-roles-equality-canonical, source-no-backdated-receipt, source-typed-discovery-state-distinctions, source-typed-discovery-no-sample-reads, source-replay-retention-preserves-record and source-no-global-registry keep the accepted behaviour visible without making any of it pass."
+      "note": "Decision 5 is decided (2026-11-15) and is retained here as provenance, so the semantics no longer block a case; this is an implementation gap. The accepted model gives each observation a typed record with producer, sender and final-transport roles, fail-closed trust over an explicit non-identifying channel, one record per series and validity time carrying a coverage scope and a canonical component set, explicit complete versus partial replacement and removal, and unresolved ambiguity instead of a winner. The incumbent stores one opaque SourceOwner string: native OTAP emits the single owner 'otap' with content 'transport=otap' for every series at sample timestamps, and scrape, ordinary OTLP and remote write supply no provenance record at all. source_provenance_boundaries executes the generic Source kind only - equal-observation idempotence, same-owner and same-membership conflict rejection with full rollback, observation-bound extension, no implicit expiry, replay/lifecycle retention, zero sample-payload reads and no Source attribute or label leakage - and does not claim the typed model. source_history_truncation executes the generic version cap and replay for the Source kind. defect-source-sample-time records the sample-time stamping divergence separately. Machine-checked target cases source-producer-sender-separation, source-shared-stream-sender-components, source-untrusted-producer-unknown, source-trusted-proxy-preservation, source-component-conflict-rollback, source-partial-omission-preserves, source-complete-scoped-replacement-removal, source-sender-migration-transition, source-collapsed-producer-ambiguity, source-typed-roles-equality-canonical, source-no-backdated-receipt, source-typed-discovery-state-distinctions, source-typed-discovery-no-sample-reads, source-replay-retention-preserves-record and source-no-global-registry keep the accepted behaviour visible without making any of it pass. Decision 6 (2026-11-18) is provenance for the accepted source reference and state predicate. promql_native_metadata_semantics additionally records native-source-role-state-discovery, which keeps the typed role and non-identification rules non-passing."
     },
     {
       "id": "gap-clearing-expiry",
@@ -896,12 +906,14 @@
       "status": "unsupported",
       "evidence": [],
       "fixtures": [
-        "observation_states_and_independent_resources"
+        "observation_states_and_independent_resources",
+        "promql_native_metadata_semantics"
       ],
       "decisions": [
-        "3"
+        "3",
+        "6"
       ],
-      "note": "Decision 3 is decided (2026-11-15) and retained as provenance, so this is an implementation gap rather than a blocked semantic question. The incumbent has no explicit key clear, tombstone, association termination or unassociated membership successor; an empty content map is an ordinary present version. Machine-checked target cases state-explicit-key-clear-reappearance, state-association-termination-reassociation, state-idempotent-clear-termination, state-owner-termination-conflict-rollback, state-clear-diff-state-encoding and state-tombstone-lifecycle-durability keep the accepted behavior visible. Retained observation bounds and history_truncated are executable, but no clear or termination operation is implemented or guessed from an empty map."
+      "note": "Decision 3 is decided (2026-11-15) and retained as provenance, so this is an implementation gap rather than a blocked semantic question. The incumbent has no explicit key clear, tombstone, association termination or unassociated membership successor; an empty content map is an ordinary present version. Machine-checked target cases state-explicit-key-clear-reappearance, state-association-termination-reassociation, state-idempotent-clear-termination, state-owner-termination-conflict-rollback, state-clear-diff-state-encoding and state-tombstone-lifecycle-durability keep the accepted behavior visible. Retained observation bounds and history_truncated are executable, but no clear or termination operation is implemented or guessed from an empty map. Decision 6 (2026-11-18) is provenance for the accepted temporal predicate behavior. promql_native_metadata_semantics additionally records native-temporal-bands-and-modifiers."
     },
     {
       "id": "gap-value-state-distinction",
@@ -911,12 +923,14 @@
       "evidence": [],
       "fixtures": [
         "observation_states_and_independent_resources",
-        "association_replay_and_truncation"
+        "association_replay_and_truncation",
+        "promql_native_metadata_semantics"
       ],
       "decisions": [
-        "3"
+        "3",
+        "6"
       ],
-      "note": "Decision 3 is decided (2026-11-15) and retained as provenance, so this is an implementation gap rather than a blocked semantic question. The incumbent stores only string maps with no key-presence, type, null, completeness or provenance marker. Typed present, typed null and absent; authoritative complete omission versus partial-source unknown; explicit truncated or unknown read and diff responses; and an explicit state predicate are not representable. Machine-checked target cases state-typed-present-null-absent, state-complete-omission-vs-partial-unknown, state-missing-value-filtering and state-truncated-read-reporting keep them visible. The ordinary empty-string matcher divergence is separately reproduced by defect-absent-empty-filter, not repaired here.",
+      "note": "Decision 3 is decided (2026-11-15) and retained as provenance, so this is an implementation gap rather than a blocked semantic question. The incumbent stores only string maps with no key-presence, type, null, completeness or provenance marker. Typed present, typed null and absent; authoritative complete omission versus partial-source unknown; explicit truncated or unknown read and diff responses; and an explicit state predicate are not representable. Machine-checked target cases state-typed-present-null-absent, state-complete-omission-vs-partial-unknown, state-missing-value-filtering and state-truncated-read-reporting keep them visible. The ordinary empty-string matcher divergence is separately reproduced by defect-absent-empty-filter, not repaired here. Decision 6 (2026-11-18) is provenance for the accepted state predicate. promql_native_metadata_semantics additionally records the target cases native-present-empty-versus-absent, native-state-predicate-axes and native-annotation-ambiguity-no-invention.",
       "gaps": []
     },
     {
@@ -1116,13 +1130,20 @@
       "id": "gap-pr99-grammar",
       "group": "capability-gap",
       "title": "PR99 metadata filter/grouping/alias grammar",
-      "status": "blocked",
-      "evidence": [],
-      "fixtures": [],
+      "status": "unsupported",
+      "evidence": [
+        {
+          "path": "storage/columnar/promql_native_metadata_contract_test.go",
+          "test": "TestPromQLNativeMetadataGrammarRejectedByIncumbent"
+        }
+      ],
+      "fixtures": [
+        "promql_native_metadata_semantics"
+      ],
       "decisions": [
         "6"
       ],
-      "note": "Current info() is the only implemented enrichment form. The proposal was last checked open and non-draft with 'Implementation Status: Not implemented'."
+      "note": "Decision 6 is decided (2026-11-18) and retained here as provenance, so the grammar no longer blocks a case; this is an implementation gap. PR 99 is dated design evidence at inspected head f0b8ab22e180f483bd5c74b3fa0442d473a18d4a with 'Implementation Status: Not implemented', not upstream acceptance. The incumbent parser rejects ~ and ~~ with 'unexpected character' and has no metadata_state function, so no reference, filter, promotion, alias, typed-literal, state-predicate, aggregation, lifecycle or fanout-merge rule can execute. TestPromQLNativeMetadataGrammarRejectedByIncumbent reproduces those parse rejections as absence evidence, not implementation. promql_native_metadata_semantics records the accepted target cases native-default-selector-and-vector-matching-isolation, native-reference-exact-name-identity, native-tilde-versus-double-tilde-promotion, native-alias-selector-sides, native-promoted-alias-modifiers, native-direct-metadata-modifier-rejection, native-output-name-collisions, native-aggregation-rejection-and-legacy-controls, native-owner-membership-transitions, native-domain-namespace-isolation, native-lifecycle-preservation, native-stable-band-work-accounting and native-fanout-merge-supplementary-ambiguity; none is executed or counted as coverage."
     },
     {
       "id": "gap-workload-targets",

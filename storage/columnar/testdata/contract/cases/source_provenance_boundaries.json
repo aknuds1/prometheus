@@ -11,7 +11,6 @@
     "columnar"
   ],
   "open_decisions": [
-    "6",
     "7"
   ],
   "target_cases": [
@@ -106,7 +105,7 @@
       "reason": "A non-requirement has no positive incumbent observable. This target pins the scope exclusion so a future implementation cannot silently introduce distribution as a provenance requirement."
     }
   ],
-  "scope": "Generic Source-kind evidence that the incumbent can execute, plus explicit accepted target cases it cannot execute. The Source owner here is an opaque string and its content an opaque string map: this fixture asserts equal-observation idempotence, same-owner and same-membership conflict rejection with full rollback, observation-bound extension, no implicit expiry, replay and lifecycle retention, zero sample-payload reads for metadata-only reverse reads, and that Source content becomes neither a Resource attribute nor an info() label. It does not claim typed producer, sender or transport roles, trusted channels, component sets, coverage scopes, completeness, explicit removal, ambiguity, receipt timestamps or sender migration; those are the fixture's target cases and remain non-passing. The upgrade, truncation and same-time conflict cases assert only generic Source semantics. The fixture does not decide PR99 syntax or promotion aliases (decision 6) or HTTP and cursor encoding (decision 7).",
+  "scope": "Generic Source-kind evidence that the incumbent can execute, plus explicit accepted target cases it cannot execute. The Source owner here is an opaque string and its content an opaque string map: this fixture asserts equal-observation idempotence, same-owner and same-membership conflict rejection with full rollback, observation-bound extension, no implicit expiry, replay and lifecycle retention, zero sample-payload reads for metadata-only reverse reads, and that Source content becomes neither a Resource attribute nor an info() label. It does not claim typed producer, sender or transport roles, trusted channels, component sets, coverage scopes, completeness, explicit removal, ambiguity, receipt timestamps or sender migration; those are the fixture's target cases and remain non-passing. The upgrade, truncation and same-time conflict cases assert only generic Source semantics. The fixture does not decide HTTP and cursor encoding (decision 7); PR99 syntax and promotion aliases are decision 6 (2026-11-18), accepted but unimplemented, and this fixture executes no native reference.",
   "events": [
     {
       "op": "append",

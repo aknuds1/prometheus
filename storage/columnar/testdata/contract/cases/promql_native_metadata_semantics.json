@@ -1,0 +1,483 @@
+{
+  "id": "promql_native_metadata_semantics",
+  "title": "Decision-6 native metadata reference, filter, promotion, alias, state, aggregation, merge, lifecycle and work-accounting semantics: executable incumbent controls plus accepted target cases",
+  "obligations": [
+    "gap-clearing-expiry",
+    "gap-pr99-grammar",
+    "gap-source-provenance",
+    "gap-typed-content",
+    "gap-value-state-distinction",
+    "invariant-10",
+    "route-promql-info"
+  ],
+  "routes": [
+    "columnar"
+  ],
+  "open_decisions": [
+    "7",
+    "8",
+    "9",
+    "10"
+  ],
+  "target_cases": [
+    {
+      "id": "native-default-selector-and-vector-matching-isolation",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "At evaluation time 2000 the fixture holds native_probe_total instance a (Resource owner pod-a, Resource content host.name=\"a-host\", zone=\"east\", ordinary label zone=\"base-zone\") with value 7 and instance b (no Resource owner) with value 5. A plain selector native_probe_total returns exactly {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} 7 and {__name__=\"native_probe_total\", instance=\"b\", job=\"api\"} 5. native_probe_total{zone=\"east\"} returns no series and native_probe_total{zone=\"base-zone\"} returns only instance a, so Resource content never becomes an ordinary label or an ordinary matcher target. native_probe_total + on(job, instance) native_probe_total returns the same two label sets with values 14 and 10, so vector matching uses only original labels. A selector-local ~resource.zone as resource_zone adds resource_zone=\"east\" to instance a only inside that selector. Error class: none for these forms; a direct metadata reference in group_left is the validation error in case 9.",
+      "reason": "The incumbent has no ~ or ~~ reference token at all, so a selector-local projection and its isolation from vector matching cannot be parsed or executed. The plain-selector part is executable and asserted by this fixture's events, but the accepted projection rule has no implementation."
+    },
+    {
+      "id": "native-reference-exact-name-identity",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "With Resource keys host.name=\"a-host\", host\\name=\"escaped-host\", 主机名=\"unicode-host\", zone=\"east\", Scope key name=\"sdk-scope\", Metric key name=\"native_probe_total\" and Scrape key name=\"scrape-b\" present, ~~resource.host.name and ~~resource.\"host.name\" select the same key and match instance a. ~~resource.\"host\\\\name\" is a distinct exact key and does not match a. ~~resource.\"主机名\" matches the Unicode key. ~~scope.name = \"sdk-scope\", ~~metric.name = \"native_probe_total\" and ~~scrape.name = \"scrape-b\" each stay in their own namespace and never match the Resource value. ~~resource.zone.extra is one exact flattened key named zone.extra, not a path into zone. Unknown category ~~team.owner and missing category ~~.zone are validation errors of class metadata_reference_error; no legacy label-name sanitization is applied. Error class: metadata_reference_error for the malformed category forms, none for the exact-name forms.",
+      "reason": "The parser rejects the first ~ with 'unexpected character', so dotted, quoted, escaped, Unicode and category-isolated keys cannot be distinguished. Content has no quoting or exact-key identity beyond a flat string map, and no category namespace is exposed to PromQL."
+    },
+    {
+      "id": "native-typed-equality",
+      "obligation": "gap-typed-content",
+      "accepted": "Typed Resource content {s:\"1\", i:1, d:1.0, b:true, a:[1,2], m:{k:1,j:\"x\"}, n:null} exists at 2000 on instance a, whose sample is value 7 at label set {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"}. ~~resource.s = \"1\" matches and ~~resource.s = 1 does not. ~~resource.i = 1 matches only integer 1, ~~resource.d = 1.0 matches only double 1.0, and ~~resource.i = 1.0 does not match. ~~resource.b = true matches only boolean true. ~~resource.a = [1,2] matches the ordered array and = [2,1] does not. ~~resource.m = {k=1,j=\"x\"} and = {j=\"x\",k=1} match the same map regardless of iteration order, while = {k=2,j=\"x\"} does not. ~~resource.n = null matches typed null; ~~resource.absent = null does not, because typed null is not absent. Matching is same-type exact equality only: a cross-type literal is false rather than a stringified match. Error class: none.",
+      "reason": "Content.Attributes is map[string]string with no boolean, integer, double, array, map or null representation, so integer 1, double 1.0 and string \"1\" cannot stay distinct and no typed literal can be evaluated."
+    },
+    {
+      "id": "native-signed-zero-nan-double-bits",
+      "obligation": "gap-typed-content",
+      "accepted": "Typed double content negzero=-0.0 (bits 0x8000000000000000), poszero=0.0 (bits 0x0000000000000000) and nan1=double_bits(0x7ff8000000000001) exists at 2000 on instance a, whose sample is value 7 at label set {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"}. ~~resource.negzero = -0.0 and = double_bits(0x8000000000000000) match; = 0.0 and = double_bits(0x0000000000000000) do not. ~~resource.poszero = 0.0 matches and = -0.0 does not. ~~resource.nan1 = double_bits(0x7ff8000000000001) matches that NaN payload only; double_bits(0x7ff8000000000002) does not. A bare = NaN literal is a validation error, and an ordered comparison such as > 0.0 is deferred and rejected. Error class: metadata_literal_error for the unsupported literal and for the deferred ordered comparison, none for the bit-exact comparisons.",
+      "reason": "Metadata values are strings, so signed zero, NaN payload identity and double_bits(...) have no representation. The incumbent cannot compare bits and has no metadata literal parser."
+    },
+    {
+      "id": "native-negative-regex-nonstring-errors",
+      "obligation": "gap-typed-content",
+      "accepted": "String content zone=\"east\", region=\"east-1\", typed integer replicas=2, boolean enabled=true, array tags=[\"a\",\"b\"] and an absent key missing exist at 2000 on instance a, whose sample is value 7 at label set {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"}. ~~resource.zone != \"west\" matches, ~~resource.zone !~ \"we.*\" matches, ~~resource.region =~ \"^ea\" matches, and ~~resource.missing != \"west\" does not match because a negative or positive value predicate requires a present value. ~~resource.replicas =~ \"2\", ~~resource.enabled =~ \"true\" and regex against array, map or null are validation errors of class metadata_type_error; regex is string-only. Error class: metadata_type_error for a non-string regex operand, none for the valid negative and regex string cases.",
+      "reason": "There is no native negative, regex or state-aware value predicate. Attribute matching is string-only but has no typed rejection path, and an absent key can satisfy an empty-string matcher (defect-absent-empty-filter), so the accepted present-value requirement cannot execute."
+    },
+    {
+      "id": "native-tilde-versus-double-tilde-promotion",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "At 2000 the selector native_probe_total ~~resource.zone = \"east\" filters to instance a and keeps its output labels exactly {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} at value 7. native_probe_total ~resource.zone = \"east\" filters and additionally promotes the default category-qualified output label resource_zone=\"east\". native_probe_total ~resource.zone projects resource_zone=\"east\" without a value predicate, and instance b, which has no Resource zone, survives with no resource_zone label. native_probe_total ~resource.zone as zone_view projects zone_view=\"east\". A bare native_probe_total ~~resource.zone is invalid. Error class: metadata_reference_error for the bare double-tilde form, none for the others.",
+      "reason": "Neither ~ nor ~~ exists. The incumbent's only enrichment is info(), which is a separate function with legacy promotion rules and no projection alias, and a bare ~~ reference cannot be parsed at all."
+    },
+    {
+      "id": "native-alias-selector-sides",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "At 2000 instances a (Resource zone east) and b (no Resource zone) exist. native_probe_total ~resource.zone as left_zone + on(job, instance) native_probe_total returns left series a with left_zone=\"east\" and b without it, at values 7 and 5. native_probe_total + on(job, instance) group_left native_probe_total ~resource.zone as right_zone adds right_zone=\"east\" only to the right-hand a series. native_probe_total ~resource.zone as left_zone + on(job, instance) native_probe_total ~resource.zone as right_zone keeps left_zone=\"east\" on the left result and right_zone=\"east\" on the right result, and neither alias leaks into the other side. Aliases are selector-local. Error class: none.",
+      "reason": "There is no alias syntax or selector-side projection, so left-only, right-only and both-side behavior cannot be expressed. info() promotes into the same vector without an alias or side scope."
+    },
+    {
+      "id": "native-promoted-alias-modifiers",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "At 2000 sum by (resource_zone) (native_probe_total ~resource.zone as resource_zone) returns {resource_zone=\"east\"} 7 and {resource_zone=\"\"} 5, because the promoted alias is an ordinary string label and the unattributed input survives as its own group rather than becoming known absence. sum without (resource_zone) (native_probe_total ~resource.zone as resource_zone) returns {} 12. native_probe_total ~resource.zone as resource_zone + on(job, instance, resource_zone) native_probe_total ~resource.zone as resource_zone matches on the promoted ordinary label and returns 14 and 10. Binary matching with ignoring(zone) uses only ordinary labels. Error class: none.",
+      "reason": "No promotion or alias exists, so by/without/on/ignoring never see a promoted metadata label. The incumbent can group only by ordinary input labels, and info() is not a selector projection that can feed those modifiers."
+    },
+    {
+      "id": "native-direct-metadata-modifier-rejection",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "Each of sum by (~~resource.zone) (native_probe_total), sum without (~~resource.zone) (native_probe_total), native_probe_total + on(~~resource.zone) native_probe_total, native_probe_total + ignoring(~~resource.zone) native_probe_total and native_probe_total + on(job) group_left(~~resource.zone) native_probe_total is rejected at validation because a direct metadata reference is not an ordinary label in by/without/on/ignoring/grouping modifiers. Error class: metadata_reference_error; no series is returned and no fallback parses the reference as an ordinary label name.",
+      "reason": "The parser rejects the reference token before modifier validation can run, so the accepted explicit rejection class and its no-fallback rule have no implementation."
+    },
+    {
+      "id": "native-output-name-collisions",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "At 2000 instance a has sample value 7 at label set {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} and Resource zone=\"east\". Promotion to the default name resource_zone succeeds, but ~resource.zone as zone fails because the output name already exists on the series; ~resource.zone as __name__ fails because the name is reserved; ~resource.zone as dup together with ~scope.name as dup fails because two references produce the same output name; and a promotion that makes two input series have identical complete output label sets fails rather than overwriting or deduplicating them. Error class: metadata_promotion_collision for every collision, with no partial result.",
+      "reason": "No promotion exists, so the incumbent has no output-name allocation, collision detection or reserved-name rule to execute. Current info() has no-overwrite behavior for existing labels but no error class and no alias or duplicate-output rule."
+    },
+    {
+      "id": "native-present-empty-versus-absent",
+      "obligation": "gap-value-state-distinction",
+      "accepted": "At 2000 instance a has sample value 7 at label set {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} and Resource content with zone=\"\" present and no region key; another Resource omits zone. ~~resource.zone = \"\" matches only the series whose zone is present and empty; the series with an absent zone does not match. ~~resource.region = \"\" does not match the empty-valued zone series or any absent key. ~resource.zone as zone_view on the present empty string fails with the selected explicit query error, as does promotion of an integer, double, boolean, array, map or null value. Error class: metadata_promotion_type for empty and non-string or null promotion; no numeric, boolean, array or map stringification occurs.",
+      "reason": "Content.Attributes cannot distinguish a present empty string from an absent key, and the incumbent value matcher can treat an absent key as empty (defect-absent-empty-filter). No promotion operation exists to raise the accepted promotion error."
+    },
+    {
+      "id": "native-state-predicate-axes",
+      "obligation": "gap-value-state-distinction",
+      "accepted": "At 2000 instance a has Resource zone=\"east\" and an applicable association; a second series has a truncated Resource history after retention. metadata_state(~~resource.zone, value) is true only where a value is present and false when the key is absent or explicitly cleared. metadata_state(~~resource.zone, association) is true inside the inclusive membership band and false after explicit termination. metadata_state(~~resource.zone, coverage) is true only for complete retained coverage and reports the truncated series as not covered rather than complete. The accepted axes and states are exactly value, association and coverage. metadata_state(~~resource.zone, freshness) and metadata_state(~~resource.zone, present) fail with metadata_state_error. State selection creates no label and no magic empty value: the result keeps {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} only. Error class: metadata_state_error for unknown axis or state names.",
+      "reason": "metadata_state is an unknown function to the parser. The incumbent exposes no value, association or coverage state predicate, no clear or termination state, and no truncation-aware query state."
+    },
+    {
+      "id": "native-annotation-ambiguity-no-invention",
+      "obligation": "gap-value-state-distinction",
+      "accepted": "At 2000 instance a has sample value 7 at label set {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"}. A truncated owner reports coverage state truncated, not complete; an unknown annotation name fails metadata_state_error rather than being coerced; a decision-2 coalesced redundant successor leaves one continuous band with no invented intermediate value; and two different owners claiming zone=\"east\" and zone=\"west\" at the same effective time are explicit ambiguity. In the ambiguity case ~~resource.zone = \"east\" neither selects east nor west, enrichment exposes ambiguity rather than a value, and the output does not fabricate zone=\"\", a missing-value label or a chosen owner. Error class: metadata_state_error for the unknown annotation; ambiguity is a state, not an error.",
+      "reason": "The incumbent has no annotation, truncation-state query or explicit ambiguity representation. A same-time owner conflict is rejected at commit, and a merged read has no ambiguity state, so no value-invention rule can be exercised."
+    },
+    {
+      "id": "native-temporal-bands-and-modifiers",
+      "obligation": "gap-clearing-expiry",
+      "accepted": "Instance a is the sample series {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} with value 1 at 1000 and value 7 at 2000. Resource content is A zone=\"east\" on [1000,2000), B zone=\"west\" on [2000,3000), explicitly cleared on [3000,5000), and A zone=\"east\" again from 5000; association is [1000,4000) and explicitly terminated at 4000. ~~resource.zone = \"east\" matches at 1000 and 1999, = \"west\" at 2000 and 2999, no value at 3000 and 4999 (cleared is not empty), and = \"east\" again at 5000. @ 1000 resolves at the shifted timestamp regardless of query time, offset 1m shifts the evaluation timestamp by 60000 ms, and lookback selects the sample but owner and content resolve at the shifted evaluation timestamp, not the selected sample's timestamp. A range selector native_probe_total[2m] ~~resource.zone = \"east\" gates the current evaluation step by the zone at that step, not individual samples by sample timestamp. Clear, termination and A/B/A reappearance produce their bands with inclusive starts, exclusive successors and exactly one contribution per input series per step. Error class: none.",
+      "reason": "The incumbent has no native temporal predicate, no clear or termination representation, and no matrix-step gating. Native info() resolves at evaluation time for a single instant, but the accepted @/offset, range-step and clear/reappearance rules cannot execute through a metadata reference."
+    },
+    {
+      "id": "native-aggregation-rejection-and-legacy-controls",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "sum(native_probe_total ~resource.zone as resource_zone) is rejected because an explicit native reference follows identity-discarding aggregation. sum(native_probe_total ~~resource.zone = \"east\") is legal because the filter runs before aggregation and returns 7. sum(native_probe_total) returns 12, sum by (job) (native_probe_total) returns {job=\"api\"} 12, sum(info(native_probe_total)) returns 12, and info(sum(native_probe_total)) keeps the conventional legacy info() result {} 12 rather than inventing a Resource association for the aggregate. Unattributed instance b survives the projection native_probe_total ~resource.zone as resource_zone without a resource_zone label; it is not converted to known absence. Error class: metadata_aggregation_error for the rejected aggregation form.",
+      "reason": "No native reference or projection exists, so the post-aggregation rejection class cannot be produced. The legacy info() controls are executable and asserted by this fixture's events, but they are not decision-6 native-reference evidence."
+    },
+    {
+      "id": "native-owner-membership-transitions",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "Instance a is the sample series {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} with values 1 at 1000, 7 at 2000 and 9 at 3000. At 1000 it is associated with Resource A (zone=\"east\"); at 2000 the membership moves to Resource B (zone=\"west\"); at 3000 it returns to A. Queries at 1000, 2000 and 3000 return exactly one output series for instance a with value 7 and the applicable band's zone, not two contributions and not a multiplied value 14. Owner and membership transitions create ordered bands with inclusive starts and exclusive successors, and a series that appears in both an old and a new owner's candidate set is enriched once per evaluation step. Error class: none.",
+      "reason": "Membership transitions themselves are executable, but the accepted native-reference enrichment over those bands does not exist. Current info() resolves one applicable version, so the once-per-step native contribution rule cannot be tested."
+    },
+    {
+      "id": "native-domain-namespace-isolation",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "Instance a is the sample series {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} with value 7 at 2000 and carries Resource content {name=\"resource-name\", zone=\"east\"}, Scope content {name=\"scope-name\", zone=\"scope-zone\"}, Metric content {name=\"metric-name\"} and Scrape content {name=\"scrape-name\"}. ~~resource.name returns resource-name, ~~scope.name returns scope-name, ~~metric.name returns metric-name and ~~scrape.name returns scrape-name; none of these keys cross-matches another category even though the final component name is the same. ~~resource_schema.version remains its own category. ~~resource.zone does not return scope-zone and ~~scope.zone does not return east. Error class: none; no inferred cross-domain match.",
+      "reason": "The six owner namespaces exist in storage but are not addressable from PromQL at all. The parser rejects the category syntax, so same-named keys and the no-cross-domain-match rule cannot be exercised."
+    },
+    {
+      "id": "native-source-role-state-discovery",
+      "obligation": "gap-source-provenance",
+      "accepted": "Decision-5 Source provenance for instance a has typed components producer=\"api\", sender=\"collector-1\" and transport=\"otap\" at 2000. ~~source.transport = \"otap\" filters the series, and metadata_state(~~source.producer, value) is true. Role and state discovery returns the producer, sender and transport components without adding __otel_resource__, a Resource attribute, an info() label or an ordinary series label; Source content is not promoted into vector identity and does not become a Resource identity fallback. No Source label or Source role value appears in the result label set {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"}. Error class: none.",
+      "reason": "Decision 5 typed Source provenance is unimplemented and no native source reference or state predicate exists. The incumbent stores one opaque Source owner string with opaque content, so role discovery and non-identification cannot be executed."
+    },
+    {
+      "id": "native-lifecycle-preservation",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "Native predicate and projection results at 1000, 2000 and 5000 are identical before and after WAL replay, flush, compaction, retention and reopen: the same bands, the same promoted labels and the same sample values, including series {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} with values 1 at 1000, 7 at 2000 and 9 at 5000. Retention may discard old bands by policy, but a query that depends on discarded coverage reports coverage state truncated and does not invent a value or promote an empty string. Stable-band reuse survives reopen and does not change result labels or values. Error class: none; no persistence operation resurrects a cleared or terminated band.",
+      "reason": "The underlying metadata lifecycle is executable, but the accepted decision-6 query semantics are not. No native predicate or promoted label can be run before and after replay, and no truncation-aware query state exists."
+    },
+    {
+      "id": "native-stable-band-work-accounting",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "Evaluating native_probe_total ~resource.zone as resource_zone at 1000, 1500 and 2000, all inside one unchanged Resource band over series {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} with values 1, 7 and 7, resolves that band once (bands_resolved=1), opens zero sample payloads on the metadata-only predicate path (sample_payload_opens=0) and counts final rich-label materialization separately (label_materializations=2, one per output series). A filter-only ~~resource.zone = \"east\" path also opens zero sample payloads. These are work-shape counters, not a performance claim: the accepted obligation is stable-band reuse and separately counted final materialization. Error class: none.",
+      "reason": "No native execution path exists, so stable-band reuse, metadata-only zero sample reads for a reference predicate, and separately counted final label materialization cannot be measured or asserted. Current info() is not the decision-6 execution path."
+    },
+    {
+      "id": "native-fanout-merge-supplementary-ambiguity",
+      "obligation": "gap-pr99-grammar",
+      "accepted": "Two independent queriers answer at 2000 for series {__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} with value 7. Both returning Resource zone=\"east\" deduplicates to one observation. Querier 1 returning zone=\"east\" and querier 2 returning zone=\"west\" at the same effective time become explicit ambiguity, not newest-wins by querier order, arrival order or map iteration. Complementary bands [1000,2000) zone=\"east\" and [2000,3000) zone=\"west\" survive as two bands, and retained coverage is the union of the queriers' coverage with truncation preserved. Equivalent records deduplicate; unequal equal-time content or owners stay ambiguous. Error class: none; ambiguity is represented as a state, no arbitrary value is selected.",
+      "reason": "The incumbent has no native metadata query result to merge and no ambiguity state. The existing distributed merge path concerns Resource metadata resolution, not decision-6 references, and no newest-wins or ambiguity contract for this path exists."
+    }
+  ],
+  "scope": "Decision-6 contract oracle evidence. The executable events assert only current incumbent behavior: plain selectors, ordinary matchers and vector matching ignore Resource metadata; the metadata content host.name and zone never become ordinary labels; current info() enriches the associated series with the translated host_name label without overwriting the existing ordinary zone label, leaves the unassociated series unchanged, and keeps its conventional result after aggregation. These events are current-info-only evidence and are not decision-6 implementation. The 21 target cases record the accepted reference, namespace, filter, typed literal, state predicate, promotion, alias, collision, temporal, aggregation, compatibility, merge, lifecycle and work-accounting semantics that the incumbent cannot execute; none is executed, counted as coverage or relabelled passing. The fixture's Resource, Scope, Metric, Scrape and Source owners are independent and their content is the incumbent's opaque string map; the typed content, empty-versus-absent, clear, termination, ambiguity and typed Source states appear only in accepted target text. PR 99 is dated design evidence at inspected head f0b8ab22e180f483bd5c74b3fa0442d473a18d4a with 'Implementation Status: Not implemented', not upstream acceptance. Decisions 7-10 remain open: structured state encoding in API responses, target_info/promotion coexistence and migration, budgets and ownership, and workload targets are not decided here. No target expression is parsed or executed by this fixture.",
+  "events": [
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "native_probe_total",
+          "job": "api",
+          "instance": "a",
+          "zone": "base-zone"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "1"
+          },
+          {
+            "t": 2000,
+            "value": "7"
+          }
+        ]
+      }
+    },
+    {
+      "op": "append",
+      "args": {
+        "series": {
+          "__name__": "native_probe_total",
+          "job": "api",
+          "instance": "b"
+        },
+        "samples": [
+          {
+            "t": 1000,
+            "value": "3"
+          },
+          {
+            "t": 2000,
+            "value": "5"
+          }
+        ]
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "native_probe_total",
+          "job": "api",
+          "instance": "a",
+          "zone": "base-zone"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "content": {
+          "host.name": "a-host",
+          "zone": "east"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "native_probe_total",
+          "job": "api",
+          "instance": "a",
+          "zone": "base-zone"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "owner": {
+          "kind": "scope",
+          "identifying": {
+            "name": "sdk",
+            "version": "v1"
+          }
+        },
+        "content": {
+          "name": "sdk-scope"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "native_probe_total",
+          "job": "api",
+          "instance": "a",
+          "zone": "base-zone"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "owner": {
+          "kind": "metric",
+          "identifying": {
+            "series": "native_probe_total"
+          }
+        },
+        "content": {
+          "name": "native_probe_total"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "native_probe_total",
+          "job": "api",
+          "instance": "b"
+        },
+        "owner": {
+          "kind": "scrape",
+          "identifying": {
+            "scrape": "scrape-b"
+          }
+        },
+        "content": {
+          "name": "scrape-b"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "native_probe_total",
+          "job": "api",
+          "instance": "a",
+          "zone": "base-zone"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "owner": {
+          "kind": "source",
+          "identifying": {
+            "source": "otap"
+          }
+        },
+        "content": {
+          "transport": "otap"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "native_probe_total",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"}",
+            "samples": [
+              "0x401c000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"native_probe_total\", instance=\"b\", job=\"api\"}",
+            "samples": [
+              "0x4014000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "native_probe_total{zone=\"east\"}",
+        "at": 2000
+      },
+      "expect": {
+        "series": []
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "native_probe_total{zone=\"base-zone\"}",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", instance=\"a\", job=\"api\", zone=\"base-zone\"}",
+            "samples": [
+              "0x401c000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "native_probe_total{zone!=\"base-zone\"}",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"native_probe_total\", instance=\"b\", job=\"api\"}",
+            "samples": [
+              "0x4014000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(native_probe_total)",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"native_probe_total\", __otel_resource__=\"<resource>\", host_name=\"a-host\", instance=\"a\", job=\"api\", zone=\"base-zone\"}",
+            "samples": [
+              "0x401c000000000000"
+            ]
+          },
+          {
+            "labels": "{__name__=\"native_probe_total\", instance=\"b\", job=\"api\"}",
+            "samples": [
+              "0x4014000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum by (job) (native_probe_total)",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{job=\"api\"}",
+            "samples": [
+              "0x4028000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "sum(info(native_probe_total))",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{}",
+            "samples": [
+              "0x4028000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(sum(native_probe_total))",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{}",
+            "samples": [
+              "0x4028000000000000"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
