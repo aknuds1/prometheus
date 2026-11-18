@@ -152,7 +152,29 @@ var contractDecisionSixLimitClauses = []struct {
 	{"ordered comparisons deferred", "ordered comparisons"},
 	{"decisions 7-10 excluded", "decisions 7-10"},
 	{"decision 10 performance gates", "performance gates (10)"},
+	{"uncertainty annotation retained", "uncertainty annotation"},
+	{"typed merge narrowed", "decision-6 typed reference merge"},
+	{"source schema deferred", "exact supplied Source key"},
 	{"current implementation gaps", "current-phase limit"},
+}
+
+// contractDecisionSixResolutionClauses pins the accepted state model and the
+// clauses the adjudication found missing from the first recording. They are
+// scope records, never coverage: every accepted clause is unimplemented.
+var contractDecisionSixResolutionClauses = []struct {
+	clause   string
+	fragment string
+}{
+	{"explicit state comparison", `metadata_state(~~resource."host.name", "value") = "absent"`},
+	{"value states", "value -> present, null, absent, cleared, unknown, ambiguous"},
+	{"association states", "association -> applicable, unassociated, never_observed, terminated, unknown, ambiguous"},
+	{"coverage states", "coverage -> covered, unknown, truncated, coalesced_lossless, coalesced_lossy"},
+	{"state error", "metadata_state_error"},
+	{"uncertainty annotation", "uncertainty annotation"},
+	{"typed merge", "decision-6 typed, applicability/coverage/ambiguity-preserving reference merge"},
+	{"source schema deferred", "exact supplied Source keys"},
+	{"pre-aggregation legal", "metadata filter or projection inside a selector before aggregation is legal"},
+	{"full queries read samples", "full promql queries still read selected samples"},
 }
 
 // contractRequiredTargetCases pins accepted target behaviour that the incumbent
@@ -417,6 +439,13 @@ func TestContractManifest(t *testing.T) {
 		}
 	}
 
+	if decision, ok := decisionByID["6"]; ok && decision.Status == "decided" {
+		resolution := strings.ToLower(decision.Resolution)
+		for _, want := range contractDecisionSixResolutionClauses {
+			require.Contains(t, resolution, strings.ToLower(want.fragment),
+				"decision 6 must keep the %q resolution clause", want.clause)
+		}
+	}
 	// Every open decision must be attached to at least one blocked obligation, so
 	// the register cannot grow without a corresponding blocked case. A decided
 	// decision may stay attached as provenance and needs no blocked obligation.

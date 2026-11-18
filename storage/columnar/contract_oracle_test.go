@@ -61,10 +61,11 @@ package columnar
 // namespaces, typed literals, metadata_state, promotion, selector-local aliases,
 // temporal band resolution, aggregation rejection, merge ambiguity and stable-band
 // work accounting. The incumbent parser has none of that syntax, so
-// promql_native_metadata_semantics executes only current plain-selector and info()
-// controls and records the accepted rules as target cases owned by non-passing
-// obligations. TestPromQLNativeMetadataGrammarRejectedByIncumbent pins the parse
-// rejections as absence evidence; no target expression is executed here.
+// promql_native_metadata_semantics executes only current plain-selector,
+// ordinary-matcher, vector-matching and info() controls and records the accepted
+// rules as target cases owned by non-passing obligations.
+// TestPromQLNativeMetadataGrammarRejectedByIncumbent pins the parse rejections as
+// absence evidence; no target expression is executed here.
 //
 // Expectations are authored from the fixture's stated arithmetic and semantics,
 // never captured from a store and then declared independent. The companion
