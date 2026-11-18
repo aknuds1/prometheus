@@ -542,7 +542,7 @@
       "decisions": [
         "6"
       ],
-      "note": "Plain selectors and the built-in PromQL suite run over a store that holds metadata without any metadata label appearing. promql_native_metadata_semantics additionally asserts, with Resource content present, that a plain selector, ordinary matchers and sum by see only original labels and that no metadata label appears. Its executable vector-matching control shares job and instance across two metric names while the left operand has Resource content and the right operand has none; the arithmetic result {instance=\"a\", job=\"api\"} 9 exists only because metadata is not a matching key, so erroneous metadata inclusion would remove the match. Decision 6 (2026-11-18) is provenance for the accepted isolation rule, not evidence for its selector-local projection or alias clause, which remains a non-passing target case."
+      "note": "Plain selectors and the built-in PromQL suite run over a store that holds metadata without any metadata label appearing. promql_native_metadata_semantics additionally asserts, with Resource content present, that a plain selector, ordinary matchers and sum by see only original labels and that no metadata label appears. Its executable vector-matching control shares job and instance across two metric names; match_probe_total has an explicit applicable Resource observation (owner service.name=\"checkout\", service.namespace=\"shop\", service.instance.id=\"pod-a\" with host.name=\"a-host\" and zone=\"east\"), info(match_probe_total) proves that content is applicable, and match_other_total has no Resource association. The arithmetic result {instance=\"a\", job=\"api\"} 9 exists only because metadata is not a matching key, so erroneous metadata inclusion would remove the match. Decision 6 (2026-11-18) is provenance for the accepted isolation rule, not evidence for its selector-local projection or alias clause, which remains a non-passing target case."
     },
     {
       "id": "invariant-11",
@@ -787,7 +787,7 @@
       "decisions": [
         "6"
       ],
-      "note": "Current info() semantics only, including absent and explicitly truncated histories. Decision 6 (2026-11-18) is decided and retained as provenance; it does not make this obligation decision-6 implementation. promql_native_metadata_semantics executes current info() name translation, no-overwrite and unassociated-series behavior, plus the legacy after-aggregation controls info(sum(...)) and sum(info(...)); it keeps every native-reference target case non-passing. source_provenance_boundaries asserts that Source-kind content is not promoted into info() labels and does not become a Resource attribute name."
+      "note": "Current info() semantics only, including absent and explicitly truncated histories. Decision 6 (2026-11-18) is decided and retained as provenance; it does not make this obligation decision-6 implementation. promql_native_metadata_semantics executes current info() name translation, no-overwrite and unassociated-series behavior, plus the legacy after-aggregation controls info(sum(...)) and sum(info(...)). It also executes info(match_probe_total), which proves the vector-control left operand has applicable Resource content (host_name=\"a-host\" and zone=\"east\") while match_other_total remains unassociated. It keeps every native-reference target case non-passing. source_provenance_boundaries asserts that Source-kind content is not promoted into info() labels and does not become a Resource attribute name."
     },
     {
       "id": "route-remote-write",

@@ -77,7 +77,7 @@
     {
       "id": "native-output-name-collisions",
       "obligation": "gap-pr99-grammar",
-      "accepted": "Isolated target scenario at 2000 with two Resource-associated series sharing owner R (Resource zone=\"east\"): collision_probe_total{job=\"api\",instance=\"a\"} value 7, which lacks an ordinary resource_zone label, and collision_probe_total{job=\"api\",instance=\"a\",resource_zone=\"east\"} value 5, which already has resource_zone=\"east\". Promoting the first with ~resource.zone would make its complete output label set {__name__=\"collision_probe_total\", __otel_resource__=\"<resource-r>\", instance=\"a\", job=\"api\", resource_zone=\"east\"} identical to the second, so the duplicate-displayed-series collision fails with metadata_promotion_collision and returns no series, including neither 7 nor 5. ~resource.zone as zone fails if the input series already has ordinary zone=\"base-zone\"; ~resource.zone as __name__ fails because __name__ is reserved; ~resource.zone as dup together with ~scope.name as dup fails because two references produce the same output name. Error class: metadata_promotion_collision for every collision, with no partial result.",
+      "accepted": "Isolated target scenario at 2000 with two Resource-associated series sharing owner R (Resource zone=\"east\"): collision_probe_total{job=\"api\",instance=\"a\"} value 7, which lacks an ordinary resource_zone label, and collision_probe_total{job=\"api\",instance=\"a\",resource_zone=\"east\"} value 5, which already has resource_zone=\"east\". The duplicate-displayed-series case is the concrete target expression collision_probe_total{resource_zone=\"\", ~resource.zone} or collision_probe_total{resource_zone=\"east\"}. In the left selector the ordinary matcher resource_zone=\"\" applies to original labels and selects only the first series because it lacks that label; the same selector promotes Resource zone and produces {__name__=\"collision_probe_total\", __otel_resource__=\"<resource-r>\", instance=\"a\", job=\"api\", resource_zone=\"east\"} 7. The right selector selects only the second pre-existing series with the same complete displayed labels, value 5, without requesting promotion. Ordinary stock or changes no labels; under decision 6 the promotion-induced duplicate-displayed-series condition fails with metadata_promotion_collision and no partial result, returning neither 7 nor 5, not deduplicating and not choosing either sample. Separately, ~resource.zone as zone fails because the input series already has ordinary zone=\"base-zone\" (existing-label trigger); ~resource.zone as __name__ fails because __name__ is reserved (reserved-name trigger); ~resource.zone as dup together with ~scope.name as dup fails because two references produce the same output name (duplicate-alias trigger). The duplicate-displayed-series trigger is the two-selector or above, not an ordinary-label or alias collision. Error class: metadata_promotion_collision for every collision, with no partial result.",
       "reason": "No promotion exists, so the incumbent has no output-name allocation, reserved-name rule, duplicate-alias rule or duplicate-displayed-series detection. Current info() no-overwrite behavior has no error class and no collision rule for native projection."
     },
     {
@@ -101,7 +101,7 @@
     {
       "id": "native-temporal-bands-and-modifiers",
       "obligation": "gap-clearing-expiry",
-      "accepted": "Two isolated target scenarios. A/B/A scenario: temporal_aba_total{job=\"api\",instance=\"a\",zone=\"base-zone\"} has samples 1000=1, 2000=7 and 3000=9; Resource content is A zone=\"east\" on [1000,2000), B zone=\"west\" on [2000,3000) and A zone=\"east\" from 3000; association is applicable from 1000. temporal_aba_total{~~resource.zone = \"east\"} returns {__name__=\"temporal_aba_total\", __otel_resource__=\"<resource-a>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} 1 at 1000; the same labels and value 1 at 1999 because the 1000 sample is inside lookback but the content at 1999 is still east; nothing at 2000 or 2999; and the same east labels with value 9 at 3000. = \"west\" returns the corresponding west labels with value 7 at 2000 and 2999, nothing at 1999 and 3000. A/B/A produces one contribution per step, never 9+1 or 9+7. @ 1000 at query time 3000 resolves at the shifted timestamp 1000 and returns the east labels value 1. offset 1m with = \"west\" at query time 2060 resolves at 2000 and returns the west labels value 7. Lookback with = \"east\" at 2500 selects the sample at 2000 by lookback but resolves owner/content at 2500, where the content is west, so east returns nothing; = \"west\" at 2500 returns the west labels value 7. Matrix gating uses temporal_aba_total{~~resource.zone = \"east\"}[2m]: at evaluation 1999 the current step is east and the matrix contains the 1000 sample, {__name__=\"temporal_aba_total\", __otel_resource__=\"<resource-a>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} 1@1000; at evaluation 2000 the current step is west, so the matrix is empty even though the range still contains the east sample from 1000. The predicate gates the step, not each sample by its timestamp. Clear/termination/reappearance scenario: temporal_lifecycle_total{job=\"api\",instance=\"b\",zone=\"base-zone\"} has samples 1000=1, 3500=5, 4500=6 and 5000=11; Resource content is A zone=\"east\" on [1000,3000), explicitly cleared on [3000,4000) and A zone=\"east\" from 4000; association is [1000,4000), explicitly terminated on [4000,5000) and reappears from 5000. = \"east\" returns nothing at 3500 because the key is cleared, not empty; returns nothing at 4500 because the association is terminated even though the content is east; and returns {__name__=\"temporal_lifecycle_total\", __otel_resource__=\"<resource-b>\", instance=\"b\", job=\"api\", zone=\"base-zone\"} 11 at 5000 after association reappearance. Content and association histories remain independent and no step is multiplied. Error class: none.",
+      "accepted": "Two isolated target scenarios. A/B/A scenario: temporal_aba_total{job=\"api\",instance=\"a\",zone=\"base-zone\"} has samples 1000=1, 2000=7 and 3000=9; Resource content is A zone=\"east\" on [1000,2000), B zone=\"west\" on [2000,3000) and A zone=\"east\" from 3000; association is applicable from 1000. temporal_aba_total{~~resource.zone = \"east\"} returns {__name__=\"temporal_aba_total\", __otel_resource__=\"<resource-a>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} 1 at 1000; the same labels and value 1 at 1999 because the 1000 sample is inside lookback but the content at 1999 is still east; nothing at 2000 or 2999; and the same east labels with value 9 at 3000. = \"west\" returns the corresponding west labels with value 7 at 2000 and 2999, nothing at 1999 and 3000. A/B/A produces one contribution per step, never 9+1 or 9+7. The target expression temporal_aba_total{~~resource.zone = \"east\"} @ 1 is independently evaluated at query time 5000 ms; PromQL @ is in seconds, so @ 1 selects absolute timestamp 1000 ms and returns {__name__=\"temporal_aba_total\", __otel_resource__=\"<resource-a>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} 1. The target expression temporal_aba_total{~~resource.zone = \"west\"} offset 1ms is evaluated at 2001 ms; PromQL offset uses duration syntax, so the 1ms offset shifts the evaluation timestamp to 2000 ms and returns {__name__=\"temporal_aba_total\", __otel_resource__=\"<resource-a>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} 7. Fixture, sample and explicit query times in this target are milliseconds; @ is seconds and offset is a duration. Lookback with = \"east\" at 2500 selects the sample at 2000 by lookback but resolves owner/content at 2500, where the content is west, so east returns nothing; = \"west\" at 2500 returns {__name__=\"temporal_aba_total\", __otel_resource__=\"<resource-a>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} 7. Matrix gating uses temporal_aba_total{~~resource.zone = \"east\"}[2m]: at evaluation 1999 the current step is east and the matrix contains the 1000 sample, {__name__=\"temporal_aba_total\", __otel_resource__=\"<resource-a>\", instance=\"a\", job=\"api\", zone=\"base-zone\"} 1@1000; at evaluation 2000 the current step is west, so the matrix is empty even though the range still contains the east sample from 1000. The predicate gates the step, not each sample by its timestamp. Clear/termination/reappearance scenario: temporal_lifecycle_total{job=\"api\",instance=\"b\",zone=\"base-zone\"} has samples 1000=1, 3500=5, 4500=6 and 5000=11; Resource content is A zone=\"east\" on [1000,3000), explicitly cleared on [3000,4000) and A zone=\"east\" from 4000; association is [1000,4000), explicitly terminated on [4000,5000) and reappears from 5000. = \"east\" returns nothing at 3500 because the key is cleared, not empty; returns nothing at 4500 because the association is terminated even though the content is east; and returns {__name__=\"temporal_lifecycle_total\", __otel_resource__=\"<resource-b>\", instance=\"b\", job=\"api\", zone=\"base-zone\"} 11 at 5000 after association reappearance. Content and association histories remain independent and no step is multiplied. Error class: none.",
       "reason": "The incumbent has no native temporal predicate, no clear, termination or reappearance representation, and no matrix-step gating. Native info() resolves at evaluation time for a single instant, but the accepted @/offset, lookback, matrix and clear/reappearance rules cannot execute through a metadata reference."
     },
     {
@@ -147,7 +147,7 @@
       "reason": "The incumbent has no decision-6 typed reference result to merge and no ambiguity state or uncertainty annotation. Its existing distributed Resource merge path is separate and is not evidence for the accepted typed, coverage-preserving reference merge."
     }
   ],
-  "scope": "Decision-6 contract oracle evidence. The 18 executable events assert only current incumbent behavior: plain selectors, ordinary matchers and a vector-matching control ignore Resource metadata; the vector control shares job and instance across match_probe_total and match_other_total while only the left operand carries Resource content, and the result {instance=\"a\", job=\"api\"} 9 exists only because metadata is not a matching key. The metadata content host.name and zone never become ordinary labels; current info() enriches the associated series with the translated host_name label without overwriting the existing ordinary zone label, leaves the unassociated series unchanged, and keeps its conventional result after aggregation. These events are current-info-only evidence and are not decision-6 implementation. The 21 target cases record the accepted reference, namespace, filter, typed literal, state predicate, promotion, alias, collision, temporal, aggregation, compatibility, merge, lifecycle and work-accounting semantics that the incumbent cannot execute; none is executed, counted as coverage or relabelled passing. The fixture's Resource, Scope, Metric, Scrape and Source owners are independent and their content is the incumbent's opaque string map; the typed content, empty-versus-absent, clear, termination, ambiguity and typed Source states appear only in accepted target text. PR 99 is dated design evidence at inspected head f0b8ab22e180f483bd5c74b3fa0442d473a18d4a with 'Implementation Status: Not implemented', not upstream acceptance. Decisions 7-10 remain open: structured state encoding in API responses, target_info/promotion coexistence and migration, budgets and ownership, and workload targets are not decided here. No target expression is parsed or executed by this fixture.",
+  "scope": "Decision-6 contract oracle evidence. The 20 executable events assert only current incumbent behavior: plain selectors, ordinary matchers and a vector-matching control ignore Resource metadata; the vector control shares job and instance across match_probe_total and match_other_total. match_probe_total is explicitly associated with the existing Resource owner and equal content, info(match_probe_total) proves that content is applicable, and match_other_total has no Resource association; the result {instance=\"a\", job=\"api\"} 9 exists only because metadata is not a matching key. The metadata content host.name and zone never become ordinary labels; current info() enriches the associated series with the translated host_name label without overwriting the existing ordinary zone label, leaves the unassociated series unchanged, and keeps its conventional result after aggregation. These events are current-info-only evidence and are not decision-6 implementation. The 21 target cases record the accepted reference, namespace, filter, typed literal, state predicate, promotion, alias, collision, temporal, aggregation, compatibility, merge, lifecycle and work-accounting semantics that the incumbent cannot execute; none is executed, counted as coverage or relabelled passing. The fixture's Resource, Scope, Metric, Scrape and Source owners are independent and their content is the incumbent's opaque string map; the typed content, empty-versus-absent, clear, termination, ambiguity and typed Source states appear only in accepted target text. PR 99 is dated design evidence at inspected head f0b8ab22e180f483bd5c74b3fa0442d473a18d4a with 'Implementation Status: Not implemented', not upstream acceptance. Decisions 7-10 remain open: structured state encoding in API responses, target_info/promotion coexistence and migration, budgets and ownership, and workload targets are not decided here. No target expression is parsed or executed by this fixture.",
   "events": [
     {
       "op": "append",
@@ -379,6 +379,37 @@
       }
     },
     {
+      "op": "observe",
+      "args": {
+        "series": {
+          "__name__": "match_probe_total",
+          "job": "api",
+          "instance": "a"
+        },
+        "resource_owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "owner": {
+          "kind": "resource",
+          "identifying": {
+            "service.name": "checkout",
+            "service.namespace": "shop",
+            "service.instance.id": "pod-a"
+          }
+        },
+        "content": {
+          "host.name": "a-host",
+          "zone": "east"
+        },
+        "effective_from": 1000
+      }
+    },
+    {
       "op": "promql",
       "args": {
         "expr": "native_probe_total",
@@ -531,6 +562,23 @@
             "labels": "{instance=\"a\", job=\"api\"}",
             "samples": [
               "0x4022000000000000"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "op": "promql",
+      "args": {
+        "expr": "info(match_probe_total)",
+        "at": 2000
+      },
+      "expect": {
+        "series": [
+          {
+            "labels": "{__name__=\"match_probe_total\", __otel_resource__=\"<resource>\", host_name=\"a-host\", instance=\"a\", job=\"api\", zone=\"east\"}",
+            "samples": [
+              "0x401c000000000000"
             ]
           }
         ]
