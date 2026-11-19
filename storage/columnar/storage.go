@@ -111,6 +111,10 @@ type Storage struct {
 	metadata          *metadataStore
 	metadataPublished *metadataRelations
 	metadataDirty     bool
+	// metadataSnapshots pins local read snapshots and owns the cursor integrity
+	// key and incarnation identity. It is in-memory only: close/reopen does not
+	// preserve pagination state.
+	metadataSnapshots *metadataSnapshotRegistry
 
 	walSequence       uint64
 	walSeg            *walSegment
@@ -177,6 +181,11 @@ func NewStorage(dir string, opts StorageOptions) (*Storage, error) {
 		s.metadata = newMetadataStore(opts.MetadataVersionCap)
 		s.metadata.reads = s.reads
 	}
+	snapshots, err := newMetadataSnapshotRegistry()
+	if err != nil {
+		return nil, err
+	}
+	s.metadataSnapshots = snapshots
 
 	blocks, err := ListBlocks(dir)
 	switch {

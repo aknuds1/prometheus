@@ -1377,6 +1377,7 @@ func main() {
 		mux.Handle("/resources", metadataHandler)
 		mux.Handle("/resources/series", metadataHandler)
 		mux.Handle("/resources/diff", metadataHandler)
+		mux.Handle("/resources/snapshots/", metadataHandler)
 		mux.Handle("/debug/readstats", columnar.NewReadStatsHandler(columnarStorage))
 		mux.Handle("/arrow", columnar.NewArrowHandler(columnarStorage, logger.With("component", "columnar"), columnar.ArrowOptions{}))
 		mux.Handle("/query_range", columnar.NewQueryHandler(queryEngine, columnarStorage, logger.With("component", "columnar")))

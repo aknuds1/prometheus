@@ -115,11 +115,11 @@ var contractDecisionStatuses = []string{"open", "decided"}
 // contractDecidedDecisions must be decided by this package. Decisions 1 to 5
 // were accepted by the user/product owner on 2026-11-15 and decision 6 on
 // 2026-11-18.
-var contractDecidedDecisions = []string{"1", "2", "3", "4", "5", "6"}
+var contractDecidedDecisions = []string{"1", "2", "3", "4", "5", "6", "7"}
 
 // contractOpenDecisions must remain open here: this package may not guess a
 // resolution from incumbent behaviour.
-var contractOpenDecisions = []string{"7", "8", "9", "10"}
+var contractOpenDecisions = []string{"8", "9", "10"}
 
 // contractDecisionFiveLimitClauses pins the exclusions and current-phase
 // boundaries decision 5 must keep visible in its limits. They are scope
@@ -175,6 +175,35 @@ var contractDecisionSixResolutionClauses = []struct {
 	{"source schema deferred", "exact supplied Source keys"},
 	{"pre-aggregation legal", "metadata filter or projection inside a selector before aggregation is legal"},
 	{"full queries read samples", "full promql queries still read selected samples"},
+}
+
+// contractDecisionSevenLimitClauses pins decision 7's scope boundaries. They are
+// scope records, never coverage: non-string typed ingestion and a durable
+// tombstone format remain unimplemented.
+var contractDecisionSevenLimitClauses = []struct {
+	clause   string
+	fragment string
+}{
+	{"source schema deferred", "exact supplied Source keys"},
+	{"format version unchanged", "FormatVersion"},
+	{"non-string typed content deferred", "Non-string typed content"},
+	{"snapshot budgets deferred", "TTL, byte, admission, retention"},
+	{"decisions 8-10 open", "Decisions 8-10 remain open"},
+}
+
+// contractDecisionSevenResolutionClauses pins the accepted typed JSON, limit,
+// error and snapshot classes.
+var contractDecisionSevenResolutionClauses = []struct {
+	clause   string
+	fragment string
+}{
+	{"tagged string value", `{state:present,type:string,value:...}`},
+	{"exact double bits", `0x-prefixed 16-hex-digit IEEE-754 binary64`},
+	{"limit policy", "1..10000"},
+	{"snapshot pinned", "snapshot-pinned"},
+	{"cancel status", "204"},
+	{"cursor mismatch class", "metadata_cursor_query_mismatch"},
+	{"error data null", "data:null"},
 }
 
 // contractRequiredTargetCases pins accepted target behaviour that the incumbent
@@ -327,6 +356,7 @@ func TestContractManifest(t *testing.T) {
 	}{
 		{id: "5", clause: "decision 5", pins: contractDecisionFiveLimitClauses},
 		{id: "6", clause: "decision 6", pins: contractDecisionSixLimitClauses},
+		{id: "7", clause: "decision 7", pins: contractDecisionSevenLimitClauses},
 	} {
 		decision, ok := decisionByID[decided.id]
 		if !ok || decision.Status != "decided" {
@@ -439,6 +469,13 @@ func TestContractManifest(t *testing.T) {
 		}
 	}
 
+	if decision, ok := decisionByID["7"]; ok && decision.Status == "decided" {
+		resolution := strings.ToLower(decision.Resolution)
+		for _, want := range contractDecisionSevenResolutionClauses {
+			require.Contains(t, resolution, strings.ToLower(want.fragment),
+				"decision 7 must keep the %q resolution clause", want.clause)
+		}
+	}
 	if decision, ok := decisionByID["6"]; ok && decision.Status == "decided" {
 		resolution := strings.ToLower(decision.Resolution)
 		for _, want := range contractDecisionSixResolutionClauses {

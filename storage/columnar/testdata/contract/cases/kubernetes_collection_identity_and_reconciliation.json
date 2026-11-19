@@ -13,9 +13,7 @@
   "routes": [
     "columnar"
   ],
-  "open_decisions": [
-    "7"
-  ],
+  "open_decisions": [],
   "target_cases": [
     {
       "id": "k8s-supplied-grouping-and-provenance",

@@ -163,6 +163,14 @@ type readStats struct {
 	native             nativeDerivationAccumulator
 	ordinary           ordinaryDerivationAccumulator
 	metadataWork       metadataWorkAccumulator
+	// metadataHTTPRows, metadataHTTPValues, metadataHTTPBytes and
+	// metadataSnapshotRows count response materialization and snapshot cloning
+	// separately from label/index/metadata read work. They are not timing
+	// evidence.
+	metadataHTTPRows     atomic.Uint64
+	metadataHTTPValues   atomic.Uint64
+	metadataHTTPBytes    atomic.Uint64
+	metadataSnapshotRows atomic.Uint64
 }
 
 // ordinaryDerivationAccumulator aggregates committed ordinary appender accounting.
@@ -238,6 +246,23 @@ func (r *readStats) metadataWorkSnapshot() metadataWork {
 
 func (r *readStats) ordinaryDerivationSnapshot() ordinaryDerivationStats {
 	return r.ordinary.snapshot()
+}
+
+// metadataHTTPWork is the response-materialization accounting for the native
+// metadata HTTP surface. It is deliberately separate from metadata read work and
+// is unexported so the stock ReadStats surface stays unchanged.
+type metadataHTTPWork struct {
+	Rows         uint64
+	Values       uint64
+	Bytes        uint64
+	SnapshotRows uint64
+}
+
+func (r *readStats) metadataHTTPWorkSnapshot() metadataHTTPWork {
+	return metadataHTTPWork{
+		Rows: r.metadataHTTPRows.Load(), Values: r.metadataHTTPValues.Load(),
+		Bytes: r.metadataHTTPBytes.Load(), SnapshotRows: r.metadataSnapshotRows.Load(),
+	}
 }
 
 // nativeDerivationAccumulator aggregates committed native builder accounting. It
@@ -499,6 +524,10 @@ func (r *readStats) reset() {
 	r.hashPrepare.Store(0)
 	r.refTrusted.Store(0)
 	r.refFallback.Store(0)
+	r.metadataHTTPRows.Store(0)
+	r.metadataHTTPValues.Store(0)
+	r.metadataHTTPBytes.Store(0)
+	r.metadataSnapshotRows.Store(0)
 	r.native.reset()
 }
 

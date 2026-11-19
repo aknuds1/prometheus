@@ -448,64 +448,201 @@
         "path": "/resources?kind=resource&start=1&end=3"
       },
       "expect": {
-        "status": 200,
         "data": {
-          "status": "success",
           "data": {
+            "annotations": [],
+            "next_token": null,
             "owners": [
               {
-                "id": "{\"service.instance.id\":\"pod-1\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
-                "kind": "resource",
-                "identifying": {
-                  "service.instance.id": "pod-1",
-                  "service.name": "checkout",
-                  "service.namespace": "shop"
+                "owner": {
+                  "identity": {
+                    "attributes": [
+                      {
+                        "key": "service.instance.id",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "pod-1"
+                        }
+                      },
+                      {
+                        "key": "service.name",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "checkout"
+                        }
+                      },
+                      {
+                        "key": "service.namespace",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "shop"
+                        }
+                      }
+                    ],
+                    "kind": "resource"
+                  },
+                  "kind": "resource",
+                  "ref": "<ref>"
                 },
-                "history_truncated": false,
                 "versions": [
                   {
-                    "descriptive": {
-                      "host.name": "h1"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "host.name",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "h1"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 1000,
-                    "valid_until": 2000,
-                    "observed_from": 1000,
-                    "observed_until": 1500
+                    "coverage": {
+                      "earliest_retained_ms": null,
+                      "ranges": [],
+                      "reasons": [],
+                      "scope": "owner_history",
+                      "state": "covered"
+                    },
+                    "observation": {
+                      "first_ms": "1000",
+                      "last_ms": "1500"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "1000",
+                      "until_ms": "2000"
+                    }
                   },
                   {
-                    "descriptive": {
-                      "host.name": "h1",
-                      "zone": "east"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "host.name",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "h1"
+                          }
+                        },
+                        {
+                          "key": "zone",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "east"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 2000,
-                    "observed_from": 2000,
-                    "observed_until": 2000
+                    "coverage": {
+                      "earliest_retained_ms": null,
+                      "ranges": [],
+                      "reasons": [],
+                      "scope": "owner_history",
+                      "state": "covered"
+                    },
+                    "observation": {
+                      "first_ms": "2000",
+                      "last_ms": "2000"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "2000",
+                      "until_ms": null
+                    }
                   }
                 ]
               },
               {
-                "id": "{\"service.instance.id\":\"pod-2\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
-                "kind": "resource",
-                "identifying": {
-                  "service.instance.id": "pod-2",
-                  "service.name": "checkout",
-                  "service.namespace": "shop"
+                "owner": {
+                  "identity": {
+                    "attributes": [
+                      {
+                        "key": "service.instance.id",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "pod-2"
+                        }
+                      },
+                      {
+                        "key": "service.name",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "checkout"
+                        }
+                      },
+                      {
+                        "key": "service.namespace",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "shop"
+                        }
+                      }
+                    ],
+                    "kind": "resource"
+                  },
+                  "kind": "resource",
+                  "ref": "<ref>"
                 },
-                "history_truncated": false,
                 "versions": [
                   {
-                    "descriptive": {
-                      "host.name": "h2"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "host.name",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "h2"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 1000,
-                    "observed_from": 1000,
-                    "observed_until": 1000
+                    "coverage": {
+                      "earliest_retained_ms": null,
+                      "ranges": [],
+                      "reasons": [],
+                      "scope": "owner_history",
+                      "state": "covered"
+                    },
+                    "observation": {
+                      "first_ms": "1000",
+                      "last_ms": "1000"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "1000",
+                      "until_ms": null
+                    }
                   }
                 ]
               }
-            ]
-          }
-        }
+            ],
+            "snapshot_id": "<snapshot>"
+          },
+          "status": "success"
+        },
+        "status": 200
       }
     },
     {
@@ -514,33 +651,80 @@
         "path": "/resources?kind=scope&start=0&end=3"
       },
       "expect": {
-        "status": 200,
         "data": {
-          "status": "success",
           "data": {
+            "annotations": [],
+            "next_token": null,
             "owners": [
               {
-                "id": "{\"name\":\"runtime\",\"version\":\"1.2.0\"}",
-                "kind": "scope",
-                "identifying": {
-                  "name": "runtime",
-                  "version": "1.2.0"
+                "owner": {
+                  "identity": {
+                    "attributes": [
+                      {
+                        "key": "name",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "runtime"
+                        }
+                      },
+                      {
+                        "key": "version",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "1.2.0"
+                        }
+                      }
+                    ],
+                    "kind": "scope"
+                  },
+                  "kind": "scope",
+                  "ref": "<ref>"
                 },
-                "history_truncated": false,
                 "versions": [
                   {
-                    "descriptive": {
-                      "schema_url": "https://opentelemetry.io/schemas/1.24.0"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "schema_url",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "https://opentelemetry.io/schemas/1.24.0"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 1000,
-                    "observed_from": 1000,
-                    "observed_until": 1000
+                    "coverage": {
+                      "earliest_retained_ms": null,
+                      "ranges": [],
+                      "reasons": [],
+                      "scope": "owner_history",
+                      "state": "covered"
+                    },
+                    "observation": {
+                      "first_ms": "1000",
+                      "last_ms": "1000"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "1000",
+                      "until_ms": null
+                    }
                   }
                 ]
               }
-            ]
-          }
-        }
+            ],
+            "snapshot_id": "<snapshot>"
+          },
+          "status": "success"
+        },
+        "status": 200
       }
     },
     {

@@ -17,10 +17,8 @@
   "routes": [
     "columnar"
   ],
-  "open_decisions": [
-    "7"
-  ],
-  "scope": "Settled temporal and overlap semantics only. EffectiveFrom is inclusive, the actual successor ends validity exclusively, observation bounds are not validity, and a reverse query requires one common intersection of content validity, membership validity and the query range. The pagination assertions use the current positional owner/row cursor and state no snapshot-isolation claim, which decision 7 still owns. The HTTP form states times in seconds and multiplies by 1000, while the Go query API takes milliseconds; the fixture states each route's own representation instead of assuming they are interchangeable.",
+  "open_decisions": [],
+  "scope": "Settled temporal and overlap semantics only. EffectiveFrom is inclusive, the actual successor ends validity exclusively, observation bounds are not validity, and a reverse query requires one common intersection of content validity, membership validity and the query range. The pagination assertions use the exported positional owner/row cursor; decision 7 (2026-11-19) owns the separate snapshot-pinned HTTP cursor contract. The HTTP form states times in seconds and multiplies by 1000, while the Go query API takes milliseconds; the fixture states each route's own representation instead of assuming they are interchangeable.",
   "events": [
     {
       "op": "append",
@@ -377,52 +375,156 @@
         "path": "/resources?kind=resource&start=0.999&end=3"
       },
       "expect": {
-        "status": 200,
         "data": {
-          "status": "success",
           "data": {
+            "annotations": [],
+            "next_token": null,
             "owners": [
               {
-                "id": "{\"service.instance.id\":\"pod-1\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
-                "kind": "resource",
-                "identifying": {
-                  "service.instance.id": "pod-1",
-                  "service.name": "checkout",
-                  "service.namespace": "shop"
+                "owner": {
+                  "identity": {
+                    "attributes": [
+                      {
+                        "key": "service.instance.id",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "pod-1"
+                        }
+                      },
+                      {
+                        "key": "service.name",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "checkout"
+                        }
+                      },
+                      {
+                        "key": "service.namespace",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "shop"
+                        }
+                      }
+                    ],
+                    "kind": "resource"
+                  },
+                  "kind": "resource",
+                  "ref": "<ref>"
                 },
-                "history_truncated": false,
                 "versions": [
                   {
-                    "descriptive": {
-                      "zone": "east"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "zone",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "east"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 1000,
-                    "valid_until": 2000,
-                    "observed_from": 1000,
-                    "observed_until": 1400
+                    "coverage": {
+                      "earliest_retained_ms": null,
+                      "ranges": [],
+                      "reasons": [],
+                      "scope": "owner_history",
+                      "state": "covered"
+                    },
+                    "observation": {
+                      "first_ms": "1000",
+                      "last_ms": "1400"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "1000",
+                      "until_ms": "2000"
+                    }
                   },
                   {
-                    "descriptive": {
-                      "zone": "west"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "zone",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "west"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 2000,
-                    "valid_until": 3000,
-                    "observed_from": 2000,
-                    "observed_until": 2500
+                    "coverage": {
+                      "earliest_retained_ms": null,
+                      "ranges": [],
+                      "reasons": [],
+                      "scope": "owner_history",
+                      "state": "covered"
+                    },
+                    "observation": {
+                      "first_ms": "2000",
+                      "last_ms": "2500"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "2000",
+                      "until_ms": "3000"
+                    }
                   },
                   {
-                    "descriptive": {
-                      "zone": "east"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "zone",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "east"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 3000,
-                    "observed_from": 3000,
-                    "observed_until": 3000
+                    "coverage": {
+                      "earliest_retained_ms": null,
+                      "ranges": [],
+                      "reasons": [],
+                      "scope": "owner_history",
+                      "state": "covered"
+                    },
+                    "observation": {
+                      "first_ms": "3000",
+                      "last_ms": "3000"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "3000",
+                      "until_ms": null
+                    }
                   }
                 ]
               }
-            ]
-          }
-        }
+            ],
+            "snapshot_id": "<snapshot>"
+          },
+          "status": "success"
+        },
+        "status": 200
       }
     },
     {
@@ -431,34 +533,88 @@
         "path": "/resources?kind=resource&start=0.999&end=3&latest=true"
       },
       "expect": {
-        "status": 200,
         "data": {
-          "status": "success",
           "data": {
+            "annotations": [],
+            "next_token": null,
             "owners": [
               {
-                "id": "{\"service.instance.id\":\"pod-1\",\"service.name\":\"checkout\",\"service.namespace\":\"shop\"}",
-                "kind": "resource",
-                "identifying": {
-                  "service.instance.id": "pod-1",
-                  "service.name": "checkout",
-                  "service.namespace": "shop"
+                "owner": {
+                  "identity": {
+                    "attributes": [
+                      {
+                        "key": "service.instance.id",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "pod-1"
+                        }
+                      },
+                      {
+                        "key": "service.name",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "checkout"
+                        }
+                      },
+                      {
+                        "key": "service.namespace",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "shop"
+                        }
+                      }
+                    ],
+                    "kind": "resource"
+                  },
+                  "kind": "resource",
+                  "ref": "<ref>"
                 },
-                "history_truncated": false,
                 "versions": [
                   {
-                    "descriptive": {
-                      "zone": "east"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "zone",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "east"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 3000,
-                    "observed_from": 3000,
-                    "observed_until": 3000
+                    "coverage": {
+                      "earliest_retained_ms": null,
+                      "ranges": [],
+                      "reasons": [],
+                      "scope": "owner_history",
+                      "state": "covered"
+                    },
+                    "observation": {
+                      "first_ms": "3000",
+                      "last_ms": "3000"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "3000",
+                      "until_ms": null
+                    }
                   }
                 ]
               }
-            ]
-          }
-        }
+            ],
+            "snapshot_id": "<snapshot>"
+          },
+          "status": "success"
+        },
+        "status": 200
       }
     },
     {

@@ -1411,7 +1411,15 @@ func contractNormalizeOpaque(value any) any {
 		for key, item := range typed {
 			switch {
 			case key == "next_token":
-				out[key] = "<token>"
+				if item == nil {
+					out[key] = nil
+				} else {
+					out[key] = "<token>"
+				}
+			case key == "snapshot_id":
+				out[key] = "<snapshot>"
+			case key == "ref":
+				out[key] = "<ref>"
 			case key == "id" && identity != nil:
 				out[key] = contractCanonicalIdentity(identity)
 			case key == "owner" && ownerIdentity != nil:

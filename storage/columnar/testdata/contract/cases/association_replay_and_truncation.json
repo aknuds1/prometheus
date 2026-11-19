@@ -14,7 +14,6 @@
   ],
   "retained_version_limit": 2,
   "open_decisions": [
-    "7",
     "9"
   ],
   "target_cases": [
@@ -362,43 +361,183 @@
         "path": "/resources?kind=resource&start=0&end=3"
       },
       "expect": {
-        "status": 200,
         "data": {
-          "status": "success",
           "data": {
+            "annotations": [
+              {
+                "axis": "coverage",
+                "category": "coverage",
+                "earliest_retained_ms": "2000",
+                "interval": {
+                  "from_ms": "2000",
+                  "until_ms": null
+                },
+                "key": "history_truncated",
+                "owner": {
+                  "identity": {
+                    "attributes": [
+                      {
+                        "key": "service.instance.id",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "pod-4"
+                        }
+                      },
+                      {
+                        "key": "service.name",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "retry"
+                        }
+                      },
+                      {
+                        "key": "service.namespace",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "shop"
+                        }
+                      }
+                    ],
+                    "kind": "resource"
+                  },
+                  "kind": "resource",
+                  "ref": "<ref>"
+                },
+                "reason": "history_truncated",
+                "scope": "owner_history",
+                "state": "truncated"
+              }
+            ],
+            "next_token": null,
             "owners": [
               {
-                "id": "{\"service.instance.id\":\"pod-4\",\"service.name\":\"retry\",\"service.namespace\":\"shop\"}",
-                "kind": "resource",
-                "identifying": {
-                  "service.instance.id": "pod-4",
-                  "service.name": "retry",
-                  "service.namespace": "shop"
+                "owner": {
+                  "identity": {
+                    "attributes": [
+                      {
+                        "key": "service.instance.id",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "pod-4"
+                        }
+                      },
+                      {
+                        "key": "service.name",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "retry"
+                        }
+                      },
+                      {
+                        "key": "service.namespace",
+                        "value": {
+                          "state": "present",
+                          "type": "string",
+                          "value": "shop"
+                        }
+                      }
+                    ],
+                    "kind": "resource"
+                  },
+                  "kind": "resource",
+                  "ref": "<ref>"
                 },
-                "history_truncated": true,
                 "versions": [
                   {
-                    "descriptive": {
-                      "host.name": "h2"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "host.name",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "h2"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 2000,
-                    "valid_until": 3000,
-                    "observed_from": 2000,
-                    "observed_until": 2000
+                    "coverage": {
+                      "earliest_retained_ms": "2000",
+                      "ranges": [
+                        {
+                          "from_ms": "2000",
+                          "until_ms": null
+                        }
+                      ],
+                      "reasons": [
+                        "history_truncated"
+                      ],
+                      "scope": "owner_history",
+                      "state": "truncated"
+                    },
+                    "observation": {
+                      "first_ms": "2000",
+                      "last_ms": "2000"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "2000",
+                      "until_ms": "3000"
+                    }
                   },
                   {
-                    "descriptive": {
-                      "host.name": "h3"
+                    "content": {
+                      "entries": [
+                        {
+                          "key": "host.name",
+                          "value": {
+                            "state": "present",
+                            "type": "string",
+                            "value": "h3"
+                          }
+                        }
+                      ],
+                      "scope": "complete_authoritative"
                     },
-                    "effective_from": 3000,
-                    "observed_from": 3000,
-                    "observed_until": 3000
+                    "coverage": {
+                      "earliest_retained_ms": "2000",
+                      "ranges": [
+                        {
+                          "from_ms": "2000",
+                          "until_ms": null
+                        }
+                      ],
+                      "reasons": [
+                        "history_truncated"
+                      ],
+                      "scope": "owner_history",
+                      "state": "truncated"
+                    },
+                    "observation": {
+                      "first_ms": "3000",
+                      "last_ms": "3000"
+                    },
+                    "source": {
+                      "reason": "provenance_not_recorded",
+                      "state": "unknown"
+                    },
+                    "validity": {
+                      "from_ms": "3000",
+                      "until_ms": null
+                    }
                   }
                 ]
               }
-            ]
-          }
-        }
+            ],
+            "snapshot_id": "<snapshot>"
+          },
+          "status": "success"
+        },
+        "status": 200
       }
     },
     {

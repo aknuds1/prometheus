@@ -238,7 +238,7 @@
       "decisions": [
         "7"
       ],
-      "note": "The selected isolation contract is the current positional owner/row cursor, and only that contract is asserted. Snapshot isolation across pages is decision 7 and is recorded as blocked rather than assumed."
+      "note": "The exported store-level positional owner/row cursor sequence remains asserted with independent expected pages. The contractual snapshot-pinned, query-bound HTTP cursor is a separate decision-7 surface covered by gap-snapshot-cursor evidence; this entry does not claim it."
     },
     {
       "id": "fixed-case-11",
@@ -762,7 +762,7 @@
       "decisions": [
         "7"
       ],
-      "note": "The fixtures drive /resources through httptest with the real handler, including an explicit history_truncated response. Which response fields are contractual is decision 7."
+      "note": "The fixtures drive /resources through httptest with the real handler, including explicit truncated coverage. Decision 7 (2026-11-19) makes the typed/state JSON, stable error classes, snapshot-pinned cursors and annotations contractual; the handler tests assert that surface, while the fixtures keep exercising the same logical owner histories."
     },
     {
       "id": "route-promql-info",
@@ -1070,11 +1070,19 @@
       "id": "gap-snapshot-cursor",
       "group": "capability-gap",
       "title": "Snapshot-isolated metadata pagination",
-      "status": "blocked",
+      "status": "passing",
       "evidence": [
         {
-          "path": "storage/columnar/metadata_owner_pagination_test.go",
-          "test": "TestQueryMetadataOwnerPagination"
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataSnapshotPagination"
+        },
+        {
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataSnapshotTerminalPages"
+        },
+        {
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataSnapshotLifecycle"
         }
       ],
       "fixtures": [
@@ -1083,19 +1091,35 @@
       "decisions": [
         "7"
       ],
-      "note": "The current cursor is a positional owner/row key, not a snapshot or retained iterator. Decision 7 owns the snapshot contract."
+      "note": "Decision 7 (2026-11-19) is implemented for the local experimental HTTP surface: a first page pins a deep-cloned committed metadata catalog, the opaque HMAC/versioned/query-bound cursor recovers a complete after-position, strict-after and lookahead rules produce exact-full/final/empty terminal pages, and cancellation, expiry, forced reclamation and store_restarted reclamation retain distinct classes. No TTL, byte budget or fanout/global snapshot is selected."
     },
     {
       "id": "gap-typed-http-values",
       "group": "capability-gap",
       "title": "Contractual typed JSON values in metadata HTTP responses",
-      "status": "blocked",
-      "evidence": [],
+      "status": "partial",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataTypedHTTPValues"
+        },
+        {
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataHTTPDiffStates"
+        },
+        {
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataHTTPErrorClasses"
+        }
+      ],
       "fixtures": [],
       "decisions": [
         "7"
       ],
-      "note": "Every value is a JSON string and the experimental envelope is not contractual. Decision 7 owns it."
+      "note": "Decision 7's tagged JSON value model is implemented and tested, including present string/boolean/integer/double-bits/array/map, null/absent/cleared/unknown/ambiguous, map-order equality and deterministic display, and the HTTP surface emits present strings plus explicit projection absents. Stored content remains string-only: non-string typed ingestion, typed null, clears and tombstones require a durable typed/tombstone format and remain gap-typed-content and the accepted target cases, not passing coverage.",
+      "gaps": [
+        "gap-typed-content"
+      ]
     },
     {
       "id": "gap-target-info-coexistence",

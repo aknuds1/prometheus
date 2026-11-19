@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -37,25 +36,9 @@ type metadataAPITestFixture struct {
 	scope   OwnerKey
 }
 
-func TestMetadataDisabledHTTP(t *testing.T) {
-	s, err := NewStorage(t.TempDir(), StorageOptions{DisableNativeMetadata: true, DisableWAL: true})
-	require.NoError(t, err)
-	defer s.Close()
-	handler := NewMetadataHandler(s, slog.New(slog.DiscardHandler))
-	for _, path := range []string{"/resources", "/resources/series", "/resources/diff"} {
-		query := url.Values{}
-		if path == "/resources/series" {
-			query.Set("resource.attr", "region:east")
-		}
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path+"?"+query.Encode(), http.NoBody))
-		require.Equal(t, http.StatusNotImplemented, recorder.Code, recorder.Body.String())
-	}
-}
-
-func newMetadataAPITestFixture(t *testing.T) metadataAPITestFixture {
+func newMetadataAPITestFixtureWithOptions(t *testing.T, opts StorageOptions) metadataAPITestFixture {
 	t.Helper()
-	s, err := NewStorage(t.TempDir(), StorageOptions{})
+	s, err := NewStorage(t.TempDir(), opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	ownerA := ResourceOwner(map[string]string{"service.name": "payments", "service.instance.id": "one"})
@@ -115,16 +98,21 @@ func newMetadataAPITestFixture(t *testing.T) metadataAPITestFixture {
 	return fixture
 }
 
-func (f metadataAPITestFixture) request(t *testing.T, path string, query url.Values) *httptest.ResponseRecorder {
+func newMetadataAPITestFixture(t *testing.T) metadataAPITestFixture {
+	t.Helper()
+	return newMetadataAPITestFixtureWithOptions(t, StorageOptions{})
+}
+
+func (f metadataAPITestFixture) request(t *testing.T, method, path string, query url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	f.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path+"?"+query.Encode(), http.NoBody))
+	f.handler.ServeHTTP(recorder, httptest.NewRequest(method, path+"?"+query.Encode(), http.NoBody))
 	return recorder
 }
 
 func (f metadataAPITestFixture) query(t *testing.T, path string, query url.Values, target any) {
 	t.Helper()
-	recorder := f.request(t, path, query)
+	recorder := f.request(t, http.MethodGet, path, query)
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	var envelope struct {
 		Status string          `json:"status"`
@@ -132,97 +120,147 @@ func (f metadataAPITestFixture) query(t *testing.T, path string, query url.Value
 	}
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &envelope))
 	require.Equal(t, "success", envelope.Status)
-	// Test callers may reuse the same output variable across pages. Reset it, as
-	// the JSON package otherwise retains keys in an existing non-nil map.
-	reflect.ValueOf(target).Elem().SetZero()
 	require.NoError(t, json.Unmarshal(envelope.Data, target))
 }
 
-func (f metadataAPITestFixture) queryError(t *testing.T, path string, query url.Values) string {
+func (f metadataAPITestFixture) queryError(t *testing.T, path string, query url.Values, code string) string {
 	t.Helper()
-	recorder := f.request(t, path, query)
+	recorder := f.request(t, http.MethodGet, path, query)
 	require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
-	return recorder.Body.String()
+	body := recorder.Body.String()
+	require.Contains(t, body, `"code":"`+code+`"`, body)
+	return body
+}
+
+// metadataTestEntry returns one exact content entry.
+func metadataTestEntry(t *testing.T, entries []metadataHTTPEntry, key string) metadataTypedValue {
+	t.Helper()
+	for _, entry := range entries {
+		if entry.Key == key {
+			return entry.Value
+		}
+	}
+	require.FailNowf(t, "missing content entry", "key %q", key)
+	return metadataTypedValue{}
+}
+
+// metadataTestIdentity returns one identity attribute.
+func metadataTestIdentity(t *testing.T, identity metadataHTTPIdentity, key string) metadataTypedValue {
+	t.Helper()
+	return metadataTestEntry(t, identity.Attributes, key)
+}
+
+func TestMetadataDisabledHTTP(t *testing.T) {
+	s, err := NewStorage(t.TempDir(), StorageOptions{DisableNativeMetadata: true, DisableWAL: true})
+	require.NoError(t, err)
+	defer s.Close()
+	handler := NewMetadataHandler(s, slog.New(slog.DiscardHandler))
+	for _, path := range []string{"/resources", "/resources/series", "/resources/diff?time=1"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		require.Equal(t, http.StatusNotImplemented, recorder.Code, recorder.Body.String())
+		require.Contains(t, recorder.Body.String(), `"code":"metadata_disabled"`)
+	}
 }
 
 func TestMetadataOwnersHTTP(t *testing.T) {
 	f := newMetadataAPITestFixture(t)
-	var page MetadataOwnerPage
+	var page metadataHTTPOwnerPage
 	f.query(t, "/resources", url.Values{"start": {"0"}, "end": {"0.25"}}, &page)
 	require.Len(t, page.Owners, 2)
-	byID := map[string]MetadataOwnerView{}
+	require.NotEmpty(t, page.SnapshotID)
+	require.Nil(t, page.NextToken, "a complete page has a null next_token")
+	require.NotNil(t, page.Annotations)
+	byRef := map[string]metadataHTTPOwnerRow{}
 	for _, owner := range page.Owners {
-		byID[owner.ID] = owner
+		byRef[owner.Owner.Ref] = owner
 	}
-	ownerA := byID[f.ownerA.Ref()]
-	require.Equal(t, "one", ownerA.Identifying["service.instance.id"])
+	ownerA := byRef[f.ownerA.Ref()]
+	require.Equal(t, "resource", ownerA.Owner.Kind)
+	instance := metadataTestIdentity(t, ownerA.Owner.Identity, "service.instance.id")
+	require.Equal(t, "present", instance.state)
+	require.Equal(t, "one", *instance.str)
 	require.Len(t, ownerA.Versions, 1)
-	require.Equal(t, "h1", ownerA.Versions[0].Descriptive["host.name"])
-	ownerB := byID[f.ownerB.Ref()]
-	require.Equal(t, "h9", ownerB.Versions[0].Descriptive["host.name"])
+	assertion := ownerA.Versions[0]
+	require.Equal(t, "complete_authoritative", assertion.Content.Scope)
+	host := metadataTestEntry(t, assertion.Content.Entries, "host.name")
+	require.Equal(t, "present", host.state)
+	require.Equal(t, "string", host.typ)
+	require.Equal(t, "h1", *host.str)
+	require.Equal(t, "100", assertion.Validity.FromMS)
+	require.Equal(t, "300", *assertion.Validity.UntilMS, "the successor ends this version exclusively")
+	require.Equal(t, "100", *assertion.Observation.FirstMS)
+	require.Equal(t, "covered", assertion.Coverage.State)
+	require.Equal(t, "unknown", assertion.Source["state"])
 
 	f.query(t, "/resources", url.Values{
-		"end": {"0.4"}, "latest": {"true"}, "attributes": {"host.name"},
+		"end": {"0.4"}, "latest": {"true"}, "projection": {"host.name"},
 		"match[]": {`{__name__="metric_a"}`},
 	}, &page)
 	require.Len(t, page.Owners, 1)
-	require.Equal(t, f.ownerA.Ref(), page.Owners[0].ID)
+	require.Equal(t, f.ownerA.Ref(), page.Owners[0].Owner.Ref)
 	require.Len(t, page.Owners[0].Versions, 1)
-	require.Equal(t, "h2", page.Owners[0].Versions[0].Descriptive["host.name"])
-	require.NotContains(t, page.Owners[0].Versions[0].Descriptive, "region")
+	require.Equal(t, "h2", *metadataTestEntry(t, page.Owners[0].Versions[0].Content.Entries, "host.name").str)
+	require.Len(t, page.Owners[0].Versions[0].Content.Entries, 1, "projection filters unrequested content")
+	require.Equal(t, "300", page.Owners[0].Versions[0].Validity.FromMS)
+	require.Nil(t, page.Owners[0].Versions[0].Validity.UntilMS)
 
 	f.query(t, "/resources", url.Values{
 		"kind": {"scope"}, "start": {"0"}, "end": {"0.4"},
 	}, &page)
 	require.Len(t, page.Owners, 1)
-	require.Equal(t, f.scope.Ref(), page.Owners[0].ID)
-	require.Equal(t, "sdk", page.Owners[0].Identifying["name"])
+	require.Equal(t, f.scope.Ref(), page.Owners[0].Owner.Ref)
+	require.Equal(t, "sdk", *metadataTestIdentity(t, page.Owners[0].Owner.Identity, "name").str)
 	require.Len(t, page.Owners[0].Versions, 2)
-	require.NotContains(t, page.Owners[0].Versions[0].Descriptive, "host.name")
 
-	var discovery MetadataDiscoveryPage
+	var discovery metadataHTTPDiscoveryPage
 	f.query(t, "/resources", url.Values{
-		"format": {"attributes"}, "start": {"0"}, "end": {"0.25"}, "attributes": {"host.name,region"}, "limit": {"1"},
+		"format": {"attributes"}, "start": {"0"}, "end": {"0.25"},
+		"projection": {"host.name,region"}, "limit": {"1"},
 	}, &discovery)
 	require.Len(t, discovery.Attributes, 1)
-	require.Equal(t, "host.name", discovery.Attributes[0].Name)
-	require.Equal(t, []string{"h1", "h9"}, discovery.Attributes[0].Values)
-	require.NotEmpty(t, discovery.NextToken)
+	require.Equal(t, "host.name", discovery.Attributes[0].Key)
+	require.Len(t, discovery.Attributes[0].Values, 2)
+	require.Equal(t, "h1", *discovery.Attributes[0].Values[0].str)
+	require.Equal(t, "h9", *discovery.Attributes[0].Values[1].str)
+	require.NotNil(t, discovery.NextToken)
+	firstToken := *discovery.NextToken
 	f.query(t, "/resources", url.Values{
-		"format": {"attributes"}, "start": {"0"}, "end": {"0.25"}, "attributes": {"host.name,region"},
-		"limit": {"1"}, "next_token": {discovery.NextToken},
+		"format": {"attributes"}, "start": {"0"}, "end": {"0.25"},
+		"projection": {"host.name,region"}, "limit": {"2"}, "next_token": {firstToken},
 	}, &discovery)
 	require.Len(t, discovery.Attributes, 1)
-	require.Equal(t, "region", discovery.Attributes[0].Name)
-	require.Equal(t, []string{"east"}, discovery.Attributes[0].Values)
-	require.Empty(t, discovery.NextToken)
+	require.Equal(t, "region", discovery.Attributes[0].Key)
+	require.Nil(t, discovery.NextToken)
 
 	f.query(t, "/resources", url.Values{"limit": {"1"}}, &page)
 	require.Len(t, page.Owners, 1)
-	require.NotEmpty(t, page.NextToken)
-	f.query(t, "/resources", url.Values{"limit": {"1"}, "next_token": {page.NextToken}}, &page)
+	require.NotNil(t, page.NextToken)
+	f.query(t, "/resources", url.Values{"limit": {"1"}, "next_token": {*page.NextToken}}, &page)
 	require.Len(t, page.Owners, 1)
-	require.Empty(t, page.NextToken, "the second Resource has its own unchanged owner history")
-	body := f.queryError(t, "/resources", url.Values{"projection": {"*"}})
-	require.Contains(t, body, "unbounded metadata projection")
+	require.Nil(t, page.NextToken, "the second Resource has its own unchanged owner history")
+	f.queryError(t, "/resources", url.Values{"projection": {"*"}}, "metadata_projection_invalid")
 }
 
 func TestMetadataSeriesHTTP(t *testing.T) {
 	f := newMetadataAPITestFixture(t)
-	var page MetadataSeriesPage
+	var page metadataHTTPSeriesPage
 	f.query(t, "/resources/series", url.Values{
 		"resource.attr": {"region:east"}, "start": {"0"}, "end": {"0.4"}, "limit": {"1"},
 	}, &page)
 	require.Len(t, page.Series, 1)
-	require.Equal(t, "metric_a", page.Series[0].Labels.Get(labels.MetricName))
+	require.Equal(t, "applicable", page.Series[0].Association.State)
+	require.Equal(t, "metric_a", page.Series[0].Series[0].Value)
+	require.NotNil(t, page.Series[0].Owner)
 	require.Len(t, page.Series[0].Versions, 2)
-	require.NotEmpty(t, page.NextToken)
+	require.NotNil(t, page.NextToken)
 	f.query(t, "/resources/series", url.Values{
-		"resource.attr": {"region:east"}, "start": {"0"}, "end": {"0.4"}, "limit": {"1"}, "next_token": {page.NextToken},
+		"resource.attr": {"region:east"}, "start": {"0"}, "end": {"0.4"}, "limit": {"1"},
+		"next_token": {*page.NextToken},
 	}, &page)
 	require.Len(t, page.Series, 1)
-	require.Equal(t, "metric_b", page.Series[0].Labels.Get(labels.MetricName))
-	require.Empty(t, page.NextToken)
+	require.Equal(t, "metric_b", page.Series[0].Series[0].Value)
+	require.Nil(t, page.NextToken)
 
 	f.query(t, "/resources/series", url.Values{
 		"resource.attr": {"host.name:h1"}, "start": {"0"}, "end": {"0.05"},
@@ -238,16 +276,15 @@ func TestMetadataSeriesHTTP(t *testing.T) {
 	}, &page)
 	require.Len(t, page.Series, 2)
 	for _, series := range page.Series {
-		require.Equal(t, f.scope.Ref(), series.Owner)
+		require.Equal(t, f.scope.Ref(), series.Owner.Ref)
 		require.Len(t, series.Versions, 1)
-		require.Equal(t, map[string]string{"schema_url": "scope-v1"}, series.Versions[0].Descriptive)
 	}
 	f.query(t, "/resources/series", url.Values{
 		"kind": {"source"}, "resource.attr": {"endpoint:b"}, "start": {"0"}, "end": {"0.25"},
 	}, &page)
 	require.Len(t, page.Series, 1)
-	require.Equal(t, int64(200), page.Series[0].MembershipStart)
-	require.Equal(t, "metric_a", page.Series[0].Labels.Get(labels.MetricName))
+	require.Equal(t, "200", page.Series[0].Association.Validity.FromMS)
+	require.Equal(t, "metric_a", page.Series[0].Series[0].Value)
 	f.query(t, "/resources/series", url.Values{
 		"kind": {"resource_schema"}, "resource.attr": {"schema_url:resource-v1"}, "start": {"0"}, "end": {"0.25"},
 	}, &page)
@@ -269,36 +306,58 @@ func TestMetadataSeriesHTTP(t *testing.T) {
 	}, &summary)
 	require.Equal(t, 2, summary.MatchedSeries)
 	require.Equal(t, 2, summary.MetricFamilies)
+	f.queryError(t, "/resources/series", url.Values{"resource.attr": {"bad"}}, "metadata_matcher_invalid")
 }
 
 func TestMetadataDiffHTTP(t *testing.T) {
 	f := newMetadataAPITestFixture(t)
-	var page MetadataDiffPage
+	var page metadataHTTPDiffPage
 	f.query(t, "/resources/diff", url.Values{
-		"time": {"0.4"}, "attributes": {"host.name"}, "match[]": {`{__name__="metric_a"}`},
+		"time": {"0.4"}, "projection": {"host.name"}, "match[]": {`{__name__="metric_a"}`},
 	}, &page)
 	require.Len(t, page.Changes, 1)
 	change := page.Changes[0]
-	require.Equal(t, f.ownerA.Ref(), change.Owner.ID)
-	require.NotNil(t, change.Before)
-	require.Equal(t, "h1", change.Before.Descriptive["host.name"])
-	require.Equal(t, "h2", change.After.Descriptive["host.name"])
-	require.Equal(t, "h1->h2", change.Changed["host.name"])
-	require.NotContains(t, change.Changed, "region", "unprojected fields do not appear as spurious removals")
+	require.Equal(t, f.ownerA.Ref(), change.Owner.Ref)
+	require.Equal(t, "300", change.EffectiveFromMS)
+	require.Equal(t, "present", change.Before.State)
+	require.Equal(t, "present", change.After.State)
+	before := metadataTestEntry(t, change.Before.Assertion.Content.Entries, "host.name")
+	after := metadataTestEntry(t, change.After.Assertion.Content.Entries, "host.name")
+	require.Equal(t, "h1", *before.str)
+	require.Equal(t, "h2", *after.str)
+	require.Len(t, change.Fields, 1)
+	require.Equal(t, "present", change.Fields[0].Before.state)
+	require.Equal(t, "present", change.Fields[0].After.state)
+	require.Equal(t, "h1", *change.Fields[0].Before.str)
+	require.Equal(t, "h2", *change.Fields[0].After.str)
 
 	f.query(t, "/resources/diff", url.Values{
 		"time": {"0.4"}, "kind": {"scope"}, "match[]": {`{__name__="metric_b"}`},
 	}, &page)
 	require.Len(t, page.Changes, 1)
-	require.Equal(t, f.scope.Ref(), page.Changes[0].Owner.ID)
-	require.Equal(t, "scope-v1->scope-v2", page.Changes[0].Changed["schema_url"])
+	require.Equal(t, f.scope.Ref(), page.Changes[0].Owner.Ref)
+	field := changeField(t, page.Changes[0], "schema_url")
+	require.Equal(t, "scope-v1", *field.Before.str)
+	require.Equal(t, "scope-v2", *field.After.str)
 
 	f.query(t, "/resources/diff", url.Values{"time": {"0.4"}, "limit": {"1"}}, &page)
 	require.Len(t, page.Changes, 1)
-	require.NotEmpty(t, page.NextToken)
-	f.query(t, "/resources/diff", url.Values{"time": {"0.4"}, "limit": {"1"}, "next_token": {page.NextToken}}, &page)
+	require.NotNil(t, page.NextToken)
+	f.query(t, "/resources/diff", url.Values{
+		"time": {"0.4"}, "limit": {"1"}, "next_token": {*page.NextToken},
+	}, &page)
 	require.Len(t, page.Changes, 1)
-	require.Empty(t, page.NextToken)
-	body := f.queryError(t, "/resources/series", url.Values{"resource.attr": {"bad"}})
-	require.Contains(t, body, "name:value")
+	require.Nil(t, page.NextToken)
+	f.queryError(t, "/resources/diff", url.Values{}, "metadata_time_invalid")
+}
+
+func changeField(t *testing.T, change metadataHTTPDiffRow, key string) metadataHTTPDiffField {
+	t.Helper()
+	for _, field := range change.Fields {
+		if field.Key == key {
+			return field
+		}
+	}
+	require.FailNowf(t, "missing diff field", "key %q", key)
+	return metadataHTTPDiffField{}
 }

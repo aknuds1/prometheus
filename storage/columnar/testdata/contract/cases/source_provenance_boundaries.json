@@ -10,9 +10,7 @@
   "routes": [
     "columnar"
   ],
-  "open_decisions": [
-    "7"
-  ],
+  "open_decisions": [],
   "target_cases": [
     {
       "id": "source-producer-sender-separation",
