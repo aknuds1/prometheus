@@ -20,11 +20,13 @@ package columnar
 // that the incumbent can ingest or persist those types.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // metadataTypedValue is one state-tagged JSON value. It is built as an ordered
@@ -81,26 +83,12 @@ func metadataPresentArray(items []metadataTypedValue) metadataTypedValue {
 // metadataPresentMap returns a present map. Duplicate keys are rejected instead
 // of selecting one by iteration order.
 func metadataPresentMap(entries []metadataTypedMapEntry) (metadataTypedValue, error) {
-	seen := make(map[string]struct{}, len(entries))
-	cloned := make([]metadataTypedMapEntry, len(entries))
-	for i, entry := range entries {
-		if _, duplicate := seen[entry.Key]; duplicate {
-			return metadataTypedValue{}, fmt.Errorf("columnar: duplicate typed map key %q", entry.Key)
-		}
-		seen[entry.Key] = struct{}{}
-		cloned[i] = entry
+	value := metadataTypedValue{state: "present", typ: "map", entries: slices.Clone(entries)}
+	normalized, err := normalizeMetadataTypedValue(value)
+	if err != nil {
+		return metadataTypedValue{}, err
 	}
-	slices.SortFunc(cloned, func(a, b metadataTypedMapEntry) int {
-		switch {
-		case a.Key < b.Key:
-			return -1
-		case a.Key > b.Key:
-			return 1
-		default:
-			return 0
-		}
-	})
-	return metadataTypedValue{state: "present", typ: "map", entries: cloned}, nil
+	return normalized, nil
 }
 
 // metadataNullValue returns an explicit typed null.
@@ -118,132 +106,397 @@ func metadataUnknownValue(reason string) metadataTypedValue {
 }
 
 // metadataAmbiguousValue returns an ambiguous resolution carrying the
-// source-attributed assertions that disagree. No chosen top-level value is
-// included.
+// source-attributed alternatives that disagree. Equal alternatives deduplicate;
+// ambiguity requires at least two distinct alternatives to marshal.
 func metadataAmbiguousValue(assertions []metadataTypedValue) metadataTypedValue {
-	return metadataTypedValue{state: "ambiguous", assertions: slices.Clone(assertions)}
+	return metadataTypedValue{state: "ambiguous", assertions: dedupeMetadataTypedValues(assertions)}
 }
 
-// MarshalJSON encodes the selected state/type payload fields. Irrelevant payload
-// fields are omitted; an empty present array still encodes items: [].
-func (v metadataTypedValue) MarshalJSON() ([]byte, error) {
-	payload := map[string]any{"state": v.state}
+// dedupeMetadataTypedValues sorts and removes semantically equal alternatives.
+func dedupeMetadataTypedValues(values []metadataTypedValue) []metadataTypedValue {
+	if len(values) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(values)
+	slices.SortFunc(sorted, func(a, b metadataTypedValue) int {
+		return strings.Compare(metadataTypedValueCanonical(a), metadataTypedValueCanonical(b))
+	})
+	return slices.CompactFunc(sorted, func(a, b metadataTypedValue) bool {
+		return metadataTypedValueCanonical(a) == metadataTypedValueCanonical(b)
+	})
+}
+
+// normalizeMetadataTypedValue validates one value and returns its canonical
+// form: map entries sorted by key, ambiguous alternatives sorted and deduped, and
+// arrays recursively normalized. It rejects invalid states, types, payloads and
+// irrelevant fields instead of letting a later encoder or comparator panic.
+func normalizeMetadataTypedValue(v metadataTypedValue) (metadataTypedValue, error) {
 	switch v.state {
 	case "present":
-		if v.typ == "" {
-			return nil, errors.New("columnar: present typed value has no type")
+	case "null", "absent", "cleared":
+		if v.typ != "" || v.str != nil || v.boolean != nil || v.decimal != nil || v.bits != nil ||
+			len(v.items) != 0 || len(v.entries) != 0 || v.reason != nil || len(v.assertions) != 0 {
+			return metadataTypedValue{}, fmt.Errorf("columnar: %s typed value carries a payload", v.state)
 		}
-		payload["type"] = v.typ
-		switch v.typ {
+		return metadataTypedValue{state: v.state}, nil
+	case "unknown":
+		if v.reason == nil || *v.reason == "" {
+			return metadataTypedValue{}, errors.New("columnar: unknown typed value has no reason")
+		}
+		if v.typ != "" || v.str != nil || v.boolean != nil || v.decimal != nil || v.bits != nil ||
+			len(v.items) != 0 || len(v.entries) != 0 || len(v.assertions) != 0 {
+			return metadataTypedValue{}, errors.New("columnar: unknown typed value carries another payload")
+		}
+		return metadataTypedValue{state: v.state, reason: v.reason}, nil
+	case "ambiguous":
+		if v.typ != "" || v.str != nil || v.boolean != nil || v.decimal != nil || v.bits != nil ||
+			len(v.items) != 0 || len(v.entries) != 0 || v.reason != nil {
+			return metadataTypedValue{}, errors.New("columnar: ambiguous typed value carries another payload")
+		}
+		normalized := make([]metadataTypedValue, 0, len(v.assertions))
+		for _, assertion := range v.assertions {
+			item, err := normalizeMetadataTypedValue(assertion)
+			if err != nil {
+				return metadataTypedValue{}, err
+			}
+			normalized = append(normalized, item)
+		}
+		normalized = dedupeMetadataTypedValues(normalized)
+		if len(normalized) < 2 {
+			return metadataTypedValue{}, errors.New("columnar: ambiguous typed value needs at least two distinct alternatives")
+		}
+		return metadataTypedValue{state: v.state, assertions: normalized}, nil
+	default:
+		return metadataTypedValue{}, fmt.Errorf("columnar: unknown typed value state %q", v.state)
+	}
+	if v.typ == "" {
+		return metadataTypedValue{}, errors.New("columnar: present typed value has no type")
+	}
+	switch v.typ {
+	case "string":
+		if v.str == nil {
+			return metadataTypedValue{}, errors.New("columnar: present string has no value")
+		}
+		if v.boolean != nil || v.decimal != nil || v.bits != nil || len(v.items) != 0 ||
+			len(v.entries) != 0 || v.reason != nil || len(v.assertions) != 0 {
+			return metadataTypedValue{}, errors.New("columnar: present string carries another payload")
+		}
+		value := *v.str
+		return metadataTypedValue{state: "present", typ: "string", str: &value}, nil
+	case "boolean":
+		if v.boolean == nil {
+			return metadataTypedValue{}, errors.New("columnar: present boolean has no value")
+		}
+		if v.str != nil || v.decimal != nil || v.bits != nil || len(v.items) != 0 ||
+			len(v.entries) != 0 || v.reason != nil || len(v.assertions) != 0 {
+			return metadataTypedValue{}, errors.New("columnar: present boolean carries another payload")
+		}
+		value := *v.boolean
+		return metadataTypedValue{state: "present", typ: "boolean", boolean: &value}, nil
+	case "integer":
+		if v.decimal == nil {
+			return metadataTypedValue{}, errors.New("columnar: present integer has no decimal")
+		}
+		if err := validateMetadataInteger(*v.decimal); err != nil {
+			return metadataTypedValue{}, err
+		}
+		if v.str != nil || v.boolean != nil || v.bits != nil || len(v.items) != 0 ||
+			len(v.entries) != 0 || v.reason != nil || len(v.assertions) != 0 {
+			return metadataTypedValue{}, errors.New("columnar: present integer carries another payload")
+		}
+		decimal := *v.decimal
+		return metadataTypedValue{state: "present", typ: "integer", decimal: &decimal}, nil
+	case "double":
+		if v.bits == nil {
+			return metadataTypedValue{}, errors.New("columnar: present double has no bits")
+		}
+		if err := validateMetadataDoubleBits(*v.bits); err != nil {
+			return metadataTypedValue{}, err
+		}
+		if v.str != nil || v.boolean != nil || v.decimal != nil || len(v.items) != 0 ||
+			len(v.entries) != 0 || v.reason != nil || len(v.assertions) != 0 {
+			return metadataTypedValue{}, errors.New("columnar: present double carries another payload")
+		}
+		bits := *v.bits
+		return metadataTypedValue{state: "present", typ: "double", bits: &bits}, nil
+	case "array":
+		if v.str != nil || v.boolean != nil || v.decimal != nil || v.bits != nil ||
+			len(v.entries) != 0 || v.reason != nil || len(v.assertions) != 0 {
+			return metadataTypedValue{}, errors.New("columnar: present array carries another payload")
+		}
+		items := make([]metadataTypedValue, 0, len(v.items))
+		for _, item := range v.items {
+			normalized, err := normalizeMetadataTypedValue(item)
+			if err != nil {
+				return metadataTypedValue{}, err
+			}
+			items = append(items, normalized)
+		}
+		return metadataTypedValue{state: "present", typ: "array", items: items}, nil
+	case "map":
+		if v.str != nil || v.boolean != nil || v.decimal != nil || v.bits != nil ||
+			len(v.items) != 0 || v.reason != nil || len(v.assertions) != 0 {
+			return metadataTypedValue{}, errors.New("columnar: present map carries another payload")
+		}
+		entries := make([]metadataTypedMapEntry, 0, len(v.entries))
+		seen := make(map[string]struct{}, len(v.entries))
+		for _, entry := range v.entries {
+			if _, duplicate := seen[entry.Key]; duplicate {
+				return metadataTypedValue{}, fmt.Errorf("columnar: duplicate typed map key %q", entry.Key)
+			}
+			seen[entry.Key] = struct{}{}
+			normalized, err := normalizeMetadataTypedValue(entry.Value)
+			if err != nil {
+				return metadataTypedValue{}, err
+			}
+			entries = append(entries, metadataTypedMapEntry{Key: entry.Key, Value: normalized})
+		}
+		slices.SortFunc(entries, func(a, b metadataTypedMapEntry) int {
+			return strings.Compare(a.Key, b.Key)
+		})
+		return metadataTypedValue{state: "present", typ: "map", entries: entries}, nil
+	default:
+		return metadataTypedValue{}, fmt.Errorf("columnar: unknown typed value type %q", v.typ)
+	}
+}
+
+// validateMetadataInteger requires the one canonical signed 64-bit decimal
+// form: no plus sign, no leading zeros, no negative zero, and an in-range value.
+func validateMetadataInteger(value string) error {
+	if value == "" || value == "-0" {
+		return fmt.Errorf("columnar: invalid canonical integer %q", value)
+	}
+	digits := value
+	if digits[0] == '-' {
+		digits = digits[1:]
+	}
+	if digits == "" || (len(digits) > 1 && digits[0] == '0') {
+		return fmt.Errorf("columnar: invalid canonical integer %q", value)
+	}
+	for _, digit := range digits {
+		if digit < '0' || digit > '9' {
+			return fmt.Errorf("columnar: invalid canonical integer %q", value)
+		}
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || strconv.FormatInt(parsed, 10) != value {
+		return fmt.Errorf("columnar: invalid canonical integer %q", value)
+	}
+	return nil
+}
+
+// validateMetadataDoubleBits requires exactly one 0x-prefixed 16-hex-digit
+// lowercase IEEE-754 binary64 pattern.
+func validateMetadataDoubleBits(value string) error {
+	if len(value) != 18 || !strings.HasPrefix(value, "0x") {
+		return fmt.Errorf("columnar: invalid double bits %q", value)
+	}
+	for _, digit := range value[2:] {
+		if (digit < '0' || digit > '9') && (digit < 'a' || digit > 'f') {
+			return fmt.Errorf("columnar: invalid double bits %q", value)
+		}
+	}
+	if _, err := strconv.ParseUint(value[2:], 16, 64); err != nil {
+		return fmt.Errorf("columnar: invalid double bits %q", value)
+	}
+	return nil
+}
+
+// MarshalJSON encodes the selected state/type payload fields after validation.
+// Irrelevant payload fields are rejected; an empty present array still encodes
+// items: [].
+func (v metadataTypedValue) MarshalJSON() ([]byte, error) {
+	normalized, err := normalizeMetadataTypedValue(v)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"state": normalized.state}
+	switch normalized.state {
+	case "present":
+		payload["type"] = normalized.typ
+		switch normalized.typ {
 		case "string":
-			if v.str == nil {
-				return nil, errors.New("columnar: present string has no value")
-			}
-			payload["value"] = *v.str
+			payload["value"] = *normalized.str
 		case "boolean":
-			if v.boolean == nil {
-				return nil, errors.New("columnar: present boolean has no value")
-			}
-			payload["value"] = *v.boolean
+			payload["value"] = *normalized.boolean
 		case "integer":
-			if v.decimal == nil {
-				return nil, errors.New("columnar: present integer has no decimal")
-			}
-			payload["decimal"] = *v.decimal
+			payload["decimal"] = *normalized.decimal
 		case "double":
-			if v.bits == nil {
-				return nil, errors.New("columnar: present double has no bits")
-			}
-			payload["bits"] = *v.bits
+			payload["bits"] = *normalized.bits
 		case "array":
-			items := v.items
+			items := normalized.items
 			if items == nil {
 				items = []metadataTypedValue{}
 			}
 			payload["items"] = items
 		case "map":
-			entries := v.entries
+			entries := normalized.entries
 			if entries == nil {
 				entries = []metadataTypedMapEntry{}
 			}
 			payload["entries"] = entries
-		default:
-			return nil, fmt.Errorf("columnar: unknown typed value type %q", v.typ)
 		}
 	case "null", "absent", "cleared":
 	case "unknown":
-		if v.reason == nil {
-			return nil, errors.New("columnar: unknown typed value has no reason")
-		}
-		payload["reason"] = *v.reason
+		payload["reason"] = *normalized.reason
 	case "ambiguous":
-		assertions := v.assertions
-		if assertions == nil {
-			assertions = []metadataTypedValue{}
-		}
-		payload["assertions"] = assertions
-	default:
-		return nil, fmt.Errorf("columnar: unknown typed value state %q", v.state)
+		payload["assertions"] = normalized.assertions
 	}
 	return json.Marshal(payload)
 }
 
-// UnmarshalJSON decodes one tagged value for tests and cursor round-trips.
+// UnmarshalJSON decodes one tagged value strictly. Unknown fields, invalid
+// states/types, missing or irrelevant payloads, non-canonical integers/doubles,
+// duplicate map keys and single/equal ambiguity alternatives are rejected.
 func (v *metadataTypedValue) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		State      string                  `json:"state"`
-		Type       string                  `json:"type"`
-		Value      json.RawMessage         `json:"value"`
-		Decimal    *string                 `json:"decimal"`
-		Bits       *string                 `json:"bits"`
-		Items      []metadataTypedValue    `json:"items"`
-		Entries    []metadataTypedMapEntry `json:"entries"`
-		Reason     *string                 `json:"reason"`
-		Assertions []metadataTypedValue    `json:"assertions"`
+		State      *string                  `json:"state"`
+		Type       *string                  `json:"type"`
+		Value      json.RawMessage          `json:"value"`
+		Decimal    *string                  `json:"decimal"`
+		Bits       *string                  `json:"bits"`
+		Items      *[]metadataTypedValue    `json:"items"`
+		Entries    *[]metadataTypedMapEntry `json:"entries"`
+		Reason     *string                  `json:"reason"`
+		Assertions *[]metadataTypedValue    `json:"assertions"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&raw); err != nil {
 		return err
 	}
-	*v = metadataTypedValue{
-		state: raw.State, typ: raw.Type, decimal: raw.Decimal, bits: raw.Bits,
-		items: raw.Items, entries: raw.Entries, reason: raw.Reason, assertions: raw.Assertions,
+	if decoder.More() {
+		return errors.New("columnar: typed value has trailing data")
 	}
-	if raw.State != "present" {
-		return nil
+	if raw.State == nil {
+		return errors.New("columnar: typed value has no state")
 	}
-	switch raw.Type {
-	case "string":
-		var value string
-		if err := json.Unmarshal(raw.Value, &value); err != nil {
-			return fmt.Errorf("columnar: present string value: %w", err)
+	value := metadataTypedValue{state: *raw.State}
+	if raw.Type != nil {
+		value.typ = *raw.Type
+	}
+	switch *raw.State {
+	case "present":
+		if raw.Type == nil {
+			return errors.New("columnar: present typed value has no type")
 		}
-		v.str = &value
-	case "boolean":
-		var value bool
-		if err := json.Unmarshal(raw.Value, &value); err != nil {
-			return fmt.Errorf("columnar: present boolean value: %w", err)
+		switch *raw.Type {
+		case "string":
+			if len(raw.Value) == 0 || string(raw.Value) == "null" {
+				return errors.New("columnar: present string has no value")
+			}
+			if raw.Decimal != nil || raw.Bits != nil || raw.Items != nil || raw.Entries != nil ||
+				raw.Reason != nil || raw.Assertions != nil {
+				return errors.New("columnar: present string carries an irrelevant field")
+			}
+			var text string
+			if err := json.Unmarshal(raw.Value, &text); err != nil {
+				return fmt.Errorf("columnar: present string value: %w", err)
+			}
+			value.str = &text
+		case "boolean":
+			if len(raw.Value) == 0 || (string(raw.Value) != "true" && string(raw.Value) != "false") {
+				return errors.New("columnar: present boolean has no boolean value")
+			}
+			if raw.Decimal != nil || raw.Bits != nil || raw.Items != nil || raw.Entries != nil ||
+				raw.Reason != nil || raw.Assertions != nil {
+				return errors.New("columnar: present boolean carries an irrelevant field")
+			}
+			var boolean bool
+			if err := json.Unmarshal(raw.Value, &boolean); err != nil {
+				return fmt.Errorf("columnar: present boolean value: %w", err)
+			}
+			value.boolean = &boolean
+		case "integer":
+			if len(raw.Value) != 0 || raw.Bits != nil || raw.Items != nil || raw.Entries != nil ||
+				raw.Reason != nil || raw.Assertions != nil {
+				return errors.New("columnar: present integer carries an irrelevant field")
+			}
+			value.decimal = raw.Decimal
+		case "double":
+			if len(raw.Value) != 0 || raw.Decimal != nil || raw.Items != nil || raw.Entries != nil ||
+				raw.Reason != nil || raw.Assertions != nil {
+				return errors.New("columnar: present double carries an irrelevant field")
+			}
+			value.bits = raw.Bits
+		case "array":
+			if raw.Items == nil {
+				return errors.New("columnar: present array has no items")
+			}
+			if len(raw.Value) != 0 || raw.Decimal != nil || raw.Bits != nil || raw.Entries != nil ||
+				raw.Reason != nil || raw.Assertions != nil {
+				return errors.New("columnar: present array carries an irrelevant field")
+			}
+			value.items = *raw.Items
+		case "map":
+			if raw.Entries == nil {
+				return errors.New("columnar: present map has no entries")
+			}
+			if len(raw.Value) != 0 || raw.Decimal != nil || raw.Bits != nil || raw.Items != nil ||
+				raw.Reason != nil || raw.Assertions != nil {
+				return errors.New("columnar: present map carries an irrelevant field")
+			}
+			value.entries = *raw.Entries
+		default:
+			return fmt.Errorf("columnar: unknown typed value type %q", *raw.Type)
 		}
-		v.boolean = &value
+	case "null", "absent", "cleared":
+		if raw.Type != nil || len(raw.Value) != 0 || raw.Decimal != nil || raw.Bits != nil ||
+			raw.Items != nil || raw.Entries != nil || raw.Reason != nil || raw.Assertions != nil {
+			return fmt.Errorf("columnar: %s typed value carries a payload", *raw.State)
+		}
+	case "unknown":
+		if raw.Type != nil || len(raw.Value) != 0 || raw.Decimal != nil || raw.Bits != nil ||
+			raw.Items != nil || raw.Entries != nil || raw.Assertions != nil {
+			return errors.New("columnar: unknown typed value carries an irrelevant field")
+		}
+		value.reason = raw.Reason
+	case "ambiguous":
+		if raw.Assertions == nil {
+			return errors.New("columnar: ambiguous typed value has no assertions")
+		}
+		if raw.Type != nil || len(raw.Value) != 0 || raw.Decimal != nil || raw.Bits != nil ||
+			raw.Items != nil || raw.Entries != nil || raw.Reason != nil {
+			return errors.New("columnar: ambiguous typed value carries an irrelevant field")
+		}
+		value.assertions = *raw.Assertions
+	default:
+		return fmt.Errorf("columnar: unknown typed value state %q", *raw.State)
 	}
+	normalized, err := normalizeMetadataTypedValue(value)
+	if err != nil {
+		return err
+	}
+	*v = normalized
 	return nil
 }
 
-// UnmarshalJSON decodes one map entry.
+// UnmarshalJSON decodes one map entry strictly.
 func (e *metadataTypedMapEntry) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Key   string             `json:"key"`
-		Value metadataTypedValue `json:"value"`
+		Key   *string             `json:"key"`
+		Value *metadataTypedValue `json:"value"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&raw); err != nil {
 		return err
 	}
-	e.Key, e.Value = raw.Key, raw.Value
+	if decoder.More() {
+		return errors.New("columnar: typed map entry has trailing data")
+	}
+	if raw.Key == nil || raw.Value == nil {
+		return errors.New("columnar: typed map entry needs key and value")
+	}
+	e.Key, e.Value = *raw.Key, *raw.Value
 	return nil
 }
 
 // metadataTypedValueCanonical is the semantic identity of one typed value. It
 // uses type tags, length-delimited components, array order, sorted map entries
-// and exact double bits, so equality never depends on JSON map iteration order.
+// and exact double bits, so equality never depends on JSON map iteration order,
+// construction order or decoding order. Invalid values are represented
+// defensively and never panic.
 func metadataTypedValueCanonical(v metadataTypedValue) string {
 	var builder []byte
 	appendPart := func(part string) {
@@ -252,41 +505,61 @@ func metadataTypedValueCanonical(v metadataTypedValue) string {
 		builder = append(builder, part...)
 	}
 	appendPart(v.state)
-	if v.state != "present" {
-		if v.reason != nil {
-			appendPart(*v.reason)
-		}
-		if v.assertions != nil {
-			appendPart(strconv.Itoa(len(v.assertions)))
-			for _, assertion := range v.assertions {
-				appendPart(metadataTypedValueCanonical(assertion))
+	switch v.state {
+	case "present":
+		appendPart(v.typ)
+		switch v.typ {
+		case "string":
+			appendPart(metadataStringPointer(v.str))
+		case "boolean":
+			if v.boolean == nil {
+				appendPart("<nil>")
+			} else {
+				appendPart(strconv.FormatBool(*v.boolean))
+			}
+		case "integer":
+			appendPart(metadataStringPointer(v.decimal))
+		case "double":
+			appendPart(metadataStringPointer(v.bits))
+		case "array":
+			appendPart(strconv.Itoa(len(v.items)))
+			for _, item := range v.items {
+				appendPart(metadataTypedValueCanonical(item))
+			}
+		case "map":
+			entries := slices.Clone(v.entries)
+			slices.SortFunc(entries, func(a, b metadataTypedMapEntry) int {
+				return strings.Compare(a.Key, b.Key)
+			})
+			appendPart(strconv.Itoa(len(entries)))
+			for _, entry := range entries {
+				appendPart(entry.Key)
+				appendPart(metadataTypedValueCanonical(entry.Value))
 			}
 		}
-		return string(builder)
-	}
-	appendPart(v.typ)
-	switch v.typ {
-	case "string":
-		appendPart(*v.str)
-	case "boolean":
-		appendPart(strconv.FormatBool(*v.boolean))
-	case "integer":
-		appendPart(*v.decimal)
-	case "double":
-		appendPart(*v.bits)
-	case "array":
-		appendPart(strconv.Itoa(len(v.items)))
-		for _, item := range v.items {
-			appendPart(metadataTypedValueCanonical(item))
+	case "unknown":
+		appendPart(metadataStringPointer(v.reason))
+	case "ambiguous":
+		values := make([]string, 0, len(v.assertions))
+		for _, assertion := range v.assertions {
+			values = append(values, metadataTypedValueCanonical(assertion))
 		}
-	case "map":
-		appendPart(strconv.Itoa(len(v.entries)))
-		for _, entry := range v.entries {
-			appendPart(entry.Key)
-			appendPart(metadataTypedValueCanonical(entry.Value))
+		slices.Sort(values)
+		values = slices.Compact(values)
+		appendPart(strconv.Itoa(len(values)))
+		for _, value := range values {
+			appendPart(value)
 		}
 	}
 	return string(builder)
+}
+
+// metadataStringPointer renders a required pointer defensively.
+func metadataStringPointer(value *string) string {
+	if value == nil {
+		return "<nil>"
+	}
+	return *value
 }
 
 // metadataTypedValueDisplayKey is the deterministic display order for typed
@@ -298,13 +571,16 @@ func metadataTypedValueDisplayKey(v metadataTypedValue) string {
 	}
 	switch v.typ {
 	case "string":
-		return "present\x00string\x00" + *v.str
+		return "present\x00string\x00" + metadataStringPointer(v.str)
 	case "boolean":
+		if v.boolean == nil {
+			return "present\x00boolean\x00<nil>"
+		}
 		return "present\x00boolean\x00" + strconv.FormatBool(*v.boolean)
 	case "integer":
-		return "present\x00integer\x00" + *v.decimal
+		return "present\x00integer\x00" + metadataStringPointer(v.decimal)
 	case "double":
-		return "present\x00double\x00" + *v.bits
+		return "present\x00double\x00" + metadataStringPointer(v.bits)
 	default:
 		return "present\x00" + v.typ + "\x00" + metadataTypedValueCanonical(v)
 	}

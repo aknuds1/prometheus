@@ -204,6 +204,9 @@ var contractDecisionSevenResolutionClauses = []struct {
 	{"cancel status", "204"},
 	{"cursor mismatch class", "metadata_cursor_query_mismatch"},
 	{"error data null", "data:null"},
+	{"match subject semantics", "match[] is a label matcher over metadata-associated subject series"},
+	{"successor exclusive", "successors remain exclusive at their effective time"},
+	{"zero sample reads", "zero sample-payload/segment/row/byte reads"},
 }
 
 // contractRequiredTargetCases pins accepted target behaviour that the incumbent

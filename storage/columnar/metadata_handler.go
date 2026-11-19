@@ -97,16 +97,9 @@ func (h *MetadataHandler) ownerPage(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	snapshot, rawAfter, err := h.pageSnapshot(r, query)
+	snapshot, after, err := metadataPageSnapshot[metadataOwnerPosition](h, r, query, validOwnerPosition)
 	if err != nil {
 		return nil, err
-	}
-	after, err := metadataAfterPosition[metadataOwnerPosition](rawAfter)
-	if err != nil {
-		return nil, err
-	}
-	if after != nil && !after.valid() {
-		return nil, metadataFailure(400, "metadata_cursor_corrupt", "next_token has an invalid owner position")
 	}
 	rows, next, annotations, err := snapshot.ownerPage(r.Context(), query, after)
 	if err != nil {
@@ -126,16 +119,9 @@ func (h *MetadataHandler) discoveryPage(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	snapshot, rawAfter, err := h.pageSnapshot(r, query)
+	snapshot, after, err := metadataPageSnapshot[metadataDiscoveryPosition](h, r, query, validDiscoveryPosition)
 	if err != nil {
 		return nil, err
-	}
-	after, err := metadataAfterPosition[metadataDiscoveryPosition](rawAfter)
-	if err != nil {
-		return nil, err
-	}
-	if after != nil && !after.valid() {
-		return nil, metadataFailure(400, "metadata_cursor_corrupt", "next_token has an invalid discovery position")
 	}
 	rows, next, annotations, err := snapshot.discoveryPage(r.Context(), query, after)
 	if err != nil {
@@ -170,16 +156,9 @@ func (h *MetadataHandler) series(r *http.Request) (any, error) {
 }
 
 func (h *MetadataHandler) fullSeriesPage(r *http.Request, query metadataHTTPQuery) (any, error) {
-	snapshot, rawAfter, err := h.pageSnapshot(r, query)
+	snapshot, after, err := metadataPageSnapshot[metadataSeriesPosition](h, r, query, validSeriesPosition)
 	if err != nil {
 		return nil, err
-	}
-	after, err := metadataAfterPosition[metadataSeriesPosition](rawAfter)
-	if err != nil {
-		return nil, err
-	}
-	if after != nil && !after.valid() {
-		return nil, metadataFailure(400, "metadata_cursor_corrupt", "next_token has an invalid series position")
 	}
 	rows, next, annotations, err := snapshot.seriesPage(r.Context(), query, after)
 	if err != nil {
@@ -195,16 +174,9 @@ func (h *MetadataHandler) fullSeriesPage(r *http.Request, query metadataHTTPQuer
 }
 
 func (h *MetadataHandler) combinedSeriesPage(r *http.Request, query metadataHTTPQuery) (any, error) {
-	snapshot, rawAfter, err := h.pageSnapshot(r, query)
+	snapshot, after, err := metadataPageSnapshot[metadataGroupPosition](h, r, query, validGroupPosition)
 	if err != nil {
 		return nil, err
-	}
-	after, err := metadataAfterPosition[metadataGroupPosition](rawAfter)
-	if err != nil {
-		return nil, err
-	}
-	if after != nil && !after.valid() {
-		return nil, metadataFailure(400, "metadata_cursor_corrupt", "next_token has an invalid combined position")
 	}
 	rows, next, annotations, err := snapshot.combinedPage(r.Context(), query, after)
 	if err != nil {
@@ -274,16 +246,9 @@ func (h *MetadataHandler) diff(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	snapshot, rawAfter, err := h.pageSnapshot(r, query)
+	snapshot, after, err := metadataPageSnapshot[metadataDiffPosition](h, r, query, validDiffPosition)
 	if err != nil {
 		return nil, err
-	}
-	after, err := metadataAfterPosition[metadataDiffPosition](rawAfter)
-	if err != nil {
-		return nil, err
-	}
-	if after != nil && !after.valid() {
-		return nil, metadataFailure(400, "metadata_cursor_corrupt", "next_token has an invalid diff position")
 	}
 	rows, next, annotations, err := snapshot.diffPage(r.Context(), query, after)
 	if err != nil {
@@ -298,9 +263,10 @@ func (h *MetadataHandler) diff(r *http.Request) (any, error) {
 	}, nil
 }
 
-// pageSnapshot returns the pinned snapshot for a first page or the snapshot a
-// cursor was issued for. Only the limit may change between pages.
-func (h *MetadataHandler) pageSnapshot(r *http.Request, query metadataHTTPQuery) (*metadataSnapshot, json.RawMessage, error) {
+// metadataPageSnapshot returns the pinned snapshot for a first page or the
+// typed after-position of the snapshot a cursor was issued for. Only the limit
+// may change between pages.
+func metadataPageSnapshot[T any](h *MetadataHandler, r *http.Request, query metadataHTTPQuery, valid func(*T) bool) (*metadataSnapshot, *T, error) {
 	raw, present, err := singleMetadataParameter(r.URL.Query(), "next_token")
 	if err != nil {
 		return nil, nil, err
@@ -312,7 +278,27 @@ func (h *MetadataHandler) pageSnapshot(r *http.Request, query metadataHTTPQuery)
 	if raw == "" {
 		return nil, nil, metadataFailure(400, "metadata_cursor_malformed", "next_token must not be empty")
 	}
-	return h.storage.decodeMetadataCursor(raw, query.binding())
+	return decodeMetadataCursor(h.storage, raw, query.binding(), valid)
+}
+
+func validOwnerPosition(position *metadataOwnerPosition) bool {
+	return position != nil && position.valid()
+}
+
+func validDiscoveryPosition(position *metadataDiscoveryPosition) bool {
+	return position != nil && position.valid()
+}
+
+func validSeriesPosition(position *metadataSeriesPosition) bool {
+	return position != nil && position.valid()
+}
+
+func validGroupPosition(position *metadataGroupPosition) bool {
+	return position != nil && position.valid()
+}
+
+func validDiffPosition(position *metadataDiffPosition) bool {
+	return position != nil && position.valid()
 }
 
 func (h *MetadataHandler) nextToken(snapshot *metadataSnapshot, query metadataHTTPQuery, next any) (*string, error) {
@@ -324,19 +310,6 @@ func (h *MetadataHandler) nextToken(snapshot *metadataSnapshot, query metadataHT
 		return nil, err
 	}
 	return &token, nil
-}
-
-// metadataAfterPosition decodes a cursor after-position or returns nil for a
-// first page.
-func metadataAfterPosition[T any](raw json.RawMessage) (*T, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
-	var value T
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, metadataFailure(400, "metadata_cursor_corrupt", "next_token position cannot be decoded")
-	}
-	return &value, nil
 }
 
 func (h *MetadataHandler) cancelSnapshot(w http.ResponseWriter, r *http.Request) {

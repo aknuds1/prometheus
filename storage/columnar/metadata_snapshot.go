@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"sync"
 
 	"github.com/prometheus/prometheus/model/labels"
 )
@@ -45,9 +46,12 @@ type metadataSnapshotRegistry struct {
 
 // metadataSnapshot is one pinned local metadata read snapshot.
 type metadataSnapshot struct {
-	id      string
+	id    string
+	reads *readStats
+
+	mu      sync.Mutex
 	catalog *metadataStore
-	reads   *readStats
+	readers int
 	// canceled, reclaimed and expired are explicit lifecycle states. No
 	// production code sets expired until decision 9 selects a TTL; the class is
 	// still defined so a future policy and its callers cannot misreport it.
@@ -57,13 +61,122 @@ type metadataSnapshot struct {
 	expired         bool
 }
 
+// metadataSnapshotPageHook is an unexported test seam used to hold a page
+// between admission and completion while cancellation is exercised.
+var metadataSnapshotPageHook func(*metadataSnapshot)
+
+// metadataSnapshotRandomRead is the internal randomness seam. Production uses
+// crypto/rand; in-package cursor oracles replace it with a deterministic stream
+// so expected token bytes can be computed independently without an exported
+// option or a persisted format.
+var metadataSnapshotRandomRead = rand.Read
+
+// beginRead admits one page and returns the immutable catalog it may read. No
+// new page begins after cancellation, expiry or reclamation; an already admitted
+// page keeps its catalog until endRead.
+func (s *metadataSnapshot) beginRead() (*metadataStore, error) {
+	s.mu.Lock()
+	if err := s.stateErrorLocked(); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	if s.catalog == nil {
+		s.mu.Unlock()
+		return nil, metadataFailure(410, "metadata_snapshot_state_unavailable",
+			fmt.Sprintf("metadata snapshot %q has no readable state", s.id))
+	}
+	s.readers++
+	catalog := s.catalog
+	s.mu.Unlock()
+	if hook := metadataSnapshotPageHook; hook != nil {
+		hook(s)
+	}
+	return catalog, nil
+}
+
+// endRead releases one admitted page. The cloned catalog becomes collectable
+// once the last admitted reader finishes a terminal snapshot.
+func (s *metadataSnapshot) endRead() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readers--
+	if s.readers == 0 && (s.canceled || s.reclaimed || s.expired) {
+		s.catalog = nil
+	}
+}
+
+// stateError returns the terminal lifecycle error of this snapshot.
+func (s *metadataSnapshot) stateError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stateErrorLocked()
+}
+
+func (s *metadataSnapshot) stateErrorLocked() error {
+	switch {
+	case s.expired:
+		return metadataFailure(410, "metadata_snapshot_expired",
+			fmt.Sprintf("metadata snapshot %q expired", s.id))
+	case s.reclaimed:
+		return metadataFailure(410, "metadata_snapshot_reclaimed",
+			fmt.Sprintf("metadata snapshot %q was reclaimed: %s", s.id, s.reclaimedReason),
+			"reason", s.reclaimedReason)
+	case s.canceled:
+		return metadataFailure(410, "metadata_snapshot_canceled",
+			fmt.Sprintf("metadata snapshot %q was canceled", s.id))
+	}
+	return nil
+}
+
+// cancel releases the cloned catalog when no reader is active while retaining
+// the lifecycle state needed for repeated cancellation and continuations.
+func (s *metadataSnapshot) cancel() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.expired:
+		return metadataFailure(410, "metadata_snapshot_expired",
+			fmt.Sprintf("metadata snapshot %q expired", s.id))
+	case s.reclaimed:
+		return metadataFailure(410, "metadata_snapshot_reclaimed",
+			fmt.Sprintf("metadata snapshot %q was reclaimed: %s", s.id, s.reclaimedReason),
+			"reason", s.reclaimedReason)
+	case s.canceled:
+		return nil
+	}
+	s.canceled = true
+	if s.readers == 0 {
+		s.catalog = nil
+	}
+	return nil
+}
+
+func (s *metadataSnapshot) reclaim(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reclaimed = true
+	s.reclaimedReason = reason
+	if s.readers == 0 {
+		s.catalog = nil
+	}
+}
+
+func (s *metadataSnapshot) expire() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expired = true
+	if s.readers == 0 {
+		s.catalog = nil
+	}
+}
+
 func newMetadataSnapshotRegistry() (*metadataSnapshotRegistry, error) {
 	incarnation, err := randomToken(16)
 	if err != nil {
 		return nil, err
 	}
 	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
+	if _, err := metadataSnapshotRandomRead(key); err != nil {
 		return nil, fmt.Errorf("columnar: metadata cursor key: %w", err)
 	}
 	return &metadataSnapshotRegistry{
@@ -74,14 +187,16 @@ func newMetadataSnapshotRegistry() (*metadataSnapshotRegistry, error) {
 // randomToken returns an opaque base64url token from n random bytes.
 func randomToken(n int) (string, error) {
 	raw := make([]byte, n)
-	if _, err := rand.Read(raw); err != nil {
+	if _, err := metadataSnapshotRandomRead(raw); err != nil {
 		return "", fmt.Errorf("columnar: random token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 // pinMetadataSnapshot publishes one local snapshot of the committed catalog.
-// The caller must not hold s.mtx.
+// The caller must not hold s.mtx. Terminal snapshots remain registered until
+// explicit cancellation/reclamation or a future decision-9 retention policy;
+// no TTL or automatic final-page reclamation is selected here.
 func (s *Storage) pinMetadataSnapshot() (*metadataSnapshot, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -160,26 +275,17 @@ func (s *metadataStore) cloneForSnapshot() *metadataStore {
 // respective classes.
 func (s *Storage) cancelMetadataSnapshot(id string) error {
 	s.mtx.Lock()
-	defer s.mtx.Unlock()
 	registry := s.metadataSnapshots
 	if registry == nil {
+		s.mtx.Unlock()
 		return metadataFailure(500, "metadata_internal", "metadata snapshot registry is unavailable")
 	}
 	snapshot, ok := registry.snapshots[id]
+	s.mtx.Unlock()
 	if !ok {
 		return metadataFailure(404, "metadata_snapshot_unknown", fmt.Sprintf("metadata snapshot %q is unknown", id))
 	}
-	switch {
-	case snapshot.expired:
-		return metadataFailure(410, "metadata_snapshot_expired", fmt.Sprintf("metadata snapshot %q expired", id))
-	case snapshot.reclaimed:
-		return metadataFailure(410, "metadata_snapshot_reclaimed", fmt.Sprintf("metadata snapshot %q was reclaimed: %s", id, snapshot.reclaimedReason))
-	case snapshot.canceled:
-		return nil
-	default:
-		snapshot.canceled = true
-		return nil
-	}
+	return snapshot.cancel()
 }
 
 // reclaimMetadataSnapshot explicitly invalidates a snapshot, for a future
@@ -188,10 +294,23 @@ func (s *Storage) cancelMetadataSnapshot(id string) error {
 // clone, and no retention budget is selected by decision 7.
 func (s *Storage) reclaimMetadataSnapshot(id, reason string) {
 	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	if snapshot, ok := s.metadataSnapshots.snapshots[id]; ok {
-		snapshot.reclaimed = true
-		snapshot.reclaimedReason = reason
+	snapshot, ok := s.metadataSnapshots.snapshots[id]
+	s.mtx.Unlock()
+	if ok {
+		snapshot.reclaim(reason)
+	}
+}
+
+// releaseMetadataSnapshotForTesting removes the cloned catalog without changing
+// a lifecycle flag, so the state-unavailable class can be exercised.
+func (s *Storage) releaseMetadataSnapshotForTesting(id string) {
+	s.mtx.Lock()
+	snapshot, ok := s.metadataSnapshots.snapshots[id]
+	s.mtx.Unlock()
+	if ok {
+		snapshot.mu.Lock()
+		snapshot.catalog = nil
+		snapshot.mu.Unlock()
 	}
 }
 
@@ -199,9 +318,10 @@ func (s *Storage) reclaimMetadataSnapshot(id, reason string) {
 // TTL exists yet, so this hook is test-only and unexported.
 func (s *Storage) expireMetadataSnapshotForTesting(id string) {
 	s.mtx.Lock()
-	defer s.mtx.Unlock()
-	if snapshot, ok := s.metadataSnapshots.snapshots[id]; ok {
-		snapshot.expired = true
+	snapshot, ok := s.metadataSnapshots.snapshots[id]
+	s.mtx.Unlock()
+	if ok {
+		snapshot.expire()
 	}
 }
 
@@ -251,10 +371,14 @@ func (s *Storage) encodeMetadataCursor(snapshot *metadataSnapshot, binding strin
 	return base64.RawURLEncoding.EncodeToString(rawEnvelope), nil
 }
 
-// decodeMetadataCursor validates the cursor and returns its snapshot and raw
-// after-position. The binding must equal the current request's canonical query;
-// only the page limit may change between requests.
-func (s *Storage) decodeMetadataCursor(token, binding string) (*metadataSnapshot, json.RawMessage, error) {
+// decodeMetadataCursor validates a cursor in the documented deterministic
+// order: envelope, version, after-position, incarnation, integrity, query
+// binding, snapshot existence and snapshot lifecycle. The incarnation is
+// checked before the HMAC because a previous store incarnation's key is not
+// retained; a structurally valid token from any foreign incarnation therefore
+// receives metadata_snapshot_reclaimed/store_restarted without claiming that the
+// old signature was authenticated.
+func decodeMetadataCursor[T any](s *Storage, token, binding string, valid func(*T) bool) (*metadataSnapshot, *T, error) {
 	rawEnvelope, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
 		return nil, nil, metadataFailure(400, "metadata_cursor_malformed", "next_token is not base64url text")
@@ -270,13 +394,17 @@ func (s *Storage) decodeMetadataCursor(token, binding string) (*metadataSnapshot
 		return nil, nil, metadataFailure(400, "metadata_cursor_version_unsupported",
 			fmt.Sprintf("next_token uses unsupported cursor version %d", envelope.Version))
 	}
+	if len(envelope.Position) == 0 || string(envelope.Position) == "null" {
+		return nil, nil, metadataFailure(400, "metadata_cursor_corrupt", "next_token has no after-position")
+	}
+	var position T
+	if err := json.Unmarshal(envelope.Position, &position); err != nil || valid == nil || !valid(&position) {
+		return nil, nil, metadataFailure(400, "metadata_cursor_corrupt", "next_token has a malformed after-position")
+	}
 	registry := s.metadataSnapshots
 	if registry == nil {
 		return nil, nil, metadataFailure(500, "metadata_internal", "metadata snapshot registry is unavailable")
 	}
-	// The incarnation is not secret and is checked before the signature so a token
-	// from a previous store incarnation reports store_restarted even though that
-	// process's integrity key is gone.
 	if envelope.Incarnation != registry.incarnation {
 		return nil, nil, metadataFailure(410, "metadata_snapshot_reclaimed",
 			"metadata snapshot was reclaimed: store_restarted", "reason", "store_restarted")
@@ -295,32 +423,24 @@ func (s *Storage) decodeMetadataCursor(token, binding string) (*metadataSnapshot
 		return nil, nil, metadataFailure(400, "metadata_cursor_query_mismatch",
 			"next_token was issued for a different metadata query")
 	}
-	if len(envelope.Position) == 0 || string(envelope.Position) == "null" {
-		return nil, nil, metadataFailure(400, "metadata_cursor_corrupt", "next_token has no after-position")
-	}
 	s.mtx.Lock()
-	defer s.mtx.Unlock()
 	snapshot, ok := registry.snapshots[envelope.Snapshot]
+	s.mtx.Unlock()
 	if !ok {
 		return nil, nil, metadataFailure(404, "metadata_snapshot_unknown",
 			fmt.Sprintf("metadata snapshot %q is unknown", envelope.Snapshot))
 	}
-	switch {
-	case snapshot.expired:
-		return nil, nil, metadataFailure(410, "metadata_snapshot_expired",
-			fmt.Sprintf("metadata snapshot %q expired", snapshot.id))
-	case snapshot.reclaimed:
-		return nil, nil, metadataFailure(410, "metadata_snapshot_reclaimed",
-			fmt.Sprintf("metadata snapshot %q was reclaimed: %s", snapshot.id, snapshot.reclaimedReason),
-			"reason", snapshot.reclaimedReason)
-	case snapshot.canceled:
-		return nil, nil, metadataFailure(410, "metadata_snapshot_canceled",
-			fmt.Sprintf("metadata snapshot %q was canceled", snapshot.id))
-	case snapshot.catalog == nil:
-		return nil, nil, metadataFailure(410, "metadata_snapshot_state_unavailable",
-			fmt.Sprintf("metadata snapshot %q has no readable state", snapshot.id))
+	if err := snapshot.stateError(); err != nil {
+		return nil, nil, err
 	}
-	return snapshot, envelope.Position, nil
+	snapshot.mu.Lock()
+	unavailable := snapshot.catalog == nil
+	snapshot.mu.Unlock()
+	if unavailable {
+		return nil, nil, metadataFailure(410, "metadata_snapshot_state_unavailable",
+			fmt.Sprintf("metadata snapshot %q has no readable state", envelope.Snapshot))
+	}
+	return snapshot, &position, nil
 }
 
 // valid reports whether an owner position names a complete owner identity.

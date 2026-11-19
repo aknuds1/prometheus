@@ -367,12 +367,6 @@
               {
                 "axis": "coverage",
                 "category": "coverage",
-                "earliest_retained_ms": "2000",
-                "interval": {
-                  "from_ms": "2000",
-                  "until_ms": null
-                },
-                "key": "history_truncated",
                 "owner": {
                   "identity": {
                     "attributes": [
@@ -407,6 +401,22 @@
                   "ref": "<ref>"
                 },
                 "reason": "history_truncated",
+                "requested": {
+                  "from_ms": "0",
+                  "until_ms": "3000"
+                },
+                "retained": {
+                  "earliest_retained_ms": "2000",
+                  "ranges": [
+                    {
+                      "from_ms": "2000",
+                      "until_ms": null
+                    }
+                  ],
+                  "reasons": [
+                    "history_truncated"
+                  ]
+                },
                 "scope": "owner_history",
                 "state": "truncated"
               }

@@ -762,7 +762,7 @@
       "decisions": [
         "7"
       ],
-      "note": "The fixtures drive /resources through httptest with the real handler, including explicit truncated coverage. Decision 7 (2026-11-19) makes the typed/state JSON, stable error classes, snapshot-pinned cursors and annotations contractual; the handler tests assert that surface, while the fixtures keep exercising the same logical owner histories."
+      "note": "The fixtures drive /resources through httptest with the real handler, including explicit truncated coverage. Decision 7 (2026-11-19) makes the typed/state JSON, stable error classes, snapshot-pinned cursors and annotations contractual; the handler tests assert that surface. match[] subject semantics were separately accepted as option B on 2026-11-19 and are covered by the independent match oracle. Resource identity remains the current service.* compatibility form with empty fallback values reported unknown."
     },
     {
       "id": "route-promql-info",
@@ -880,7 +880,7 @@
         "1",
         "4"
       ],
-      "note": "Decision 1 is decided, so this is no longer semantically blocked, and decision 4 (2026-11-15) also requires supplied Kubernetes UIDs - k8s.pod.uid, pod UID plus container name, runtime container.id and node/workload UIDs - to be authoritative and malformed or duplicate same-type EntityRefs to reject atomically on the acquisition path. The incumbent still stores only the fixed service.name/service.namespace/service.instance.id compatibility identity, ignores EntityRefs, cannot distinguish an absent fallback attribute from an explicitly empty one, and has no malformed/duplicate same-type EntityRef rejection. resource_identity_fallback executes the representable compatibility cases and records the unimplemented identity clauses as target cases; kubernetes_collection_identity_and_reconciliation records k8s-authoritative-uid-identity and k8s-entityref-atomic-rejection, whose executable owners differ only by an explicit service.instance.id value that is not Entity evidence."
+      "note": "Decision 1 is decided, so this is no longer semantically blocked, and decision 4 (2026-11-15) also requires supplied Kubernetes UIDs - k8s.pod.uid, pod UID plus container name, runtime container.id and node/workload UIDs - to be authoritative and malformed or duplicate same-type EntityRefs to reject atomically on the acquisition path. The incumbent still stores only the fixed service.name/service.namespace/service.instance.id compatibility identity, ignores EntityRefs, cannot distinguish an absent fallback attribute from an explicitly empty one, and has no malformed/duplicate same-type EntityRef rejection. resource_identity_fallback executes the representable compatibility cases and records the unimplemented identity clauses as target cases; kubernetes_collection_identity_and_reconciliation records k8s-authoritative-uid-identity and k8s-entityref-atomic-rejection, whose executable owners differ only by an explicit service.instance.id value that is not Entity evidence. The decision-7 HTTP identity reports an empty service.name/service.namespace/service.instance.id compatibility value as unknown with reason compatibility_identity_absent_empty_unrecoverable; it does not claim that absent-versus-present-empty was repaired. No EntityRef is parsed, synthesized or persisted here."
     },
     {
       "id": "gap-source-provenance",
@@ -987,7 +987,7 @@
       "decisions": [
         "4"
       ],
-      "note": "Decision 4 is decided (2026-11-15) and retained as provenance, so this is an implementation gap. Decision 4 preserves original logical Resources and independent assertions and allows a combined context view only where authoritative typed Entity evidence establishes the relation: no metric stream merge, no rewritten stored Resource identity, no universal replacement attribute map, no newest-observation or arbitrary canonical winner, and a field missing from a partial description cannot clear another source's known content. The incumbent has no combined-view surface, no per-source provenance or completeness marker, no typed Entity content and no execution-level identity, so none of that can be executed; the executable separation cases in kubernetes_collection_identity_and_reconciliation show only that two explicit Resources are not merged. Machine-checked target cases k8s-combined-view-separate-assertions, k8s-partial-does-not-clear, k8s-runtime-execution-distinct and k8s-discovery-no-payload-reads keep the accepted behavior visible without binding it to an exact JSON shape."
+      "note": "Decision 4 is decided (2026-11-15) and retained as provenance, so this is an implementation gap. Decision 4 preserves original logical Resources and independent assertions and allows a combined context view only where authoritative typed Entity evidence establishes the relation: no metric stream merge, no rewritten stored Resource identity, no universal replacement attribute map, no newest-observation or arbitrary canonical winner, and a field missing from a partial description cannot clear another source's known content. The incumbent has no combined-view surface, no per-source provenance or completeness marker, no typed Entity content and no execution-level identity, so none of that can be executed; the executable separation cases in kubernetes_collection_identity_and_reconciliation show only that two explicit Resources are not merged. Machine-checked target cases k8s-combined-view-separate-assertions, k8s-partial-does-not-clear, k8s-runtime-execution-distinct and k8s-discovery-no-payload-reads keep the accepted behavior visible without binding it to an exact JSON shape. The decision-7 view=combined remains a local per-series component projection: it preserves original Resource components, schema context and opaque Source assertions, emits no relations, and reports a group with no Resource component as coverage unknown/reason no_resource_component with an uncertainty annotation. It is not evidence for authoritative Entity grouping, cross-series reconciliation or the Kubernetes combined view."
     },
     {
       "id": "gap-otap-native-samples",
@@ -1083,6 +1083,42 @@
         {
           "path": "storage/columnar/metadata_http_contract_test.go",
           "test": "TestMetadataSnapshotLifecycle"
+        },
+        {
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataSnapshotCancelDuringPage"
+        },
+        {
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataSnapshotSurvivesFlushCompactionAndRetention"
+        },
+        {
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataSnapshotMembershipTransition"
+        },
+        {
+          "path": "storage/columnar/metadata_http_contract_test.go",
+          "test": "TestMetadataSnapshotCursorCommutativeBinding"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPOracleOwnerHistory"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPOracleDiscoveryPagination"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPOracleSeriesPagination"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPOracleDiffPagination"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPOracleCombinedPagination"
         }
       ],
       "fixtures": [
@@ -1091,7 +1127,8 @@
       "decisions": [
         "7"
       ],
-      "note": "Decision 7 (2026-11-19) is implemented for the local experimental HTTP surface: a first page pins a deep-cloned committed metadata catalog, the opaque HMAC/versioned/query-bound cursor recovers a complete after-position, strict-after and lookahead rules produce exact-full/final/empty terminal pages, and cancellation, expiry, forced reclamation and store_restarted reclamation retain distinct classes. No TTL, byte budget or fanout/global snapshot is selected."
+      "note": "Decision 7 local HTTP snapshot isolation is implemented and accepted for that scoped surface: a first page pins a deep-cloned committed metadata catalog, the opaque HMAC/versioned/query-bound cursor recovers a complete after-position, strict-after and lookahead rules produce exact-full/final/empty terminal pages, cancellation/expiry/forced-reclamation/store_restarted retain distinct classes, and match[] subject semantics are now accepted as option B with independent full-result oracle evidence. This does not prove fanout/global snapshots, durable snapshot state, typed persistence, or complete temporal evidence. The incumbent still cannot retain an independent first association-observation bound; that remains the separate unsupported gap-association-observation-bounds, honestly reported as first_ms:null with unknown observation coverage. The exported store-level positional QueryMetadata* APIs remain separate experimental/noncontractual controls.",
+      "gaps": []
     },
     {
       "id": "gap-typed-http-values",
@@ -1116,10 +1153,65 @@
       "decisions": [
         "7"
       ],
-      "note": "Decision 7's tagged JSON value model is implemented and tested, including present string/boolean/integer/double-bits/array/map, null/absent/cleared/unknown/ambiguous, map-order equality and deterministic display, and the HTTP surface emits present strings plus explicit projection absents. Stored content remains string-only: non-string typed ingestion, typed null, clears and tombstones require a durable typed/tombstone format and remain gap-typed-content and the accepted target cases, not passing coverage.",
+      "note": "Decision 7's tagged JSON value model is implemented with strict state/type/payload validation, canonical signed-integer and exact-double-bit forms, map sorting independent of construction/decoding order, non-empty distinct ambiguity alternatives, and safe canonicalization. The HTTP surface emits present strings plus explicit projection absents. Stored content remains string-only: non-string typed ingestion, typed null, clears and tombstones require a durable typed/tombstone format and remain gap-typed-content and the accepted target cases, not passing coverage.",
       "gaps": [
         "gap-typed-content"
       ]
+    },
+    {
+      "id": "gap-http-match-subject-semantics",
+      "group": "capability-gap",
+      "title": "Product-owner choice for match[] subject semantics on owner history and point diff",
+      "status": "passing",
+      "evidence": [
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPMatchSubjectSemanticsAccepted"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPMatchOwnerHistoryB"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPMatchDiffB"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPMatchScopeBoundary"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPMatchOwnerOnlyPublication"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPMatchCommutativeBinding"
+        },
+        {
+          "path": "storage/columnar/metadata_http_oracle_test.go",
+          "test": "TestMetadataHTTPMatchPhysicalAndSamples"
+        }
+      ],
+      "fixtures": [],
+      "decisions": [
+        "7"
+      ],
+      "gaps": [],
+      "note": "Accepted option B by the user/product owner on 2026-11-19. Original question: on owner-history (/resources) and diff (/resources/diff), should match[] mean (A) series having matching retained samples in the requested range / at the diff time, using labels/index/catalog evidence without opening sample payloads, or (B) metadata-associated subject series regardless of retained sample presence? The owner accepted B. This was a product decision, not an inference from the provisional bySeries behavior. Owner-history match[] selects owners with a requested-kind association overlapping the query range; diff match[] selects owners with a requested-kind association applicable exactly at time (successors exclusive). Metadata-only associations match; owner-only publications and Resource-reference labels without a membership row do not. Full-result oracle evidence covers sample-backed, out-of-range-sample, metadata-only, owner-only, label-only, wrong-kind, out-of-range membership, exact boundary, OR-of-AND matcher order, cursor binding, full envelopes, exact tokens, and zero sample-payload/segment/row/byte reads."
+    },
+    {
+      "id": "gap-association-observation-bounds",
+      "group": "capability-gap",
+      "title": "Independent first association-observation bound",
+      "status": "unsupported",
+      "evidence": [],
+      "fixtures": [],
+      "decisions": [
+        "7"
+      ],
+      "gaps": [],
+      "note": "seriesMembershipRow stores effectiveFrom and observedUntil but no independent observed-from bound. The HTTP series response therefore reports observation.first_ms as null with unknown association observation coverage and reason first_observation_unrecorded instead of synthesizing an observation from membership validity. Preserving an actual first-observation bound requires a durable schema assignment; FormatVersion remains unchanged."
     },
     {
       "id": "gap-target-info-coexistence",

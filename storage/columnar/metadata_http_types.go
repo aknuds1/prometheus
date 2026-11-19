@@ -30,7 +30,12 @@ package columnar
 //   - identity: kind is required. attributes is used by resource, scope, scrape
 //     and source; labels by metric (complete ordered set); resource by
 //     resource_schema and references the complete Resource identity. The
-//     irrelevant member is omitted, never null.
+//     irrelevant member is omitted, never null. The current compatibility
+//     Resource identity cannot distinguish an absent fallback key from a
+//     present-empty one, so an empty service.name/service.namespace/
+//     service.instance.id value is reported as unknown with reason
+//     compatibility_identity_absent_empty_unrecoverable. Structured Entity
+//     identity remains target-only.
 //   - content: scope and entries are required; entries is non-null and holds
 //     exactly one state per materialized key. Omitted keys were not requested.
 //   - validity: from_ms is a required decimal string; until_ms is required and
@@ -347,12 +352,27 @@ func metadataHTTPIdentityFor(owner OwnerKey) metadataHTTPIdentity {
 		keys := slices.Sorted(maps.Keys(attributes))
 		identity.Attributes = make([]metadataHTTPEntry, 0, len(keys))
 		for _, key := range keys {
+			if owner.Kind == MetadataResource && attributes[key] == "" && metadataCompatibilityIdentityKey(key) {
+				// The compatibility owner key always carries the three fallback
+				// keys and cannot distinguish absent from present-empty. An empty
+				// value is therefore unknown, not proven present-empty.
+				identity.Attributes = append(identity.Attributes, metadataHTTPEntry{
+					Key: key, Value: metadataUnknownValue("compatibility_identity_absent_empty_unrecoverable"),
+				})
+				continue
+			}
 			identity.Attributes = append(identity.Attributes, metadataHTTPEntry{
 				Key: key, Value: metadataPresentString(attributes[key]),
 			})
 		}
 	}
 	return identity
+}
+
+// metadataCompatibilityIdentityKey reports whether key participates in the
+// current-phase service.* Resource compatibility identity.
+func metadataCompatibilityIdentityKey(key string) bool {
+	return key == "service.name" || key == "service.namespace" || key == "service.instance.id"
 }
 
 // metadataHTTPOwnerFor renders one complete owner identity.
@@ -402,26 +422,58 @@ func metadataHTTPContentAssertion(attributes map[string]string, projection []str
 	return metadataHTTPContent{Scope: "complete_authoritative", Entries: metadataHTTPContentEntries(attributes, projection)}
 }
 
-// metadataHTTPOwnerCoverage describes retained owner-history evidence.
-func metadataHTTPOwnerCoverage(history *metadataOwnerHistory) metadataHTTPCoverage {
-	if history != nil && history.truncated && len(history.versions) > 0 {
-		earliest := formatMetadataMilliseconds(history.versions[0].EffectiveFrom)
-		return metadataHTTPCoverage{
-			State: "truncated", Scope: "owner_history", EarliestRetainedMS: &earliest,
-			Ranges:  []metadataHTTPRange{{FromMS: earliest, UntilMS: nil}},
-			Reasons: []string{"history_truncated"},
-		}
-	}
+// metadataHTTPCoveredCoverage is a covered answer for one coverage scope.
+func metadataHTTPCoveredCoverage(scope string) metadataHTTPCoverage {
 	return metadataHTTPCoverage{
-		State: "covered", Scope: "owner_history", Ranges: []metadataHTTPRange{}, Reasons: []string{},
+		State: "covered", Scope: scope, Ranges: []metadataHTTPRange{}, Reasons: []string{},
 	}
 }
 
-// metadataHTTPAssociationCoverage describes retained membership evidence.
-func metadataHTTPAssociationCoverage() metadataHTTPCoverage {
-	return metadataHTTPCoverage{
-		State: "covered", Scope: "series_association", Ranges: []metadataHTTPRange{}, Reasons: []string{},
+// metadataHTTPTruncatedCoverage is a truncated answer with retained bounds.
+func metadataHTTPTruncatedCoverage(scope string, earliest int64, reasons ...string) metadataHTTPCoverage {
+	rendered := formatMetadataMilliseconds(earliest)
+	if len(reasons) == 0 {
+		reasons = []string{"history_truncated"}
 	}
+	return metadataHTTPCoverage{
+		State: "truncated", Scope: scope, EarliestRetainedMS: &rendered,
+		Ranges:  []metadataHTTPRange{{FromMS: rendered, UntilMS: nil}},
+		Reasons: reasons,
+	}
+}
+
+// metadataHTTPUnknownCoverage is an unknown answer with no retained bound.
+func metadataHTTPUnknownCoverage(scope string, reasons ...string) metadataHTTPCoverage {
+	if len(reasons) == 0 {
+		reasons = []string{"unknown"}
+	}
+	return metadataHTTPCoverage{
+		State: "unknown", Scope: scope, Ranges: []metadataHTTPRange{}, Reasons: reasons,
+	}
+}
+
+// metadataHTTPOwnerCoverage describes retained owner-history evidence relative
+// to the requested query start. A truncated history does not make a query that
+// begins inside the retained range non-covered.
+func metadataHTTPOwnerCoverage(history *metadataOwnerHistory, queryStart int64) metadataHTTPCoverage {
+	if history != nil && history.truncated && len(history.versions) > 0 && queryStart < history.versions[0].EffectiveFrom {
+		return metadataHTTPTruncatedCoverage("owner_history", history.versions[0].EffectiveFrom, "history_truncated")
+	}
+	return metadataHTTPCoveredCoverage("owner_history")
+}
+
+// metadataHTTPAssociationCoverage describes association applicability. The
+// incumbent records membership validity fully, so this is covered.
+func metadataHTTPAssociationCoverage() metadataHTTPCoverage {
+	return metadataHTTPCoveredCoverage("series_association")
+}
+
+// metadataHTTPAssociationObservationCoverage describes observation evidence for
+// an association. The incumbent stores effectiveFrom and observedUntil but no
+// independent first-observation bound, so the first bound is unknown rather than
+// synthesized from membership validity.
+func metadataHTTPAssociationObservationCoverage() metadataHTTPCoverage {
+	return metadataHTTPUnknownCoverage("series_association", "first_observation_unrecorded")
 }
 
 // metadataHTTPSourceAttribution states that the incumbent records no trusted
@@ -430,8 +482,9 @@ func metadataHTTPSourceAttribution() map[string]any {
 	return map[string]any{"state": "unknown", "reason": "provenance_not_recorded"}
 }
 
-// metadataHTTPAssertionFor renders one owner version.
-func metadataHTTPAssertionFor(version Version, validUntil *int64, owners *metadataOwnerHistory, projection []string) metadataHTTPAssertion {
+// metadataHTTPAssertionFor renders one owner version. queryStart scopes content
+// coverage to the requested answer rather than the whole retained history.
+func metadataHTTPAssertionFor(version Version, validUntil *int64, owners *metadataOwnerHistory, projection []string, queryStart int64) metadataHTTPAssertion {
 	first := formatMetadataMilliseconds(version.ObservedFrom)
 	last := formatMetadataMilliseconds(version.ObservedUntil)
 	return metadataHTTPAssertion{
@@ -440,29 +493,81 @@ func metadataHTTPAssertionFor(version Version, validUntil *int64, owners *metada
 		Observation: metadataHTTPObservation{
 			FirstMS: &first, LastMS: &last,
 		},
-		Coverage: metadataHTTPOwnerCoverage(owners),
+		Coverage: metadataHTTPOwnerCoverage(owners, queryStart),
 		Source:   metadataHTTPSourceAttribution(),
 	}
 }
 
-// metadataHTTPTruncatedAnnotation records one non-covered answer. Ordinary
-// absent, cleared, unassociated, terminated and lossless-coalesced results need
-// no uncertainty annotation.
-func metadataHTTPTruncatedAnnotation(owner *OwnerKey, series labels.Labels, scope string, earliest int64) map[string]any {
+// metadataHTTPAnnotationParams is one uncertainty annotation. Key-specific
+// answers set Category and Key; object-level answers set Owner and/or Series.
+type metadataHTTPAnnotationParams struct {
+	Scope       string
+	State       string
+	Reason      string
+	Category    string
+	Key         string
+	Owner       *OwnerKey
+	Series      labels.Labels
+	Validity    *metadataHTTPValidity
+	Observation *metadataHTTPObservation
+	Query       metadataHTTPQuery
+	Earliest    *int64
+	Ranges      []metadataHTTPRange
+	Reasons     []string
+}
+
+// metadataHTTPAnnotation builds one structured uncertainty annotation. The
+// requested interval/instant is separate from the retained coverage bounds.
+func metadataHTTPAnnotation(params metadataHTTPAnnotationParams) map[string]any {
+	category := params.Category
+	if category == "" {
+		category = "coverage"
+	}
 	annotation := map[string]any{
-		"category": "coverage", "key": "history_truncated", "axis": "coverage",
-		"state": "truncated", "scope": scope, "reason": "history_truncated",
-		"earliest_retained_ms": formatMetadataMilliseconds(earliest),
-		"interval": map[string]any{
-			"from_ms": formatMetadataMilliseconds(earliest), "until_ms": nil,
-		},
+		"category": category, "axis": "coverage", "scope": params.Scope, "state": params.State,
 	}
-	if owner != nil {
-		annotation["owner"] = metadataHTTPOwnerFor(*owner)
+	if params.Key != "" {
+		annotation["key"] = params.Key
+		annotation["attribute"] = map[string]any{"category": category, "key": params.Key}
 	}
-	if series.Len() > 0 {
-		annotation["series"] = metadataHTTPLabels(series)
+	if params.Reason != "" {
+		annotation["reason"] = params.Reason
 	}
+	if params.Owner != nil {
+		annotation["owner"] = metadataHTTPOwnerFor(*params.Owner)
+	}
+	if params.Series.Len() > 0 {
+		annotation["series"] = metadataHTTPLabels(params.Series)
+	}
+	if params.Validity != nil {
+		annotation["association"] = map[string]any{"validity": *params.Validity}
+	}
+	if params.Observation != nil {
+		annotation["observation"] = *params.Observation
+	}
+	if params.Query.operation == metadataHTTPDiff {
+		annotation["requested"] = map[string]any{"time_ms": formatMetadataMilliseconds(params.Query.time)}
+	} else {
+		annotation["requested"] = map[string]any{
+			"from_ms":  formatMetadataMilliseconds(params.Query.start),
+			"until_ms": formatMetadataMilliseconds(params.Query.end),
+		}
+	}
+	retained := map[string]any{"earliest_retained_ms": nil}
+	if params.Earliest != nil {
+		retained["earliest_retained_ms"] = formatMetadataMilliseconds(*params.Earliest)
+	}
+	ranges := params.Ranges
+	if ranges == nil {
+		ranges = []metadataHTTPRange{}
+	}
+	reasons := params.Reasons
+	if reasons == nil {
+		reasons = []string{}
+	}
+	retained["ranges"] = ranges
+	retained["reasons"] = reasons
+	annotation["retained"] = retained
 	return annotation
 }
 
@@ -472,4 +577,60 @@ func requireNonNilAnnotations(annotations []map[string]any) []map[string]any {
 		return []map[string]any{}
 	}
 	return annotations
+}
+
+// metadataHTTPOwnerHistoryAnnotation returns a truncated owner-history
+// annotation only when the requested answer needs history before the earliest
+// retained version.
+func metadataHTTPOwnerHistoryAnnotation(owner *OwnerKey, series labels.Labels, scope string, query metadataHTTPQuery, history *metadataOwnerHistory) map[string]any {
+	if history == nil || !history.truncated || len(history.versions) == 0 {
+		return nil
+	}
+	if query.start >= history.versions[0].EffectiveFrom {
+		return nil
+	}
+	earliest := history.versions[0].EffectiveFrom
+	return metadataHTTPAnnotation(metadataHTTPAnnotationParams{
+		Scope: scope, State: "truncated", Reason: "history_truncated",
+		Owner: owner, Series: series, Query: query, Earliest: &earliest,
+		Ranges:  []metadataHTTPRange{{FromMS: formatMetadataMilliseconds(earliest), UntilMS: nil}},
+		Reasons: []string{"history_truncated"},
+	})
+}
+
+// metadataHTTPAssociationObservationAnnotation records that the first actual
+// observation bound of an association is not retained. Membership validity is
+// still known and is carried separately.
+func metadataHTTPAssociationObservationAnnotation(owner OwnerKey, series labels.Labels, validity metadataHTTPValidity, observedUntil int64, query metadataHTTPQuery) map[string]any {
+	last := formatMetadataMilliseconds(observedUntil)
+	return metadataHTTPAnnotation(metadataHTTPAnnotationParams{
+		Scope: "series_association", State: "unknown", Reason: "first_observation_unrecorded",
+		Owner: &owner, Series: series, Validity: &validity,
+		Observation: &metadataHTTPObservation{FirstMS: nil, LastMS: &last},
+		Query:       query, Reasons: []string{"first_observation_unrecorded"},
+	})
+}
+
+// metadataHTTPLostPredecessorAnnotation records that the immediate predecessor
+// of a diff endpoint was discarded by retention.
+func metadataHTTPLostPredecessorAnnotation(owner OwnerKey, query metadataHTTPQuery, history *metadataOwnerHistory) map[string]any {
+	if history == nil || !history.truncated || len(history.versions) == 0 {
+		return nil
+	}
+	earliest := history.versions[0].EffectiveFrom
+	return metadataHTTPAnnotation(metadataHTTPAnnotationParams{
+		Scope: "diff", State: "truncated", Reason: "lost_predecessor",
+		Owner: &owner, Query: query, Earliest: &earliest,
+		Ranges:  []metadataHTTPRange{{FromMS: formatMetadataMilliseconds(earliest), UntilMS: nil}},
+		Reasons: []string{"lost_predecessor", "history_truncated"},
+	})
+}
+
+// metadataHTTPMissingResourceAnnotation records that a combined group has no
+// original Resource component, so the group cannot claim covered context.
+func metadataHTTPMissingResourceAnnotation(series labels.Labels, query metadataHTTPQuery) map[string]any {
+	return metadataHTTPAnnotation(metadataHTTPAnnotationParams{
+		Scope: "combined", State: "unknown", Reason: "no_resource_component",
+		Series: series, Query: query, Reasons: []string{"no_resource_component"},
+	})
 }

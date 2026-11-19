@@ -462,7 +462,12 @@ func metadataHTTPPageLimit[T any](items []T, limit int, position func(T) any) ([
 
 // ownerPage renders one snapshot-pinned owner-history page.
 func (snap *metadataSnapshot) ownerPage(ctx context.Context, query metadataHTTPQuery, after *metadataOwnerPosition) ([]metadataHTTPOwnerRow, any, []map[string]any, error) {
-	owners := snap.matchingOwners(query)
+	catalog, err := snap.beginRead()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer snap.endRead()
+	owners := matchingOwners(catalog, query)
 	sortOwnerKeys(owners)
 	type candidate struct {
 		owner       OwnerKey
@@ -478,8 +483,8 @@ func (snap *metadataSnapshot) ownerPage(ctx context.Context, query metadataHTTPQ
 		if after != nil && compareMetadataOwnerPosition(position, *after) <= 0 {
 			continue
 		}
-		history := snap.catalog.byOwner[owner]
-		versions := snap.ownerAssertions(owner, query.start, query.end, query.projection, query.latest)
+		history := catalog.byOwner[owner]
+		versions := ownerAssertions(catalog, owner, query.start, query.end, query.projection, query.latest)
 		if len(versions) == 0 {
 			continue
 		}
@@ -487,8 +492,8 @@ func (snap *metadataSnapshot) ownerPage(ctx context.Context, query metadataHTTPQ
 			owner: owner,
 			row:   metadataHTTPOwnerRow{Owner: metadataHTTPOwnerFor(owner), Versions: versions},
 		}
-		if history != nil && history.truncated && len(history.versions) > 0 {
-			item.annotations = append(item.annotations, metadataHTTPTruncatedAnnotation(&owner, labels.EmptyLabels(), "owner_history", history.versions[0].EffectiveFrom))
+		if annotation := metadataHTTPOwnerHistoryAnnotation(&owner, labels.EmptyLabels(), "owner_history", query, history); annotation != nil {
+			item.annotations = append(item.annotations, annotation)
 		}
 		candidates = append(candidates, item)
 	}
@@ -512,10 +517,10 @@ func (snap *metadataSnapshot) ownerPage(ctx context.Context, query metadataHTTPQ
 
 // matchingOwners resolves the owner set without reading samples. Matchers are
 // evaluated on metadata-only series membership rows.
-func (snap *metadataSnapshot) matchingOwners(query metadataHTTPQuery) []OwnerKey {
+func matchingOwners(catalog *metadataStore, query metadataHTTPQuery) []OwnerKey {
 	if len(query.matchers) == 0 {
-		owners := make([]OwnerKey, 0, len(snap.catalog.byOwner))
-		for owner := range snap.catalog.byOwner {
+		owners := make([]OwnerKey, 0, len(catalog.byOwner))
+		for owner := range catalog.byOwner {
 			if owner.Kind == query.kind {
 				owners = append(owners, owner)
 			}
@@ -523,7 +528,7 @@ func (snap *metadataSnapshot) matchingOwners(query metadataHTTPQuery) []OwnerKey
 		return owners
 	}
 	matched := map[OwnerKey]struct{}{}
-	for _, kinds := range snap.catalog.bySeries {
+	for _, kinds := range catalog.bySeries {
 		rows := kinds[query.kind]
 		for i, row := range rows {
 			if !metadataPeriodOverlaps(row.effectiveFrom, nextMembershipFrom(rows, i), query.start, query.end) {
@@ -539,8 +544,8 @@ func (snap *metadataSnapshot) matchingOwners(query metadataHTTPQuery) []OwnerKey
 }
 
 // ownerAssertions renders the versions overlapping the query range.
-func (snap *metadataSnapshot) ownerAssertions(owner OwnerKey, start, end int64, projection []string, latest bool) []metadataHTTPAssertion {
-	history := snap.catalog.byOwner[owner]
+func ownerAssertions(catalog *metadataStore, owner OwnerKey, start, end int64, projection []string, latest bool) []metadataHTTPAssertion {
+	history := catalog.byOwner[owner]
 	if history == nil {
 		return nil
 	}
@@ -550,7 +555,7 @@ func (snap *metadataSnapshot) ownerAssertions(owner OwnerKey, start, end int64, 
 		if !metadataPeriodOverlaps(history.versions[i].EffectiveFrom, next, start, end) {
 			continue
 		}
-		assertions = append(assertions, metadataHTTPAssertionFor(history.versions[i], next, history, projection))
+		assertions = append(assertions, metadataHTTPAssertionFor(history.versions[i], next, history, projection, start))
 	}
 	if latest && len(assertions) > 1 {
 		assertions = assertions[len(assertions)-1:]
@@ -562,18 +567,23 @@ func (snap *metadataSnapshot) ownerAssertions(owner OwnerKey, start, end int64, 
 // the requested kind is reported as explicitly unassociated when no attribute
 // filter constrains it.
 func (snap *metadataSnapshot) seriesPage(ctx context.Context, query metadataHTTPQuery, after *metadataSeriesPosition) ([]metadataHTTPSeriesRow, any, []map[string]any, error) {
+	catalog, err := snap.beginRead()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer snap.endRead()
 	type candidate struct {
 		position    metadataSeriesPosition
 		row         metadataHTTPSeriesRow
 		annotations []map[string]any
 	}
-	refs := snap.seriesRefs()
+	refs := seriesRefs(catalog)
 	candidates := make([]candidate, 0, len(refs))
 	for _, ref := range refs {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, metadataFailure(500, "metadata_internal", err.Error())
 		}
-		rows := snap.catalog.bySeries[ref.hash][query.kind]
+		rows := catalog.bySeries[ref.hash][query.kind]
 		labelsKey := ref.ls.String()
 		if len(rows) == 0 {
 			if len(query.attributes) != 0 {
@@ -598,7 +608,7 @@ func (snap *metadataSnapshot) seriesPage(ctx context.Context, query metadataHTTP
 			})
 			continue
 		}
-		history := snap.catalog.byOwner
+		history := catalog.byOwner
 		for i, row := range rows {
 			if !metadataPeriodOverlaps(row.effectiveFrom, nextMembershipFrom(rows, i), query.start, query.end) {
 				continue
@@ -607,7 +617,7 @@ func (snap *metadataSnapshot) seriesPage(ctx context.Context, query metadataHTTP
 				continue
 			}
 			ownerHistory := history[row.owner]
-			versions := snap.seriesAssertions(row.owner, ownerHistory, i, rows, query)
+			versions := seriesAssertions(row.owner, ownerHistory, i, rows, query)
 			if len(versions) == 0 {
 				continue
 			}
@@ -623,7 +633,6 @@ func (snap *metadataSnapshot) seriesPage(ctx context.Context, query metadataHTTP
 				FromMS:  formatMetadataMilliseconds(row.effectiveFrom),
 				UntilMS: nullableMetadataMilliseconds(nextMembershipFrom(rows, i)),
 			}
-			first := formatMetadataMilliseconds(row.effectiveFrom)
 			last := formatMetadataMilliseconds(row.observedUntil)
 			item := candidate{
 				position: position,
@@ -631,14 +640,16 @@ func (snap *metadataSnapshot) seriesPage(ctx context.Context, query metadataHTTP
 					Series: metadataHTTPLabels(row.ls),
 					Association: metadataHTTPAssociation{
 						State: "applicable", Validity: &validity,
-						Observation: &metadataHTTPObservation{FirstMS: &first, LastMS: &last},
-						Coverage:    metadataHTTPAssociationCoverage(),
+						Observation: &metadataHTTPObservation{FirstMS: nil, LastMS: &last},
+						Coverage:    metadataHTTPAssociationObservationCoverage(),
 					},
 					Owner: &owner, Versions: versions,
 				},
 			}
-			if ownerHistory != nil && ownerHistory.truncated && len(ownerHistory.versions) > 0 {
-				item.annotations = append(item.annotations, metadataHTTPTruncatedAnnotation(&row.owner, row.ls, "series_association", ownerHistory.versions[0].EffectiveFrom))
+			item.annotations = append(item.annotations,
+				metadataHTTPAssociationObservationAnnotation(row.owner, row.ls, validity, row.observedUntil, query))
+			if annotation := metadataHTTPOwnerHistoryAnnotation(&row.owner, row.ls, "owner_history", query, ownerHistory); annotation != nil {
+				item.annotations = append(item.annotations, annotation)
 			}
 			candidates = append(candidates, item)
 		}
@@ -667,7 +678,7 @@ func (snap *metadataSnapshot) seriesPage(ctx context.Context, query metadataHTTP
 
 // seriesAssertions renders the versions matching both the membership band and
 // the query filters.
-func (*metadataSnapshot) seriesAssertions(owner OwnerKey, history *metadataOwnerHistory, membershipIndex int, rows []seriesMembershipRow, query metadataHTTPQuery) []metadataHTTPAssertion {
+func seriesAssertions(owner OwnerKey, history *metadataOwnerHistory, membershipIndex int, rows []seriesMembershipRow, query metadataHTTPQuery) []metadataHTTPAssertion {
 	if history == nil {
 		return nil
 	}
@@ -683,7 +694,7 @@ func (*metadataSnapshot) seriesAssertions(owner OwnerKey, history *metadataOwner
 		if len(query.attributes) != 0 && !metadataHTTPAttributeMatches(owner, version, query.attributes) {
 			continue
 		}
-		assertions = append(assertions, metadataHTTPAssertionFor(version, nextVersion, history, query.projection))
+		assertions = append(assertions, metadataHTTPAssertionFor(version, nextVersion, history, query.projection, query.start))
 	}
 	return assertions
 }
@@ -699,6 +710,11 @@ func metadataHTTPAttributeMatches(owner OwnerKey, version Version, conditions []
 		value, present := version.Content.Attributes[condition.Name]
 		if !present {
 			value, present = identity[condition.Name]
+			if present && owner.Kind == MetadataResource && value == "" && metadataCompatibilityIdentityKey(condition.Name) {
+				// An empty compatibility fallback value is unrecoverable, not a
+				// proven present-empty string.
+				present = false
+			}
 		}
 		if !present || value != condition.Value {
 			return false
@@ -713,9 +729,9 @@ type seriesRef struct {
 	ls   labels.Labels
 }
 
-func (snap *metadataSnapshot) seriesRefs() []seriesRef {
-	refs := make([]seriesRef, 0, len(snap.catalog.bySeries))
-	for hash, kinds := range snap.catalog.bySeries {
+func seriesRefs(catalog *metadataStore) []seriesRef {
+	refs := make([]seriesRef, 0, len(catalog.bySeries))
+	for hash, kinds := range catalog.bySeries {
 		for _, rows := range kinds {
 			if len(rows) > 0 {
 				refs = append(refs, seriesRef{hash: hash, ls: rows[0].ls})
@@ -741,7 +757,12 @@ func (snap *metadataSnapshot) seriesRefs() []seriesRef {
 
 // diffPage renders bounded point owner-content diffs.
 func (snap *metadataSnapshot) diffPage(ctx context.Context, query metadataHTTPQuery, after *metadataDiffPosition) ([]metadataHTTPDiffRow, any, []map[string]any, error) {
-	owners := snap.ownersAtTime(query)
+	catalog, err := snap.beginRead()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer snap.endRead()
+	owners := ownersAtTime(catalog, query)
 	sortOwnerKeys(owners)
 	type candidate struct {
 		position    metadataDiffPosition
@@ -753,7 +774,7 @@ func (snap *metadataSnapshot) diffPage(ctx context.Context, query metadataHTTPQu
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, metadataFailure(500, "metadata_internal", err.Error())
 		}
-		history := snap.catalog.byOwner[owner]
+		history := catalog.byOwner[owner]
 		if history == nil || len(history.versions) == 0 {
 			continue
 		}
@@ -782,24 +803,27 @@ func (snap *metadataSnapshot) diffPage(ctx context.Context, query metadataHTTPQu
 			continue
 		}
 		lostPredecessor := !haveBefore && history.truncated
+		coverage := metadataHTTPCoveredCoverage("diff")
+		if lostPredecessor {
+			coverage = metadataHTTPTruncatedCoverage("diff", history.versions[0].EffectiveFrom, "lost_predecessor", "history_truncated")
+		}
 		row := metadataHTTPDiffRow{
 			Owner:           metadataHTTPOwnerFor(owner),
 			EffectiveFromMS: formatMetadataMilliseconds(afterVersion.EffectiveFrom),
-			Before:          snap.diffBeforeEndpoint(history, beforeVersion, haveBefore, lostPredecessor, afterIndex, query.projection),
+			Before:          snap.diffBeforeEndpoint(history, beforeVersion, haveBefore, lostPredecessor, afterIndex, query),
 			After: metadataHTTPDiffEndpoint{
 				State:     "present",
-				Assertion: metadataHTTPAssertionPointer(metadataHTTPAssertionFor(afterVersion, nextEffectiveFrom(history.versions, afterIndex), history, query.projection)),
-				Coverage:  metadataHTTPOwnerCoverage(history),
+				Assertion: metadataHTTPAssertionPointer(metadataHTTPAssertionFor(afterVersion, nextEffectiveFrom(history.versions, afterIndex), history, query.projection, query.time)),
+				Coverage:  metadataHTTPOwnerCoverage(history, query.time),
 			},
-			Coverage: metadataHTTPOwnerCoverage(history),
+			Coverage: coverage,
 			Fields:   snap.diffFields(beforeVersion, lostPredecessor, afterVersion, query.projection),
 		}
-		if lostPredecessor {
-			row.Coverage.Reasons = append(row.Coverage.Reasons, "lost_predecessor")
-		}
 		item := candidate{position: position, row: row}
-		if history.truncated && len(history.versions) > 0 {
-			item.annotations = append(item.annotations, metadataHTTPTruncatedAnnotation(&owner, labels.EmptyLabels(), "diff", history.versions[0].EffectiveFrom))
+		if lostPredecessor {
+			if annotation := metadataHTTPLostPredecessorAnnotation(owner, query, history); annotation != nil {
+				item.annotations = append(item.annotations, annotation)
+			}
 		}
 		candidates = append(candidates, item)
 	}
@@ -831,10 +855,10 @@ func (snap *metadataSnapshot) diffPage(ctx context.Context, query metadataHTTPQu
 // ownersAtTime resolves owners whose membership is applicable at the exact diff
 // time. Without matchers every owner of the kind participates, matching the
 // owner-content diff scope.
-func (snap *metadataSnapshot) ownersAtTime(query metadataHTTPQuery) []OwnerKey {
+func ownersAtTime(catalog *metadataStore, query metadataHTTPQuery) []OwnerKey {
 	if len(query.matchers) == 0 {
-		owners := make([]OwnerKey, 0, len(snap.catalog.byOwner))
-		for owner := range snap.catalog.byOwner {
+		owners := make([]OwnerKey, 0, len(catalog.byOwner))
+		for owner := range catalog.byOwner {
 			if owner.Kind == query.kind {
 				owners = append(owners, owner)
 			}
@@ -842,7 +866,7 @@ func (snap *metadataSnapshot) ownersAtTime(query metadataHTTPQuery) []OwnerKey {
 		return owners
 	}
 	matched := map[OwnerKey]struct{}{}
-	for _, kinds := range snap.catalog.bySeries {
+	for _, kinds := range catalog.bySeries {
 		rows := kinds[query.kind]
 		for i, row := range rows {
 			next := nextMembershipFrom(rows, i)
@@ -870,20 +894,21 @@ func (e metadataHTTPDiffEndpoint) AssertionValue() metadataHTTPAssertion {
 	return *e.Assertion
 }
 
-func (*metadataSnapshot) diffBeforeEndpoint(history *metadataOwnerHistory, before Version, haveBefore, lostPredecessor bool, afterIndex int, projection []string) metadataHTTPDiffEndpoint {
+func (*metadataSnapshot) diffBeforeEndpoint(history *metadataOwnerHistory, before Version, haveBefore, lostPredecessor bool, afterIndex int, query metadataHTTPQuery) metadataHTTPDiffEndpoint {
 	switch {
 	case haveBefore:
 		return metadataHTTPDiffEndpoint{
 			State:     "present",
-			Assertion: metadataHTTPAssertionPointer(metadataHTTPAssertionFor(before, nextEffectiveFrom(history.versions, afterIndex-1), history, projection)),
-			Coverage:  metadataHTTPOwnerCoverage(history),
+			Assertion: metadataHTTPAssertionPointer(metadataHTTPAssertionFor(before, nextEffectiveFrom(history.versions, afterIndex-1), history, query.projection, query.time)),
+			Coverage:  metadataHTTPOwnerCoverage(history, query.time),
 		}
 	case lostPredecessor:
 		return metadataHTTPDiffEndpoint{
-			State: "unknown", Reason: "lost_predecessor", Coverage: metadataHTTPOwnerCoverage(history),
+			State: "unknown", Reason: "lost_predecessor",
+			Coverage: metadataHTTPTruncatedCoverage("diff", history.versions[0].EffectiveFrom, "lost_predecessor", "history_truncated"),
 		}
 	default:
-		return metadataHTTPDiffEndpoint{State: "absent", Coverage: metadataHTTPOwnerCoverage(history)}
+		return metadataHTTPDiffEndpoint{State: "absent", Coverage: metadataHTTPCoveredCoverage("diff")}
 	}
 }
 
@@ -937,13 +962,18 @@ func mapsEqual(a, b map[string]string) bool {
 
 // discoveryPage renders typed attribute discovery with deduplicated values.
 func (snap *metadataSnapshot) discoveryPage(ctx context.Context, query metadataHTTPQuery, after *metadataDiscoveryPosition) ([]metadataHTTPDiscoveryRow, any, []map[string]any, error) {
+	catalog, err := snap.beginRead()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer snap.endRead()
 	type discovered struct {
 		values            map[string]metadataTypedValue
 		truncated         bool
 		earliestTruncated int64
 	}
 	values := map[string]*discovered{}
-	for owner, history := range snap.catalog.byOwner {
+	for owner, history := range catalog.byOwner {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, metadataFailure(500, "metadata_internal", err.Error())
 		}
@@ -965,7 +995,7 @@ func (snap *metadataSnapshot) discoveryPage(ctx context.Context, query metadataH
 				}
 				typed := metadataPresentString(value)
 				entry.values[metadataTypedValueCanonical(typed)] = typed
-				if history.truncated && len(history.versions) > 0 {
+				if history.truncated && len(history.versions) > 0 && query.start < history.versions[0].EffectiveFrom {
 					if !entry.truncated || history.versions[0].EffectiveFrom < entry.earliestTruncated {
 						entry.earliestTruncated = history.versions[0].EffectiveFrom
 					}
@@ -990,19 +1020,16 @@ func (snap *metadataSnapshot) discoveryPage(ctx context.Context, query metadataH
 		typedValues := mapsValuesByCanonical(entry.values)
 		row := metadataHTTPDiscoveryRow{Key: name, Values: typedValues}
 		if entry.truncated {
-			earliest := formatMetadataMilliseconds(entry.earliestTruncated)
-			row.Coverage = metadataHTTPCoverage{
-				State: "truncated", Scope: "discovery", EarliestRetainedMS: &earliest,
-				Ranges:  []metadataHTTPRange{{FromMS: earliest, UntilMS: nil}},
+			earliest := entry.earliestTruncated
+			row.Coverage = metadataHTTPTruncatedCoverage("discovery", earliest, "history_truncated")
+			candidateAnnotations = append(candidateAnnotations, metadataHTTPAnnotation(metadataHTTPAnnotationParams{
+				Scope: "discovery", State: "truncated", Reason: "history_truncated",
+				Category: query.kind.String(), Key: name, Query: query, Earliest: &earliest,
+				Ranges:  []metadataHTTPRange{{FromMS: formatMetadataMilliseconds(earliest), UntilMS: nil}},
 				Reasons: []string{"history_truncated"},
-			}
-			annotation := metadataHTTPTruncatedAnnotation(nil, labels.EmptyLabels(), "discovery", entry.earliestTruncated)
-			annotation["key"] = name
-			candidateAnnotations = append(candidateAnnotations, annotation)
+			}))
 		} else {
-			row.Coverage = metadataHTTPCoverage{
-				State: "covered", Scope: "discovery", Ranges: []metadataHTTPRange{}, Reasons: []string{},
-			}
+			row.Coverage = metadataHTTPCoveredCoverage("discovery")
 		}
 		candidates = append(candidates, candidate{
 			position: metadataDiscoveryPosition{Key: name}, row: row, annotations: candidateAnnotations,
@@ -1040,7 +1067,12 @@ func mapsValuesByCanonical(input map[string]metadataTypedValue) []metadataTypedV
 // Entity evidence the group contains only that series' original Resource
 // component(s); components are never merged and no winner is selected.
 func (snap *metadataSnapshot) combinedPage(ctx context.Context, query metadataHTTPQuery, after *metadataGroupPosition) ([]metadataHTTPGroupRow, any, []map[string]any, error) {
-	refs := snap.seriesRefs()
+	catalog, err := snap.beginRead()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer snap.endRead()
+	refs := seriesRefs(catalog)
 	type candidate struct {
 		position    metadataGroupPosition
 		row         metadataHTTPGroupRow
@@ -1051,33 +1083,35 @@ func (snap *metadataSnapshot) combinedPage(ctx context.Context, query metadataHT
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, metadataFailure(500, "metadata_internal", err.Error())
 		}
-		rows := snap.catalog.bySeries[ref.hash][query.kind]
-		if !snap.seriesMatches(ref, rows, query) {
+		rows := catalog.bySeries[ref.hash][query.kind]
+		if !seriesMatches(catalog, ref, rows, query) {
 			continue
 		}
 		var candidateAnnotations []map[string]any
 		group := metadataHTTPGroupRow{
 			Series: metadataHTTPLabels(ref.ls), Relations: []map[string]any{},
-			Components: []metadataHTTPComponent{}, Coverage: metadataHTTPCoverage{
-				State: "covered", Scope: "combined", Ranges: []metadataHTTPRange{}, Reasons: []string{},
-			},
+			Components: []metadataHTTPComponent{}, Coverage: metadataHTTPCoveredCoverage("combined"),
 		}
-		resourceRows := snap.catalog.bySeries[ref.hash][MetadataResource]
+		resourceRows := catalog.bySeries[ref.hash][MetadataResource]
+		firstOwnerID := ""
 		for i, row := range resourceRows {
 			if !metadataPeriodOverlaps(row.effectiveFrom, nextMembershipFrom(resourceRows, i), query.start, query.end) {
 				continue
 			}
-			history := snap.catalog.byOwner[row.owner]
-			versions := snap.ownerAssertions(row.owner, query.start, query.end, query.projection, false)
+			history := catalog.byOwner[row.owner]
+			versions := ownerAssertions(catalog, row.owner, query.start, query.end, query.projection, false)
 			if len(versions) == 0 {
 				continue
 			}
+			if len(group.Components) == 0 {
+				firstOwnerID = row.owner.ID
+			}
 			group.Components = append(group.Components, metadataHTTPComponent{
-				Owner: metadataHTTPOwnerFor(row.owner), Schema: snap.resourceSchemaAssertions(ref.hash, row.owner, query),
-				Versions: versions, SourceAssertions: snap.sourceAssertions(ref.hash, query),
+				Owner: metadataHTTPOwnerFor(row.owner), Schema: resourceSchemaAssertions(catalog, ref.hash, row.owner, query),
+				Versions: versions, SourceAssertions: sourceAssertions(catalog, ref.hash, query),
 			})
-			if history != nil && history.truncated && len(history.versions) > 0 {
-				coverage := metadataHTTPOwnerCoverage(history)
+			coverage := metadataHTTPOwnerCoverage(history, query.start)
+			if coverage.State == "truncated" {
 				switch {
 				case group.Coverage.State != "truncated":
 					group.Coverage = coverage
@@ -1085,12 +1119,19 @@ func (snap *metadataSnapshot) combinedPage(ctx context.Context, query metadataHT
 					(group.Coverage.EarliestRetainedMS == nil || *coverage.EarliestRetainedMS < *group.Coverage.EarliestRetainedMS):
 					group.Coverage = coverage
 				}
-				candidateAnnotations = append(candidateAnnotations, metadataHTTPTruncatedAnnotation(&row.owner, ref.ls, "combined", history.versions[0].EffectiveFrom))
+				if annotation := metadataHTTPOwnerHistoryAnnotation(&row.owner, ref.ls, "combined", query, history); annotation != nil {
+					candidateAnnotations = append(candidateAnnotations, annotation)
+				}
 			}
+		}
+		if len(group.Components) == 0 {
+			group.Coverage = metadataHTTPUnknownCoverage("combined", "no_resource_component")
+			candidateAnnotations = append(candidateAnnotations, metadataHTTPMissingResourceAnnotation(ref.ls, query))
 		}
 		position := metadataGroupPosition{Labels: ref.ls.String()}
 		if len(group.Components) > 0 {
 			position.OwnerKind = group.Components[0].Owner.Kind
+			position.OwnerID = firstOwnerID
 			first := group.Components[0]
 			if len(first.Versions) > 0 {
 				position.FromMS = parseMetadataMillisecondsOrZero(first.Versions[0].Validity.FromMS)
@@ -1129,7 +1170,7 @@ func (snap *metadataSnapshot) combinedPage(ctx context.Context, query metadataHT
 
 // seriesMatches reports whether one series has an applicable row of the
 // requested kind satisfying the query filters.
-func (snap *metadataSnapshot) seriesMatches(ref seriesRef, rows []seriesMembershipRow, query metadataHTTPQuery) bool {
+func seriesMatches(catalog *metadataStore, ref seriesRef, rows []seriesMembershipRow, query metadataHTTPQuery) bool {
 	if len(rows) == 0 {
 		if len(query.attributes) != 0 {
 			return false
@@ -1143,8 +1184,8 @@ func (snap *metadataSnapshot) seriesMatches(ref seriesRef, rows []seriesMembersh
 		if len(query.matchers) != 0 && !matchesAny(row.ls, query.matchers) {
 			continue
 		}
-		history := snap.catalog.byOwner[row.owner]
-		if len(snap.seriesAssertions(row.owner, history, i, rows, query)) != 0 {
+		history := catalog.byOwner[row.owner]
+		if len(seriesAssertions(row.owner, history, i, rows, query)) != 0 {
 			return true
 		}
 	}
@@ -1153,9 +1194,9 @@ func (snap *metadataSnapshot) seriesMatches(ref seriesRef, rows []seriesMembersh
 
 // resourceSchemaAssertions returns the Resource-schema context associated with
 // one original Resource component.
-func (snap *metadataSnapshot) resourceSchemaAssertions(seriesHash uint64, resource OwnerKey, query metadataHTTPQuery) []metadataHTTPAssertion {
+func resourceSchemaAssertions(catalog *metadataStore, seriesHash uint64, resource OwnerKey, query metadataHTTPQuery) []metadataHTTPAssertion {
 	wanted := ResourceSchemaOwner(resource)
-	rows := snap.catalog.bySeries[seriesHash][MetadataResourceSchema]
+	rows := catalog.bySeries[seriesHash][MetadataResourceSchema]
 	var assertions []metadataHTTPAssertion
 	for i, row := range rows {
 		if row.owner != wanted {
@@ -1164,7 +1205,7 @@ func (snap *metadataSnapshot) resourceSchemaAssertions(seriesHash uint64, resour
 		if !metadataPeriodOverlaps(row.effectiveFrom, nextMembershipFrom(rows, i), query.start, query.end) {
 			continue
 		}
-		assertions = append(assertions, snap.ownerAssertions(row.owner, query.start, query.end, query.projection, false)...)
+		assertions = append(assertions, ownerAssertions(catalog, row.owner, query.start, query.end, query.projection, false)...)
 	}
 	if assertions == nil {
 		return []metadataHTTPAssertion{}
@@ -1174,14 +1215,14 @@ func (snap *metadataSnapshot) resourceSchemaAssertions(seriesHash uint64, resour
 
 // sourceAssertions preserves independent Source owner content as opaque
 // assertions. It deliberately does not invent Source role keys.
-func (snap *metadataSnapshot) sourceAssertions(seriesHash uint64, query metadataHTTPQuery) []metadataHTTPSourceAssertion {
-	rows := snap.catalog.bySeries[seriesHash][MetadataSource]
+func sourceAssertions(catalog *metadataStore, seriesHash uint64, query metadataHTTPQuery) []metadataHTTPSourceAssertion {
+	rows := catalog.bySeries[seriesHash][MetadataSource]
 	assertions := make([]metadataHTTPSourceAssertion, 0, len(rows))
 	for i, row := range rows {
 		if !metadataPeriodOverlaps(row.effectiveFrom, nextMembershipFrom(rows, i), query.start, query.end) {
 			continue
 		}
-		versions := snap.ownerAssertions(row.owner, query.start, query.end, query.projection, false)
+		versions := ownerAssertions(catalog, row.owner, query.start, query.end, query.projection, false)
 		if len(versions) == 0 {
 			continue
 		}

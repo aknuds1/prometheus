@@ -25,9 +25,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -112,75 +114,199 @@ func metadataHTTPReadOwnerPage(t *testing.T, recorder *httptest.ResponseRecorder
 	return envelope.Data
 }
 
-func TestMetadataTypedHTTPValues(t *testing.T) {
+func TestMetadataTypedValueRoundTrip(t *testing.T) {
+	falseValue := metadataPresentBoolean(false)
 	empty := metadataPresentString("")
-	boolean := metadataPresentBoolean(false)
-	integer := metadataPresentInteger(9007199254740993)
-	double := metadataPresentDouble(0x8000000000000000)
-	array := metadataPresentArray(nil)
-	typedMap, err := metadataPresentMap([]metadataTypedMapEntry{
-		{Key: "z", Value: metadataNullValue()},
-		{Key: "a", Value: empty},
+	maxInt := metadataPresentInteger(math.MaxInt64)
+	minInt := metadataPresentInteger(math.MinInt64)
+	negativeZero := metadataPresentDouble(0x8000000000000000)
+	nanPayload := metadataPresentDouble(0x7ff8000000000001)
+	infinity := metadataPresentDouble(0x7ff0000000000000)
+	denormal := metadataPresentDouble(0x0000000000000001)
+	nestedMap, err := metadataPresentMap([]metadataTypedMapEntry{
+		{Key: "z", Value: metadataPresentArray([]metadataTypedValue{empty, maxInt})},
+		{Key: "a", Value: metadataNullValue()},
 	})
 	require.NoError(t, err)
-
+	ambiguous := metadataAmbiguousValue([]metadataTypedValue{
+		metadataPresentString("b"), metadataPresentString("a"), metadataPresentString("a"),
+	})
 	cases := []struct {
 		name  string
 		value metadataTypedValue
 		want  string
 	}{
 		{"present-empty-string", empty, `{"state":"present","type":"string","value":""}`},
-		{"present-boolean-false", boolean, `{"state":"present","type":"boolean","value":false}`},
-		{"present-large-integer", integer, `{"state":"present","type":"integer","decimal":"9007199254740993"}`},
-		{"present-double-bits", double, `{"state":"present","type":"double","bits":"0x8000000000000000"}`},
-		{"present-empty-array", array, `{"state":"present","type":"array","items":[]}`},
-		{"present-map-sorted", typedMap, `{"state":"present","type":"map","entries":[{"key":"a","value":{"state":"present","type":"string","value":""}},{"key":"z","value":{"state":"null"}}]}`},
+		{"present-boolean-false", falseValue, `{"state":"present","type":"boolean","value":false}`},
+		{"present-max-integer", maxInt, `{"state":"present","type":"integer","decimal":"9223372036854775807"}`},
+		{"present-min-integer", minInt, `{"state":"present","type":"integer","decimal":"-9223372036854775808"}`},
+		{"present-signed-zero", negativeZero, `{"state":"present","type":"double","bits":"0x8000000000000000"}`},
+		{"present-nan-payload", nanPayload, `{"state":"present","type":"double","bits":"0x7ff8000000000001"}`},
+		{"present-infinity", infinity, `{"state":"present","type":"double","bits":"0x7ff0000000000000"}`},
+		{"present-denormal", denormal, `{"state":"present","type":"double","bits":"0x0000000000000001"}`},
+		{"present-empty-array", metadataPresentArray(nil), `{"state":"present","type":"array","items":[]}`},
+		{"present-nested-map", nestedMap, `{"state":"present","type":"map","entries":[{"key":"a","value":{"state":"null"}},{"key":"z","value":{"state":"present","type":"array","items":[{"state":"present","type":"string","value":""},{"state":"present","type":"integer","decimal":"9223372036854775807"}]}}]}`},
 		{"null", metadataNullValue(), `{"state":"null"}`},
 		{"absent", metadataAbsentValue(), `{"state":"absent"}`},
 		{"cleared", metadataClearedValue(), `{"state":"cleared"}`},
 		{"unknown", metadataUnknownValue("partial_source"), `{"state":"unknown","reason":"partial_source"}`},
-		{"ambiguous", metadataAmbiguousValue(nil), `{"state":"ambiguous","assertions":[]}`},
+		{"ambiguous-dedup", ambiguous, `{"state":"ambiguous","assertions":[{"state":"present","type":"string","value":"a"},{"state":"present","type":"string","value":"b"}]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			encoded, err := json.Marshal(tc.value)
 			require.NoError(t, err)
 			require.JSONEq(t, tc.want, string(encoded))
+			var decoded metadataTypedValue
+			require.NoError(t, json.Unmarshal(encoded, &decoded))
+			reencoded, err := json.Marshal(decoded)
+			require.NoError(t, err)
+			require.JSONEq(t, tc.want, string(reencoded))
+			require.Equal(t, metadataTypedValueCanonical(tc.value), metadataTypedValueCanonical(decoded))
+		})
+	}
+}
+
+func TestMetadataTypedValueValidation(t *testing.T) {
+	invalidJSON := []struct {
+		name string
+		raw  string
+	}{
+		{"missing-state", `{}`},
+		{"unknown-state", `{"state":"maybe"}`},
+		{"unknown-type", `{"state":"present","type":"bytes","value":"x"}`},
+		{"string-missing-value", `{"state":"present","type":"string"}`},
+		{"string-null-value", `{"state":"present","type":"string","value":null}`},
+		{"string-extra-decimal", `{"state":"present","type":"string","value":"x","decimal":"1"}`},
+		{"boolean-nonboolean", `{"state":"present","type":"boolean","value":1}`},
+		{"integer-leading-zero", `{"state":"present","type":"integer","decimal":"01"}`},
+		{"integer-negative-zero", `{"state":"present","type":"integer","decimal":"-0"}`},
+		{"integer-plus", `{"state":"present","type":"integer","decimal":"+1"}`},
+		{"integer-overflow", `{"state":"present","type":"integer","decimal":"9223372036854775808"}`},
+		{"integer-nonstring", `{"state":"present","type":"integer","decimal":1}`},
+		{"double-uppercase", `{"state":"present","type":"double","bits":"0X8000000000000000"}`},
+		{"double-short", `{"state":"present","type":"double","bits":"0x800000000000000"}`},
+		{"double-long", `{"state":"present","type":"double","bits":"0x80000000000000000"}`},
+		{"double-missing", `{"state":"present","type":"double"}`},
+		{"array-missing-items", `{"state":"present","type":"array"}`},
+		{"array-null-items", `{"state":"present","type":"array","items":null}`},
+		{"array-bad-nested", `{"state":"present","type":"array","items":[{"state":"present","type":"integer","decimal":"01"}]}`},
+		{"map-missing-entries", `{"state":"present","type":"map"}`},
+		{"map-duplicate-key", `{"state":"present","type":"map","entries":[{"key":"a","value":{"state":"absent"}},{"key":"a","value":{"state":"null"}}]}`},
+		{"map-entry-missing-value", `{"state":"present","type":"map","entries":[{"key":"a"}]}`},
+		{"null-with-type", `{"state":"null","type":"string"}`},
+		{"absent-with-value", `{"state":"absent","value":"x"}`},
+		{"unknown-missing-reason", `{"state":"unknown"}`},
+		{"unknown-empty-reason", `{"state":"unknown","reason":""}`},
+		{"unknown-with-type", `{"state":"unknown","reason":"x","type":"string"}`},
+		{"ambiguous-empty", `{"state":"ambiguous","assertions":[]}`},
+		{"ambiguous-equal", `{"state":"ambiguous","assertions":[{"state":"absent"},{"state":"absent"}]}`},
+		{"ambiguous-with-value", `{"state":"ambiguous","assertions":[{"state":"absent"},{"state":"null"}],"value":"x"}`},
+		{"unknown-field", `{"state":"absent","extra":1}`},
+		{"trailing-data", `{"state":"absent"}{"state":"null"}`},
+	}
+	for _, tc := range invalidJSON {
+		t.Run(tc.name, func(t *testing.T) {
+			var value metadataTypedValue
+			require.Error(t, json.Unmarshal([]byte(tc.raw), &value), tc.raw)
 		})
 	}
 
-	reversed, err := metadataPresentMap([]metadataTypedMapEntry{
-		{Key: "a", Value: empty},
-		{Key: "z", Value: metadataNullValue()},
+	present := metadataPresentString("x")
+	invalidValues := []struct {
+		name  string
+		value metadataTypedValue
+	}{
+		{"ambiguous-empty", metadataAmbiguousValue(nil)},
+		{"ambiguous-equal", metadataAmbiguousValue([]metadataTypedValue{metadataAbsentValue(), metadataAbsentValue()})},
+		{"string-nil", metadataTypedValue{state: "present", typ: "string"}},
+		{"string-extra", metadataTypedValue{state: "present", typ: "string", str: present.str, decimal: present.str}},
+		{"integer-bad", metadataTypedValue{state: "present", typ: "integer", decimal: metadataString("01")}},
+		{"double-bad", metadataTypedValue{state: "present", typ: "double", bits: metadataString("0xABC")}},
+		{"null-payload", metadataTypedValue{state: "null", str: present.str}},
+		{"unknown-no-reason", metadataTypedValue{state: "unknown"}},
+		{"map-duplicate", metadataTypedValue{state: "present", typ: "map", entries: []metadataTypedMapEntry{
+			{Key: "a", Value: metadataAbsentValue()}, {Key: "a", Value: metadataNullValue()},
+		}}},
+	}
+	for _, tc := range invalidValues {
+		t.Run("marshal-"+tc.name, func(t *testing.T) {
+			_, err := json.Marshal(tc.value)
+			require.Error(t, err)
+			require.NotPanics(t, func() { _ = metadataTypedValueCanonical(tc.value) })
+			require.NotPanics(t, func() { _ = metadataTypedValueDisplayKey(tc.value) })
+		})
+	}
+}
+
+func metadataString(value string) *string { return &value }
+
+func TestMetadataTypedValueCanonicalization(t *testing.T) {
+	left, err := metadataPresentMap([]metadataTypedMapEntry{
+		{Key: "b", Value: metadataPresentInteger(2)},
+		{Key: "a", Value: metadataPresentString("x")},
 	})
 	require.NoError(t, err)
-	require.Equal(t, metadataTypedValueCanonical(typedMap), metadataTypedValueCanonical(reversed),
-		"map equality ignores entry iteration order")
-	require.NotEqual(t,
-		metadataTypedValueCanonical(metadataPresentArray([]metadataTypedValue{metadataPresentString("a"), metadataPresentString("b")})),
-		metadataTypedValueCanonical(metadataPresentArray([]metadataTypedValue{metadataPresentString("b"), metadataPresentString("a")})),
-		"arrays preserve order")
-	_, err = metadataPresentMap([]metadataTypedMapEntry{
-		{Key: "a", Value: empty}, {Key: "a", Value: empty},
+	right, err := metadataPresentMap([]metadataTypedMapEntry{
+		{Key: "a", Value: metadataPresentString("x")},
+		{Key: "b", Value: metadataPresentInteger(2)},
 	})
-	require.Error(t, err, "duplicate typed map keys are rejected")
+	require.NoError(t, err)
+	require.Equal(t, metadataTypedValueCanonical(left), metadataTypedValueCanonical(right),
+		"map equality ignores construction order")
 
-	// HTTP-observable distinction: a present empty string is not absent, and a
-	// projected missing key is explicit absent rather than an omitted state.
+	// JSON decoding order must not affect canonicalization either.
+	rawLeft := `{"state":"present","type":"map","entries":[{"key":"a","value":{"state":"present","type":"string","value":"x"}},{"key":"b","value":{"state":"present","type":"integer","decimal":"2"}}]}`
+	rawRight := `{"state":"present","type":"map","entries":[{"key":"b","value":{"state":"present","type":"integer","decimal":"2"}},{"key":"a","value":{"state":"present","type":"string","value":"x"}}]}`
+	var decodedLeft, decodedRight metadataTypedValue
+	require.NoError(t, json.Unmarshal([]byte(rawLeft), &decodedLeft))
+	require.NoError(t, json.Unmarshal([]byte(rawRight), &decodedRight))
+	require.Equal(t, metadataTypedValueCanonical(decodedLeft), metadataTypedValueCanonical(decodedRight))
+	encodedLeft, err := json.Marshal(decodedLeft)
+	require.NoError(t, err)
+	encodedRight, err := json.Marshal(decodedRight)
+	require.NoError(t, err)
+	require.JSONEq(t, string(encodedLeft), string(encodedRight))
+
+	first := metadataPresentArray([]metadataTypedValue{metadataPresentString("a"), metadataPresentString("b")})
+	second := metadataPresentArray([]metadataTypedValue{metadataPresentString("b"), metadataPresentString("a")})
+	require.NotEqual(t, metadataTypedValueCanonical(first), metadataTypedValueCanonical(second),
+		"arrays preserve order")
+
+	require.NotEqual(t,
+		metadataTypedValueCanonical(metadataPresentInteger(1)),
+		metadataTypedValueCanonical(metadataPresentDouble(0x3ff0000000000000)),
+		"integer and double remain distinct even for the same numeric value")
+	require.NotEqual(t,
+		metadataTypedValueCanonical(metadataPresentString("1")),
+		metadataTypedValueCanonical(metadataPresentInteger(1)),
+		"string and integer remain distinct")
+	firstNaN := metadataTypedValueCanonical(metadataPresentDouble(0x7ff8000000000001))
+	secondNaN := metadataTypedValueCanonical(metadataPresentDouble(0x7ff8000000000001))
+	require.Equal(t, firstNaN, secondNaN, "exact NaN payloads compare by bits")
+	require.NotEqual(t,
+		metadataTypedValueCanonical(metadataPresentDouble(0x7ff8000000000001)),
+		metadataTypedValueCanonical(metadataPresentDouble(0x7ff8000000000002)),
+		"different NaN payloads remain distinct")
+	require.NotEqual(t,
+		metadataTypedValueCanonical(metadataPresentDouble(0x0000000000000000)),
+		metadataTypedValueCanonical(metadataPresentDouble(0x8000000000000000)),
+		"signed zero remains distinct")
+}
+
+func TestMetadataTypedHTTPValues(t *testing.T) {
 	store, handler := metadataHTTPTestStore(t, StorageOptions{DisableWAL: true})
 	owner := metadataHTTPTestResourceOwner("typed")
 	series := metadataHTTPTestSeries("typed_total", "typed", owner)
 	metadataHTTPTestAssociate(t, store, series, owner, map[string]string{"empty": "", "other": "x"}, 1000)
 	recorder := metadataHTTPGet(t, handler, "/resources/series?kind=resource&resource.attr=other:x&start=0&end=2&projection=empty,missing,other")
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
-	var page metadataHTTPSeriesPage
 	var envelope struct {
 		Data metadataHTTPSeriesPage `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &envelope))
-	page = envelope.Data
-	require.Len(t, page.Series, 1)
-	entries := page.Series[0].Versions[0].Content.Entries
+	require.Len(t, envelope.Data.Series, 1)
+	entries := envelope.Data.Series[0].Versions[0].Content.Entries
 	require.Len(t, entries, 3)
 	require.Equal(t, "present", metadataTestEntry(t, entries, "empty").state)
 	require.Empty(t, *metadataTestEntry(t, entries, "empty").str)
@@ -455,7 +581,7 @@ func TestMetadataSnapshotLifecycle(t *testing.T) {
 	}{
 		{"expired", func(id string) { store.expireMetadataSnapshotForTesting(id) }, "metadata_snapshot_expired"},
 		{"reclaimed", func(id string) { store.reclaimMetadataSnapshot(id, "forced") }, "metadata_snapshot_reclaimed"},
-		{"state-unavailable", func(id string) { store.metadataSnapshots.snapshots[id].catalog = nil }, "metadata_snapshot_state_unavailable"},
+		{"state-unavailable", func(id string) { store.releaseMetadataSnapshotForTesting(id) }, "metadata_snapshot_state_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			page := metadataHTTPReadOwnerPage(t, metadataHTTPGet(t, handler, "/resources?limit=1&start=0&end=1"))
@@ -681,18 +807,118 @@ func TestMetadataHTTPAnnotations(t *testing.T) {
 			Content: Content{Attributes: map[string]string{"k": itoa(int(effective))}},
 		}))
 	}
+
+	// A query that needs discarded history reports truncated coverage.
 	page := metadataHTTPReadOwnerPage(t, metadataHTTPGet(t, handler, "/resources?start=0&end=1"))
 	require.Len(t, page.Annotations, 1)
 	annotation := page.Annotations[0]
 	require.Equal(t, "coverage", annotation["category"])
 	require.Equal(t, "coverage", annotation["axis"])
+	require.Equal(t, "owner_history", annotation["scope"])
 	require.Equal(t, "truncated", annotation["state"])
 	ownerAnnotation, ok := annotation["owner"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, owner.Ref(), ownerAnnotation["ref"])
-	require.Equal(t, "200", annotation["earliest_retained_ms"])
+	requested := annotation["requested"].(map[string]any)
+	require.Equal(t, "0", requested["from_ms"])
+	require.Equal(t, "1000", requested["until_ms"])
+	retained := annotation["retained"].(map[string]any)
+	require.Equal(t, "200", retained["earliest_retained_ms"])
+	require.Equal(t, []any{"history_truncated"}, retained["reasons"])
 	require.NotNil(t, page.Owners[0].Versions[0].Coverage.EarliestRetainedMS)
 	require.Equal(t, "truncated", page.Owners[0].Versions[0].Coverage.State)
+
+	// The same retained history is sufficient for a query that begins at the
+	// earliest retained version: no warning, and content coverage is covered.
+	sufficient := metadataHTTPReadOwnerPage(t, metadataHTTPGet(t, handler, "/resources?start=0.2&end=1"))
+	require.Empty(t, sufficient.Annotations)
+	require.Equal(t, "covered", sufficient.Owners[0].Versions[0].Coverage.State)
+
+	// Discovery annotations identify the exact category and flattened key.
+	discovery := metadataHTTPGet(t, handler, "/resources?format=attributes&start=0&end=1")
+	var discoveryEnvelope struct {
+		Data metadataHTTPDiscoveryPage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(discovery.Body.Bytes(), &discoveryEnvelope))
+	require.Len(t, discoveryEnvelope.Data.Annotations, 1)
+	discoveryAnnotation := discoveryEnvelope.Data.Annotations[0]
+	require.Equal(t, "resource", discoveryAnnotation["category"])
+	require.Equal(t, "k", discoveryAnnotation["key"])
+	require.Equal(t, "discovery", discoveryAnnotation["scope"])
+	attribute := discoveryAnnotation["attribute"].(map[string]any)
+	require.Equal(t, "resource", attribute["category"])
+	require.Equal(t, "k", attribute["key"])
+	require.Equal(t, "1000", discoveryAnnotation["requested"].(map[string]any)["until_ms"])
+	discoverySufficient := metadataHTTPGet(t, handler, "/resources?format=attributes&start=0.2&end=1")
+	require.NoError(t, json.Unmarshal(discoverySufficient.Body.Bytes(), &discoveryEnvelope))
+	require.Empty(t, discoveryEnvelope.Data.Annotations)
+}
+
+func TestMetadataHTTPAssociationObservation(t *testing.T) {
+	store, handler := metadataHTTPTestStore(t, StorageOptions{DisableWAL: true})
+	owner := metadataHTTPTestResourceOwner("observation")
+	series := metadataHTTPTestSeries("observation_total", "observation", owner)
+	// The membership starts at 100 and is observed again at 500. The incumbent
+	// records observedUntil but not an independent first-observation bound, so
+	// first_ms must stay null rather than being copied from effectiveFrom.
+	metadataHTTPTestAssociate(t, store, series, owner, map[string]string{"host.name": "h"}, 100)
+	metadataHTTPTestAssociate(t, store, series, owner, map[string]string{"host.name": "h"}, 500)
+
+	recorder := metadataHTTPGet(t, handler, "/resources/series?kind=resource&resource.attr=host.name:h&start=0&end=1")
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var envelope struct {
+		Data metadataHTTPSeriesPage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &envelope))
+	require.Len(t, envelope.Data.Series, 1)
+	row := envelope.Data.Series[0]
+	require.Equal(t, "applicable", row.Association.State)
+	require.Equal(t, "100", row.Association.Validity.FromMS)
+	require.Nil(t, row.Association.Validity.UntilMS, "membership validity remains exactly known")
+	require.Nil(t, row.Association.Observation.FirstMS, "first observation is not synthesized from validity")
+	require.Equal(t, "500", *row.Association.Observation.LastMS)
+	require.Equal(t, "unknown", row.Association.Coverage.State)
+	require.Equal(t, "series_association", row.Association.Coverage.Scope)
+	require.Equal(t, []string{"first_observation_unrecorded"}, row.Association.Coverage.Reasons)
+
+	require.NotEmpty(t, envelope.Data.Annotations)
+	var observationAnnotation map[string]any
+	for _, annotation := range envelope.Data.Annotations {
+		if annotation["reason"] == "first_observation_unrecorded" {
+			observationAnnotation = annotation
+		}
+	}
+	require.NotNil(t, observationAnnotation)
+	require.Equal(t, "series_association", observationAnnotation["scope"])
+	require.Equal(t, "unknown", observationAnnotation["state"])
+	require.Equal(t, "0", observationAnnotation["requested"].(map[string]any)["from_ms"])
+	require.Equal(t, "1000", observationAnnotation["requested"].(map[string]any)["until_ms"])
+	require.Equal(t, "500", observationAnnotation["observation"].(map[string]any)["last_ms"])
+	require.Nil(t, observationAnnotation["observation"].(map[string]any)["first_ms"])
+	association := observationAnnotation["association"].(map[string]any)
+	require.Equal(t, "100", association["validity"].(map[string]any)["from_ms"])
+
+	// Membership validity is still covered: the association is not labelled
+	// truncated merely because its observation evidence is incomplete.
+	require.NotEqual(t, "truncated", row.Association.Coverage.State)
+}
+
+func TestMetadataHTTPNoUnwarrantedWarnings(t *testing.T) {
+	store, handler := metadataHTTPTestStore(t, StorageOptions{DisableWAL: true})
+	owner := metadataHTTPTestResourceOwner("quiet")
+	series := metadataHTTPTestSeries("quiet_total", "quiet", owner)
+	metadataHTTPTestAssociate(t, store, series, owner, map[string]string{"host.name": "h"}, 100)
+	page := metadataHTTPReadOwnerPage(t, metadataHTTPGet(t, handler, "/resources?start=0&end=1&projection=missing"))
+	require.Empty(t, page.Annotations, "ordinary absent content needs no uncertainty warning")
+	require.Equal(t, "absent", metadataTestEntry(t, page.Owners[0].Versions[0].Content.Entries, "missing").state)
+
+	recorder := metadataHTTPGet(t, handler, "/resources/series?kind=source&match%5B%5D=%7B__name__%3D%22quiet_total%22%7D&start=0&end=1")
+	var seriesEnvelope struct {
+		Data metadataHTTPSeriesPage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &seriesEnvelope))
+	require.Equal(t, "unassociated", seriesEnvelope.Data.Series[0].Association.State)
+	require.Empty(t, seriesEnvelope.Data.Annotations, "ordinary unassociated needs no uncertainty warning")
 }
 
 func TestMetadataHTTPPhysicalWork(t *testing.T) {
@@ -857,4 +1083,208 @@ func TestMetadataSnapshotCursorCommutativeBinding(t *testing.T) {
 	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &envelope))
 	require.Len(t, envelope.Data.Series, 1)
 	require.Nil(t, envelope.Data.NextToken)
+}
+
+func TestMetadataHTTPResourceIdentityLimit(t *testing.T) {
+	store, handler := metadataHTTPTestStore(t, StorageOptions{DisableWAL: true})
+	// Both owners have empty service.namespace; the compatibility key cannot
+	// distinguish absent from present-empty.
+	ownerA := ResourceOwner(map[string]string{"service.name": "contract", "service.namespace": "", "service.instance.id": "a"})
+	ownerB := ResourceOwner(map[string]string{"service.name": "contract", "service.namespace": "", "service.instance.id": "b"})
+	seriesA := metadataHTTPTestSeries("identity_a_total", "a", ownerA)
+	seriesB := metadataHTTPTestSeries("identity_b_total", "b", ownerB)
+	metadataHTTPTestAssociate(t, store, seriesA, ownerA, map[string]string{"host.name": "a"}, 100)
+	metadataHTTPTestAssociate(t, store, seriesB, ownerB, map[string]string{"service.namespace": "", "host.name": "b"}, 100)
+
+	recorder := metadataHTTPGet(t, handler, "/resources?kind=resource&start=0&end=1&projection=host.name")
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var envelope struct {
+		Data metadataHTTPOwnerPage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &envelope))
+	var row metadataHTTPOwnerRow
+	for _, candidate := range envelope.Data.Owners {
+		if candidate.Owner.Ref == ownerA.Ref() {
+			row = candidate
+		}
+	}
+	require.NotEmpty(t, row.Owner.Ref)
+	namespace := metadataTestIdentity(t, row.Owner.Identity, "service.namespace")
+	require.Equal(t, "unknown", namespace.state, "an empty compatibility fallback is not proven present-empty")
+	require.Equal(t, "compatibility_identity_absent_empty_unrecoverable", *namespace.reason)
+	name := metadataTestIdentity(t, row.Owner.Identity, "service.name")
+	require.Equal(t, "present", name.state)
+
+	// Empty identity fallback does not satisfy resource.attr=service.namespace:.
+	recorder = metadataHTTPGet(t, handler, "/resources/series?resource.attr=service.namespace:&start=0&end=1")
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var seriesEnvelope struct {
+		Data metadataHTTPSeriesPage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &seriesEnvelope))
+	require.Len(t, seriesEnvelope.Data.Series, 1)
+	require.Equal(t, "identity_b_total", seriesEnvelope.Data.Series[0].Series[0].Value,
+		"only the owner with explicit present-empty content matches")
+
+	// A non-empty identifying value remains a present applicable string.
+	recorder = metadataHTTPGet(t, handler, "/resources/series?resource.attr=service.name:contract&start=0&end=1")
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &seriesEnvelope))
+	require.Len(t, seriesEnvelope.Data.Series, 2)
+}
+
+func TestMetadataSnapshotCancelDuringPage(t *testing.T) {
+	store, handler := metadataHTTPTestStore(t, StorageOptions{DisableWAL: true})
+	metadataHTTPTestPinOwners(t, store, 3)
+	first := metadataHTTPReadOwnerPage(t, metadataHTTPGet(t, handler, "/resources?limit=1&start=0&end=1"))
+	require.NotNil(t, first.NextToken)
+	continuation := "/resources?limit=1&start=0&end=1&next_token=" + url.QueryEscape(*first.NextToken)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	metadataSnapshotPageHook = func(*metadataSnapshot) {
+		once.Do(func() {
+			close(started)
+			<-release
+		})
+	}
+	t.Cleanup(func() { metadataSnapshotPageHook = nil })
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- metadataHTTPGet(t, handler, continuation)
+	}()
+	<-started
+
+	// Cancellation succeeds while the admitted page is still reading.
+	recorder := metadataHTTPDelete(t, handler, "/resources/snapshots/"+first.SnapshotID)
+	require.Equal(t, http.StatusNoContent, recorder.Code)
+
+	// No new page may begin after cancellation.
+	metadataHTTPRequireError(t, metadataHTTPGet(t, handler, continuation), 410, "metadata_snapshot_canceled")
+
+	close(release)
+	completed := <-done
+	require.Equal(t, http.StatusOK, completed.Code, completed.Body.String())
+	var envelope struct {
+		Data metadataHTTPOwnerPage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(completed.Body.Bytes(), &envelope))
+	require.Len(t, envelope.Data.Owners, 1, "the admitted page completed from its pinned catalog")
+	require.Equal(t, first.SnapshotID, envelope.Data.SnapshotID)
+
+	snapshot := store.metadataSnapshots.snapshots[first.SnapshotID]
+	snapshot.mu.Lock()
+	require.Nil(t, snapshot.catalog, "the cloned catalog is released after the last admitted reader")
+	snapshot.mu.Unlock()
+}
+
+func metadataHTTPTestEncodeEnvelope(t *testing.T, envelope metadataCursorEnvelope) string {
+	t.Helper()
+	raw, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func TestMetadataCursorValidationPrecedence(t *testing.T) {
+	store, handler := metadataHTTPTestStore(t, StorageOptions{DisableWAL: true})
+	metadataHTTPTestPinOwners(t, store, 3)
+	first := metadataHTTPReadOwnerPage(t, metadataHTTPGet(t, handler, "/resources?limit=1&start=0&end=1"))
+	require.NotNil(t, first.NextToken)
+	validPath := "/resources?limit=1&start=0&end=1&next_token="
+	valid := metadataHTTPTestDecodeCursor(t, *first.NextToken)
+
+	badPosition := valid
+	badPosition.Position = json.RawMessage(`{}`)
+	metadataHTTPRequireError(t, metadataHTTPGet(t, handler,
+		validPath+url.QueryEscape(metadataHTTPTestEncodeEnvelope(t, metadataCursorEnvelope{metadataCursorSigned: badPosition, Signature: "00"}))),
+		400, "metadata_cursor_corrupt")
+
+	unsupported := valid
+	unsupported.Version = 2
+	unsupported.Position = json.RawMessage(`{}`)
+	metadataHTTPRequireError(t, metadataHTTPGet(t, handler,
+		validPath+url.QueryEscape(metadataHTTPTestEncodeEnvelope(t, metadataCursorEnvelope{metadataCursorSigned: unsupported, Signature: "00"}))),
+		400, "metadata_cursor_version_unsupported")
+
+	badHMAC := valid
+	metadataHTTPRequireError(t, metadataHTTPGet(t, handler,
+		validPath+url.QueryEscape(metadataHTTPTestEncodeEnvelope(t, metadataCursorEnvelope{metadataCursorSigned: badHMAC, Signature: "00"}))),
+		400, "metadata_cursor_corrupt")
+
+	unknown := valid
+	unknown.Snapshot = "unknown-snapshot"
+	unknownToken := metadataHTTPTestSignCursor(t, store, unknown)
+	metadataHTTPRequireError(t, metadataHTTPGet(t, handler, validPath+url.QueryEscape(unknownToken)),
+		404, "metadata_snapshot_unknown")
+
+	// A structurally valid token from a foreign incarnation is classified as
+	// store_restarted before the HMAC is checked, because the old key is not
+	// retained. This is a lifecycle classification, not old-token authentication.
+	foreign := valid
+	foreign.Incarnation = "foreign-incarnation"
+	metadataHTTPRequireError(t, metadataHTTPGet(t, handler,
+		validPath+url.QueryEscape(metadataHTTPTestEncodeEnvelope(t, metadataCursorEnvelope{metadataCursorSigned: foreign, Signature: "00"}))),
+		410, "metadata_snapshot_reclaimed")
+
+	// Malformed envelope/base64 are rejected before any semantic classification.
+	metadataHTTPRequireError(t, metadataHTTPGet(t, handler, validPath+url.QueryEscape("!!!")), 400, "metadata_cursor_malformed")
+	metadataHTTPRequireError(t, metadataHTTPGet(t, handler,
+		validPath+url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte(`not-json`)))),
+		400, "metadata_cursor_malformed")
+}
+
+func TestMetadataHTTPCombinedMissingResourceComponent(t *testing.T) {
+	store, handler := metadataHTTPTestStore(t, StorageOptions{DisableWAL: true})
+	owner := metadataHTTPTestResourceOwner("combined-scope")
+	series := metadataHTTPTestSeries("combined_scope_total", "scope", owner)
+	// Only a Scope association exists: the series has no original Resource
+	// component, so the combined group may not claim covered context.
+	metadataHTTPTestAssociate(t, store, series, ScopeOwner("sdk", "v1"), map[string]string{"name": "scope"}, 100)
+
+	recorder := metadataHTTPGet(t, handler,
+		"/resources/series?view=combined&kind=scope&match%5B%5D=%7B__name__%3D%22combined_scope_total%22%7D&start=0&end=1")
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var envelope struct {
+		Data metadataHTTPGroupPage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &envelope))
+	require.Len(t, envelope.Data.Groups, 1)
+	group := envelope.Data.Groups[0]
+	require.Empty(t, group.Components)
+	require.Equal(t, "unknown", group.Coverage.State)
+	require.Equal(t, "combined", group.Coverage.Scope)
+	require.Equal(t, []string{"no_resource_component"}, group.Coverage.Reasons)
+	require.Len(t, envelope.Data.Annotations, 1)
+	annotation := envelope.Data.Annotations[0]
+	require.Equal(t, "combined", annotation["scope"])
+	require.Equal(t, "unknown", annotation["state"])
+	require.Equal(t, "no_resource_component", annotation["reason"])
+	require.Equal(t, "0", annotation["requested"].(map[string]any)["from_ms"])
+}
+
+func TestMetadataHTTPCombinedSufficientRetainedRange(t *testing.T) {
+	store, handler := metadataHTTPTestStore(t, StorageOptions{DisableWAL: true, MetadataVersionCap: 2})
+	owner := metadataHTTPTestResourceOwner("combined-retained")
+	series := metadataHTTPTestSeries("combined_retained_total", "retained", owner)
+	for _, effective := range []int64{100, 200, 300} {
+		require.NoError(t, store.MetadataUpdate(Update{
+			Owner: owner, EffectiveFrom: effective,
+			Content: Content{Attributes: map[string]string{"k": itoa(int(effective))}},
+		}))
+	}
+	metadataHTTPTestAssociate(t, store, series, owner, map[string]string{"k": "300"}, 300)
+
+	recorder := metadataHTTPGet(t, handler,
+		"/resources/series?view=combined&kind=resource&match%5B%5D=%7B__name__%3D%22combined_retained_total%22%7D&start=0.2&end=1")
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var envelope struct {
+		Data metadataHTTPGroupPage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &envelope))
+	require.Len(t, envelope.Data.Groups, 1)
+	group := envelope.Data.Groups[0]
+	require.Len(t, group.Components, 1)
+	require.Equal(t, "covered", group.Coverage.State, "retained evidence suffices for a query starting at 200")
+	require.Empty(t, envelope.Data.Annotations)
 }
