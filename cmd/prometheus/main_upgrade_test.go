@@ -298,6 +298,24 @@ func ensureHealthyLogs(t testing.TB, r io.Reader) {
 	require.NoError(t, scanner.Err())
 }
 
+// ensureHealthyLTSLogs is ensureHealthyLogs for LTS releases, tolerating the
+// error that releases without https://github.com/prometheus/prometheus/pull/20520
+// log when shutdown cancels an in-flight compaction.
+// TODO: Remove once every active LTS release includes that fix.
+func ensureHealthyLTSLogs(t testing.TB, r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		t.Log(line)
+		// Matches both "compaction failed" and "immediate stale series compaction failed".
+		if strings.Contains(line, `compaction failed"`) && strings.Contains(line, "context canceled") {
+			continue
+		}
+		require.NotContains(t, line, "level=ERROR")
+	}
+	require.NoError(t, scanner.Err())
+}
+
 var (
 	testVersionUpgrade = flag.Bool("test.version-upgrade", false, "run resource-intensive and probably slow version upgrade tests")
 	testLTSVersion     = flag.String("test.lts-version", "", "restrict the version upgrade test to a single LTS version (e.g. 3.5.0); if empty, all active LTS releases are tested")
@@ -387,7 +405,7 @@ func testUpgradeDowngradeLTS(t *testing.T, start time.Time, lts ltsRelease) {
 	)
 
 	t.Run("Running the LTS version", func(t *testing.T) {
-		cmd := commandWithLogging(t, ensureHealthyLogs, runLTS[0], runLTS[1:]...)
+		cmd := commandWithLogging(t, ensureHealthyLTSLogs, runLTS[0], runLTS[1:]...)
 		require.NoError(t, cmd.Start())
 		c.ensureHealthyMetrics(t)
 		queryRangeSnapshotEnd = time.Now().Add(-3 * time.Second)
@@ -405,7 +423,7 @@ func testUpgradeDowngradeLTS(t *testing.T, start time.Time, lts ltsRelease) {
 	})
 
 	t.Run("Downgrading to the LTS version", func(t *testing.T) {
-		cmd := commandWithLogging(t, ensureHealthyLogs, runLTS[0], runLTS[1:]...)
+		cmd := commandWithLogging(t, ensureHealthyLTSLogs, runLTS[0], runLTS[1:]...)
 		require.NoError(t, cmd.Start())
 		c.ensureHealthyMetrics(t)
 		require.Equal(t, queryRangeBaseline, c.snapshotQueryRange(t, queryRangeSnapshotEnd))
